@@ -1,0 +1,99 @@
+# ============================================================
+#  鲸鱼机器人开源版 .gitignore
+#  原则：代码与模板入库，一切「这台机器上跑出来的东西」不入库
+# ============================================================
+
+# ---------- 1. 本机私密配置（最重要） ----------
+config.json
+config.local.json
+config.*.json
+!config.example.json
+*.pem
+*.key
+*.pfx
+.env
+.env.*
+!*.env.example
+
+# ---------- 2. 她的一切生活记录（绝不入库） ----------
+# 聊天归档：真实群聊/私聊逐条记录，含群友 QQ 号
+home/archive/
+home/档案/
+home/日记/
+home/想法/
+# 五层记忆库与向量记忆索引
+home/memory/store.json
+home/memory/store.json.*
+home/memory/vectors/
+home/memory/_dump.json
+home/memory/download-base.log
+home/memory/migrated/
+# 运行时状态（心情、作息、日程、待发件箱）
+home/state/
+home/state.json
+home/name-egg.json
+home/notes.json
+home/outbox.json
+home/reminders.json
+home/group-open.json
+home/stateless.flag
+home/screens/
+home/tmp/
+# 暂停开关、DSH 主会话同步过来的原话（高度私密）
+home/pause.json
+home/sync-from-dsh.md
+home/memes/
+
+# ---------- 3. 依赖与模型（太大） ----------
+node_modules/
+.npm-cache/
+home/memory/node_modules/
+home/memory/.npm-cache/
+home/models/
+home/media/
+# 语音合成产物与临时文件（say-voice.py 例外，要入库）
+home/voice/tmp/
+home/voice/*.mp3
+home/voice/*.wav
+home/voice/*.silk
+home/voice/voice-config.json
+!home/voice/say-voice.py
+
+# ---------- 4. 运行产物与日志 ----------
+logs/
+runtime/
+backup/
+home/backup/
+*.log
+*.pid
+
+# ---------- 5. 媒体与大件（体积/隐私） ----------
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.mp4
+*.mp3
+*.wav
+*.zip
+*.7z
+*.tar
+*.tar.gz
+# 唯一例外：面板图标
+!panel/image/*.ico
+
+# ---------- 6. 临时文件与草稿 ----------
+.tmp*
+*.bak
+*.bak-*
+*.bak2-*
+*.swp
+.dsh-ops-update-*
+home/.sandbox-probe.txt
+home/_dry-ownthing.txt
+
+# ---------- 7. 系统 ----------
+Thumbs.db
+desktop.ini
+.DS_Store

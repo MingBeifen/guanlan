@@ -1,0 +1,2449 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link
+      rel="icon"
+      type="image/x-icon"
+      href="/image/DeepSeekHarness-WhaleGirl.ico"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>鲸鱼控制台</title>
+    <style>
+      :root {
+        --bg: #0a0d13;
+        --panel: #111721;
+        --panel2: #0d131b;
+        --line: #1f2836;
+        --line2: #2a3547;
+        --text: #e8eef7;
+        --dim: #8b96a8;
+        --dim2: #5f6b7d;
+        --ok: #3fb950;
+        --bad: #f85149;
+        --warn: #d29922;
+        --accent: #4c9aff;
+        --accent2: #7c5cff;
+        --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: radial-gradient(
+            1200px 600px at 10% -10%,
+            #101a2b 0%,
+            var(--bg) 60%
+          )
+          fixed;
+        color: var(--text);
+        font:
+          14px/1.65 "Microsoft YaHei",
+          system-ui,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #26303f;
+        border-radius: 6px;
+        border: 2px solid transparent;
+        background-clip: content-box;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #334155;
+        background-clip: content-box;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 224px minmax(0, 1fr);
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      /* ---------- 侧边栏 ---------- */
+      .side {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: linear-gradient(180deg, #0e1520, #0a0e15);
+        border-right: 1px solid var(--line);
+      }
+      .brand {
+        display: flex;
+        gap: 11px;
+        align-items: center;
+        padding: 20px 16px 18px;
+      }
+      .logo {
+        width: 36px;
+        height: 36px;
+        border-radius: 11px;
+        display: grid;
+        place-items: center;
+        font-size: 17px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(140deg, #2f7cf6, #7c5cff);
+        box-shadow: 0 6px 18px rgba(76, 154, 255, 0.28);
+      }
+      .brand-t b {
+        display: block;
+        font-size: 14.5px;
+        letter-spacing: 0.3px;
+      }
+      .brand-t span {
+        display: block;
+        font-size: 11px;
+        color: var(--dim2);
+        margin-top: 1px;
+      }
+
+      .nav {
+        padding: 6px 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        flex: 1;
+      }
+      .navi {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 11px;
+        border-radius: 9px;
+        color: var(--dim);
+        text-decoration: none;
+        font-size: 13.5px;
+        border: 1px solid transparent;
+        transition:
+          background 0.15s,
+          color 0.15s;
+      }
+      .navi .ic {
+        width: 17px;
+        height: 17px;
+        flex: none;
+        opacity: 0.85;
+      }
+      .navi:hover {
+        background: #131c28;
+        color: #cfd9e6;
+      }
+      .navi.on {
+        background: linear-gradient(
+          90deg,
+          rgba(76, 154, 255, 0.16),
+          rgba(76, 154, 255, 0.04)
+        );
+        color: #dbeaff;
+        border-color: #1d3a5c;
+      }
+      .navi.on .ic {
+        opacity: 1;
+        color: var(--accent);
+      }
+      .navi .badge {
+        margin-left: auto;
+        font-size: 10.5px;
+        font-family: var(--mono);
+        color: var(--accent);
+        background: rgba(76, 154, 255, 0.13);
+        border: 1px solid #1d3a5c;
+        border-radius: 20px;
+        padding: 0 7px;
+        line-height: 17px;
+      }
+      .navi .badge.hide {
+        display: none;
+      }
+      .navi .badge.live {
+        color: var(--ok);
+        border-color: #1e4a2a;
+        background: rgba(63, 185, 80, 0.12);
+      }
+
+      .foot {
+        padding: 12px 16px 16px;
+        border-top: 1px solid var(--line);
+      }
+      .foot-state {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12.5px;
+      }
+      .foot-up {
+        font-size: 11px;
+        color: var(--dim2);
+        margin-top: 3px;
+        font-family: var(--mono);
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #5f6b7d;
+        display: inline-block;
+        flex: none;
+      }
+      .dot.on {
+        background: var(--ok);
+        box-shadow:
+          0 0 0 3px rgba(63, 185, 80, 0.14),
+          0 0 10px rgba(63, 185, 80, 0.5);
+      }
+
+      /* ---------- 主区 ---------- */
+      .main {
+        min-width: 0;
+        padding: 22px 26px 18px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .main > .top {
+        flex: none;
+      }
+      .top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 18px;
+        flex-wrap: wrap;
+      }
+      .top h2 {
+        font-size: 19px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: 0.2px;
+      }
+      .top p {
+        margin: 3px 0 0;
+        font-size: 12px;
+        color: var(--dim2);
+      }
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        background: #161e2a;
+        color: #cfd9e6;
+        border: 1px solid var(--line2);
+        border-radius: 8px;
+        padding: 6px 13px;
+        font-size: 12.5px;
+        cursor: pointer;
+        transition:
+          border-color 0.15s,
+          background 0.15s,
+          transform 0.05s;
+      }
+      .btn:hover {
+        border-color: #3a4b63;
+        background: #1a2434;
+      }
+      .btn:active {
+        transform: translateY(1px);
+      }
+      .btn.primary {
+        background: linear-gradient(180deg, #2f7cf6, #2563eb);
+        border-color: #2f7cf6;
+        color: #fff;
+      }
+      .btn.primary:hover {
+        background: linear-gradient(180deg, #3d87ff, #2f6ef0);
+      }
+      .btn.danger {
+        color: #ff8b84;
+      }
+      .btn.danger:hover {
+        border-color: #5c2b2b;
+        background: #1d1517;
+      }
+
+      .view {
+        display: none;
+        animation: fade 0.18s ease-out;
+      }
+      .view.on {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      /* 铺满型视图：卡片收死高度、自己不滚，里面的滚动区各滚各的 */
+      .view.on > .card {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        margin-bottom: 0;
+        overflow: hidden;
+      }
+      .view.on > .card > .card-h {
+        flex: none;
+      }
+      /* 普通流式视图：整块滚动 */
+      .view.on.scrolly {
+        display: block;
+        overflow: auto;
+        padding-right: 6px;
+      }
+      .view.on.scrolly > .card {
+        overflow: visible;
+      }
+      @keyframes fade {
+        from {
+          opacity: 0;
+          transform: translateY(3px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      .card {
+        background: linear-gradient(180deg, var(--panel), var(--panel2));
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px 18px;
+        margin-bottom: 14px;
+      }
+      .card-h {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+      .card-h b {
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+      .card-h span.hint {
+        font-size: 11.5px;
+        color: var(--dim2);
+      }
+
+      /* 概览 */
+      .hero {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        align-items: flex-end;
+        flex-wrap: wrap;
+        padding: 20px 22px;
+        border-radius: 14px;
+        border: 1px solid #1b2b40;
+        margin-bottom: 14px;
+        background:
+          radial-gradient(
+            600px 200px at 0% 0%,
+            rgba(76, 154, 255, 0.14),
+            transparent 70%
+          ),
+          linear-gradient(180deg, #101a28, #0c121b);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        padding: 3px 11px 3px 9px;
+        border-radius: 20px;
+        border: 1px solid #2a3547;
+        color: var(--dim);
+        background: #0d141d;
+      }
+      .pill.on {
+        color: #a6e3b2;
+        border-color: #1e4a2a;
+        background: rgba(63, 185, 80, 0.08);
+      }
+      .hero-name {
+        font-size: 24px;
+        font-weight: 600;
+        margin: 10px 0 2px;
+        letter-spacing: 0.4px;
+      }
+      .hero-sub {
+        font-size: 12.5px;
+        color: var(--dim);
+        font-family: var(--mono);
+      }
+      .hero-r {
+        display: flex;
+        gap: 28px;
+        flex-wrap: wrap;
+      }
+      .stat span {
+        display: block;
+        font-size: 11px;
+        color: var(--dim2);
+      }
+      .stat b {
+        display: block;
+        font-size: 13.5px;
+        font-weight: 500;
+        margin-top: 3px;
+        font-family: var(--mono);
+      }
+      /* 她的作息：睡着用紫、醒着用绿，一眼能分出来 */
+      .stat b.zzz {
+        color: var(--accent2);
+      }
+      .stat b.awake {
+        color: var(--ok);
+      }
+
+      .grid3 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .kv {
+        background: #0e141d;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 13px;
+      }
+      .kv span {
+        font-size: 11px;
+        color: var(--dim2);
+        display: block;
+      }
+      .kv b {
+        display: block;
+        font-size: 13px;
+        font-weight: 500;
+        margin-top: 3px;
+        word-break: break-all;
+      }
+
+      /* 任务进度 */
+      .prog {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .pitem {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        padding: 11px 13px;
+        border-radius: 10px;
+        background: #0e1a24;
+        border: 1px solid #1c3a52;
+      }
+      .pitem .spin {
+        width: 9px;
+        height: 9px;
+        margin-top: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+        flex: none;
+        box-shadow: 0 0 0 3px rgba(76, 154, 255, 0.12);
+        animation: pulse 1.4s infinite;
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.35;
+        }
+      }
+      .pitem .pt {
+        font-size: 13px;
+      }
+      .pitem .pd {
+        font-size: 11.5px;
+        color: var(--dim);
+        margin-top: 2px;
+        font-family: var(--mono);
+      }
+      .chips {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 6px;
+      }
+      .chip {
+        font-size: 11px;
+        font-family: var(--mono);
+        color: #9fb3c8;
+        background: #111c27;
+        border: 1px solid #22303f;
+        border-radius: 20px;
+        padding: 1px 9px;
+      }
+      .chip.tool {
+        color: #9ecbff;
+        border-color: #1e3f61;
+        background: #0f1b28;
+      }
+
+      .turns {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      .turns th {
+        text-align: left;
+        font-weight: 500;
+        font-size: 11px;
+        color: var(--dim2);
+        padding: 0 8px 6px;
+        border-bottom: 1px solid var(--line);
+      }
+      .turns td {
+        padding: 7px 8px;
+        border-bottom: 1px solid #161d28;
+        color: #c9d4e1;
+      }
+      .turns tr:last-child td {
+        border-bottom: none;
+      }
+      .turns td.n {
+        font-family: var(--mono);
+        color: var(--dim);
+      }
+      .turns .ok {
+        color: var(--ok);
+      }
+      .turns .bad {
+        color: var(--bad);
+      }
+      .kind {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: #a8b6c9;
+        background: #131b26;
+        border: 1px solid #22303f;
+        border-radius: 5px;
+        padding: 1px 7px;
+      }
+
+      /* 概览底部的两块小卡 */
+      .grid2 {
+        display: grid;
+        grid-template-columns: 1.1fr 1fr;
+        gap: 14px;
+      }
+      @media (max-width: 1040px) {
+        .grid2 {
+          grid-template-columns: 1fr;
+        }
+      }
+      .grid2 .card {
+        margin: 0;
+      }
+      .mini-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .mini-list .mrow {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        font-size: 12.5px;
+        padding: 6px 2px;
+        border-bottom: 1px solid #161d28;
+      }
+      .mini-list .mrow:last-child {
+        border-bottom: none;
+      }
+      .mini-list .mtime {
+        font-family: var(--mono);
+        color: var(--dim2);
+        font-size: 11.5px;
+      }
+      .mini-list .mdur {
+        margin-left: auto;
+        font-family: var(--mono);
+        color: var(--dim);
+        font-size: 11.5px;
+      }
+      pre.log.mini {
+        height: 236px;
+        min-height: 0;
+        font-size: 11.5px;
+        padding: 10px 12px;
+      }
+
+      /* 会话回放 */
+      #view-sessions .card {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 0;
+      }
+      .sess {
+        display: grid;
+        grid-template-columns: 268px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        gap: 14px;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+      }
+      @media (max-width: 900px) {
+        .app {
+          height: auto;
+          overflow: visible;
+        }
+        .main {
+          overflow: visible;
+        }
+        .view.on,
+        .view.on.scrolly {
+          display: block;
+          overflow: visible;
+        }
+        .view.on > .card {
+          overflow: visible;
+        }
+        .sess {
+          grid-template-columns: 1fr;
+          grid-template-rows: none;
+          height: auto;
+          overflow: visible;
+        }
+        #view-sessions .card {
+          height: auto;
+        }
+        .chat {
+          height: 520px;
+        }
+      }
+      .list {
+        height: 100%;
+        overflow: auto;
+        background: #0b1119;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 6px;
+      }
+      .item {
+        padding: 8px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+        border: 1px solid transparent;
+        margin-bottom: 2px;
+        transition: background 0.15s;
+      }
+      .item:hover {
+        background: #121b26;
+      }
+      .item.on {
+        background: #132030;
+        border-color: #22405e;
+      }
+      .item .t {
+        font-size: 12.5px;
+        line-height: 1.45;
+        color: #cfd9e6;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .item .m {
+        font-size: 11px;
+        color: var(--dim2);
+        margin-top: 3px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-family: var(--mono);
+      }
+      .item .live {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 6px rgba(63, 185, 80, 0.7);
+      }
+
+      .pane {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .pane-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        margin: 0 2px 8px;
+        flex-wrap: wrap;
+      }
+      .pane-head b {
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+      .chat {
+        flex: 1;
+        min-height: 0;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #0b1119;
+        padding: 14px 16px;
+        overflow: auto;
+        font-size: 13px;
+        line-height: 1.65;
+      }
+
+      .r {
+        margin: 12px 0;
+      }
+      .bubble {
+        position: relative;
+        padding: 9px 13px;
+        border-radius: 12px;
+        max-width: 88%;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .who {
+        font-size: 11px;
+        color: var(--dim2);
+        margin: 0 4px 4px;
+      }
+      .u {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+      }
+      .u .bubble {
+        background: #12314d;
+        border: 1px solid #1c4a72;
+        color: #dcefff;
+        border-bottom-right-radius: 3px;
+      }
+      .u .who {
+        text-align: right;
+      }
+      .a {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .a .bubble {
+        background: #151d28;
+        border: 1px solid #232e3d;
+        border-bottom-left-radius: 3px;
+      }
+      /* 折叠：行数限制挂在气泡内层 span 上（不挂在气泡上，否则 max-height 会被
+         padding/border 吃掉、露出半行），正好两行、末尾带省略号 */
+      .bubble.clamp .bt {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .bubble.clamp.open .bt {
+        display: block;
+        -webkit-line-clamp: unset;
+        overflow: visible;
+      }
+      .more {
+        background: none;
+        border: none;
+        border-top: 1px dashed #263041;
+        color: var(--accent);
+        font-size: 11px;
+        padding: 3px 4px 0;
+        margin-top: 3px;
+        cursor: pointer;
+        align-self: stretch;
+        text-align: left;
+      }
+      .u .more {
+        text-align: right;
+      }
+      .more:hover {
+        text-decoration: underline;
+      }
+
+      .think {
+        margin: 10px 2px;
+        padding-left: 10px;
+        border-left: 2px solid #263041;
+        color: #7d8797;
+        font-size: 12px;
+      }
+      .think summary {
+        cursor: pointer;
+        color: var(--dim2);
+      }
+      .think .body {
+        margin-top: 6px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .tool {
+        margin: 9px 0;
+        background: #0e141c;
+        border: 1px solid #202a37;
+        border-radius: 9px;
+      }
+      .tool summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 7px 11px;
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        min-width: 0;
+      }
+      .tool summary::-webkit-details-marker {
+        display: none;
+      }
+      .tool .nm {
+        color: #7cc0ff;
+        font-weight: 600;
+        white-space: nowrap;
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+      .tool .ar {
+        color: var(--dim2);
+        font-family: var(--mono);
+        font-size: 11.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1 1 0;
+        min-width: 0;
+      }
+      .tool .st {
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .tool .body {
+        padding: 0 11px 10px;
+      }
+      .tool .args {
+        color: var(--dim);
+        font-family: var(--mono);
+        font-size: 11.5px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        margin: 2px 0 6px;
+      }
+      .tool .res {
+        max-height: 260px;
+        overflow: auto;
+        background: #080c11;
+        border: 1px solid #1a222d;
+        border-radius: 6px;
+        padding: 8px 10px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: #a8b3c0;
+      }
+
+      .sep {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--dim2);
+        font-size: 11px;
+        margin: 18px 0 12px;
+      }
+      .sep::before,
+      .sep::after {
+        content: "";
+        height: 1px;
+        background: #1a222d;
+        flex: 1;
+      }
+      .todo {
+        background: #0e141c;
+        border: 1px solid #202a37;
+        border-radius: 9px;
+        padding: 9px 12px;
+        color: #c9d4e1;
+        font-size: 12.5px;
+        white-space: pre-wrap;
+      }
+
+      /* 记忆 */
+      #view-memory .mem {
+        display: grid;
+        grid-template-columns: 400px minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        gap: 14px;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+      }
+      @media (max-width: 1000px) {
+        #view-memory .mem {
+          grid-template-columns: 1fr;
+          grid-template-rows: none;
+          height: auto;
+          overflow: visible;
+        }
+        .mem-left .list {
+          height: 420px;
+        }
+      }
+      .mem-left,
+      .mem-right {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+        margin-bottom: 0;
+      }
+      .mem-tools {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .mem-tools input {
+        flex: 1 1 150px;
+        min-width: 0;
+        background: #0b1119;
+        color: var(--text);
+        border: 1px solid var(--line2);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font-size: 12.5px;
+      }
+      .mem-tabs {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .mem-tabs a {
+        font-size: 12px;
+        color: var(--dim);
+        border: 1px solid var(--line);
+        background: #0c1219;
+        border-radius: 20px;
+        padding: 2px 11px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .mem-tabs a:hover {
+        color: #cfd9e6;
+        border-color: #33475f;
+      }
+      .mem-tabs a.on {
+        color: #dbeaff;
+        border-color: #1d3a5c;
+        background: rgba(76, 154, 255, 0.14);
+      }
+      .mem-left .list {
+        flex: 1;
+        min-height: 0;
+      }
+      .mrow2 {
+        padding: 9px 10px;
+        border-radius: 8px;
+        cursor: pointer;
+        border: 1px solid transparent;
+        margin-bottom: 3px;
+      }
+      /* 转发口列表的行：左边一堆字、右边一个按钮，不能像记忆行那样上下堆 */
+      .gwrow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .gwrow > div:first-child {
+        flex: 1;
+        min-width: 0;
+      }
+      .gwrow button {
+        flex: none;
+      }
+      .mrow2:hover {
+        background: #121b26;
+      }
+      .mrow2.on {
+        background: #132030;
+        border-color: #22405e;
+      }
+      .mrow2 .mt {
+        font-size: 12.5px;
+        line-height: 1.5;
+        color: #cfd9e6;
+        white-space: pre-wrap;
+        word-break: break-word;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .mrow2 .mm {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        align-items: center;
+        margin-top: 4px;
+        font-size: 10.5px;
+        color: var(--dim2);
+        font-family: var(--mono);
+      }
+      .mrow2 .mm > * {
+        white-space: nowrap;
+      }
+      .sc {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        border-radius: 20px;
+        padding: 0 7px;
+        line-height: 16px;
+        border: 1px solid;
+      }
+      .sc.core {
+        color: #f0c674;
+        border-color: #5c4a1f;
+        background: rgba(240, 198, 116, 0.1);
+      }
+      .sc.long {
+        color: #9ecbff;
+        border-color: #1e3f61;
+        background: rgba(76, 154, 255, 0.08);
+      }
+      .sc.mid {
+        color: #a6e3b2;
+        border-color: #1e4a2a;
+        background: rgba(63, 185, 80, 0.08);
+      }
+      .sc.short {
+        color: #b8c3d1;
+        border-color: #2a3547;
+        background: #131b26;
+      }
+      .sc.cold {
+        color: #6b7789;
+        border-color: #242d3a;
+        background: #0e141c;
+      }
+      .mem-right {
+        overflow: auto;
+      }
+      .fl {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        font-size: 12px;
+        color: var(--dim);
+        margin-bottom: 10px;
+      }
+      .fl textarea,
+      .fl input,
+      .fl select {
+        background: #0b1119;
+        color: var(--text);
+        border: 1px solid var(--line2);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font:
+          13px/1.6 "Microsoft YaHei",
+          system-ui,
+          sans-serif;
+      }
+      .fl textarea {
+        resize: vertical;
+        min-height: 96px;
+      }
+      .fl textarea.tall {
+        min-height: 240px;
+        line-height: 1.7;
+      }
+      .fgrid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .frow {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .wblock {
+        margin-bottom: 10px;
+      }
+      .wblock b {
+        font-size: 12px;
+        color: #9fb3c8;
+      }
+      .wblock pre {
+        margin: 4px 0 0;
+        background: #080c11;
+        border: 1px solid #1a222d;
+        border-radius: 8px;
+        padding: 9px 11px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: #a8b3c0;
+        max-height: 260px;
+        overflow: auto;
+      }
+
+      /* 日志 */
+      pre.log {
+        background: #080c11;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 13px 14px;
+        font-size: 12px;
+        line-height: 1.55;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        color: #b8c3d1;
+        font-family: var(--mono);
+      }
+
+      .msg {
+        font-size: 12px;
+        color: var(--dim2);
+        min-height: 16px;
+      }
+      .empty {
+        font-size: 12.5px;
+        color: var(--dim2);
+        padding: 6px 2px;
+      }
+      .toggle {
+        font-size: 12px;
+        color: var(--dim);
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .toggle input {
+        accent-color: #2f7cf6;
+      }
+      select {
+        background: #0b1119;
+        color: var(--text);
+        border: 1px solid var(--line2);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="side">
+        <div class="brand">
+          <div class="logo">鲸</div>
+          <div class="brand-t">
+            <b>鲸鱼控制台</b><span>127.0.0.1 · 只对本机开放</span>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="navi on" href="#overview" data-view="overview">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M3 12h3.5l2.5 7 4-14 2.5 7H21" />
+            </svg>
+            概览</a
+          >
+          <a class="navi" href="#model" data-view="model">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="4" y="7" width="16" height="10" rx="2" />
+              <path d="M8 7V4M16 7V4M8 20v-3M16 20v-3M9 11h6" />
+            </svg>
+            模型</a
+          >
+          <a class="navi" href="#progress" data-view="progress">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="8.5" />
+              <path d="M12 7.5V12l3 2" />
+            </svg>
+            任务进度<span class="badge hide" id="navProgress"></span
+          ></a>
+          <a class="navi" href="#sessions" data-view="sessions">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M4 5.5h16v10.5H9.5L5 20V5.5z" />
+              <path d="M8 9h8M8 12.5h5" />
+            </svg>
+            会话记录</a
+          >
+          <a class="navi" href="#memory" data-view="memory">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path
+                d="M9 4.5a3 3 0 0 0-3 3v1a2.5 2.5 0 0 0 0 5v1a3 3 0 0 0 3 3h1v1.5h4V16.5h1a3 3 0 0 0 3-3v-1a2.5 2.5 0 0 0 0-5v-1a3 3 0 0 0-3-3H9z"
+              />
+              <path d="M12 9.5v5" />
+            </svg>
+            记忆</a
+          >
+          <a class="navi" href="#logs" data-view="logs">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 4h14v16H5z" />
+              <path d="M8.5 8h7M8.5 12h7M8.5 16h4" />
+            </svg>
+            日志</a
+          >
+        </nav>
+        <div class="foot">
+          <div class="foot-state">
+            <span class="dot" id="dot"></span><span id="state">读取中…</span>
+          </div>
+          <div class="foot-up" id="footUp">—</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="top">
+          <div>
+            <h2 id="vTitle">概览</h2>
+            <p id="vSub">她这会儿在不在跑、进程、基本信息。</p>
+          </div>
+          <div class="top-actions">
+            <span class="msg" id="msg"></span>
+            <button class="btn primary" onclick="act('start')">启动</button>
+            <button class="btn" onclick="act('restart')">重启</button>
+            <button class="btn danger" onclick="act('stop')">停止</button>
+          </div>
+        </header>
+
+        <!-- 概览 -->
+        <section class="view on scrolly" id="view-overview">
+          <div class="hero">
+            <div>
+              <span class="pill" id="heroPill"
+                ><span class="dot"></span
+                ><span id="heroState">读取中…</span></span
+              >
+              <div class="hero-name" id="name">-</div>
+              <div class="hero-sub" id="qq">-</div>
+            </div>
+            <div class="hero-r">
+              <div class="stat">
+                <span>作息</span><b id="sleepState">-</b>
+              </div>
+              <div class="stat"><span>模型</span><b id="model">-</b></div>
+              <div class="stat"><span>已运行</span><b id="uptime">-</b></div>
+              <div class="stat"><span>进程</span><b id="pids">-</b></div>
+            </div>
+          </div>
+          <div class="grid3">
+            <div class="kv"><span>能指挥它的人</span><b id="owners">-</b></div>
+            <div class="kv"><span>群聊</span><b id="group">-</b></div>
+            <div class="kv"><span>用的模型配置</span><b id="model2">-</b></div>
+            <div class="kv"><span>她的作息</span><b id="sleepDetail">-</b></div>
+          </div>
+          <div class="grid2">
+            <div class="card">
+              <div class="card-h">
+                <b>最近跑完的</b><span class="hint">看全部去「任务进度」</span>
+              </div>
+              <div class="mini-list" id="ovRecent">
+                <div class="empty">读取中…</div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-h">
+                <b>最近日志</b><span class="hint">最近 12 行</span>
+              </div>
+              <pre class="log mini" id="ovLog">-</pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- 模型 -->
+        <section class="view scrolly" id="view-model">
+          <div class="grid3">
+            <div class="kv"><span>名称</span><b id="mName">-</b></div>
+            <div class="kv"><span>模型 id</span><b id="mId">-</b></div>
+            <div class="kv"><span>接口地址</span><b id="mBase">-</b></div>
+            <div class="kv"><span>Key</span><b id="mKey">-</b></div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>换模型</b><span class="hint">换完自动重启，不动别的东西</span>
+            </div>
+            <div
+              style="
+                display: flex;
+                gap: 10px;
+                align-items: center;
+                flex-wrap: wrap;
+              "
+            >
+              <select id="models" style="min-width: 280px"></select>
+              <button class="btn primary" onclick="switchModel()">应用</button>
+              <span class="msg" id="mmsg"></span>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>兜底模型</b
+              ><span class="hint" id="fbHint">主模型调不动时自动顶上</span>
+            </div>
+            <div class="grid3">
+              <div class="kv"><span>兜底是谁</span><b id="fbName">-</b></div>
+              <div class="kv"><span>现在这轮用</span><b id="fbNow">-</b></div>
+              <div class="kv"><span>冷却剩余</span><b id="fbCool">-</b></div>
+            </div>
+            <p class="hint" style="margin: 8px 0 0">
+              免费车道限流、网关挂了、模型名不存在时，这一轮自动改用官方 DeepSeek Flash 重跑，答完就回主模型；
+              退过一次后进 5 分钟冷却，这段时间每轮直接用兜底，不再白等一轮。
+            </p>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>配置里的模型</b
+              ><span class="hint">点一下填进上面的选择框</span>
+            </div>
+            <div class="mini-list" id="modelList">
+              <div class="empty">读取中…</div>
+            </div>
+          </div>
+          <!-- 本地转发口：桌面 DSH 里 Our Free Model 挂的 OpenAI 兼容网关（第三方账号渠道都在这里） -->
+          <div class="card">
+            <div class="card-h">
+              <b>转发口模型</b><span class="hint" id="gwHint">读网关中…</span>
+            </div>
+            <div
+              style="
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                flex-wrap: wrap;
+                margin-bottom: 10px;
+              "
+            >
+              <span id="gwChips" style="display: flex; gap: 6px; flex-wrap: wrap"></span>
+              <input
+                id="gwQ"
+                placeholder="搜模型名"
+                style="min-width: 150px; flex: 1"
+                oninput="renderGateway()"
+              />
+              <button class="btn" onclick="loadGateway()">刷新</button>
+            </div>
+            <div
+              class="mini-list"
+              id="gwList"
+              style="max-height: 420px; overflow: auto"
+            >
+              <div class="empty">读取中…</div>
+            </div>
+            <div class="msg" id="gwMsg" style="margin-top: 8px"></div>
+            <div class="hint" style="margin-top: 8px; line-height: 1.7">
+              这个口子活在桌面 DSH 进程里，<b>桌面关了机器人就没模型</b>。工具调用能用，但换过来的模型跑 bash 会被沙箱拦（只剩 pwsh）。
+            </div>
+          </div>
+        </section>
+
+        <!-- 任务进度 -->
+        <section class="view scrolly" id="view-progress">
+          <div class="card">
+            <div class="card-h">
+              <b>正在跑</b><span class="hint">2 秒刷新</span>
+            </div>
+            <div class="prog" id="running">
+              <div class="empty">读取中…</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>最近跑完的</b><span class="hint">来自 logs\turns.jsonl</span>
+            </div>
+            <table class="turns">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>类型</th>
+                  <th>结果</th>
+                  <th>耗时</th>
+                  <th>步数</th>
+                  <th>字数</th>
+                </tr>
+              </thead>
+              <tbody id="recent">
+                <tr>
+                  <td colspan="6" class="empty">读取中…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 会话记录 -->
+        <section class="view" id="view-sessions">
+          <div class="card">
+            <div class="card-h">
+              <b>她在 dsh 里干了什么</b>
+              <span
+                style="
+                  display: flex;
+                  gap: 12px;
+                  align-items: center;
+                  flex-wrap: wrap;
+                "
+              >
+                <label class="toggle"
+                  ><input type="checkbox" id="live" checked /> 跟随</label
+                >
+                <label class="toggle"
+                  ><input type="checkbox" id="showThink" /> 思考</label
+                >
+                <label class="toggle"
+                  ><input type="checkbox" id="showTool" checked /> 工具</label
+                >
+                <button class="btn" onclick="loadSessions(true)">
+                  刷新列表
+                </button>
+              </span>
+            </div>
+            <div class="sess">
+              <div class="list" id="sessList">
+                <div class="empty" style="padding: 8px">正在读会话列表…</div>
+              </div>
+              <div class="pane">
+                <div class="pane-head">
+                  <b id="sessTitle">-</b><span class="msg" id="sessInfo"></span>
+                </div>
+                <div id="chat" class="chat">
+                  <div class="empty">选一个会话…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 记忆 -->
+        <section class="view" id="view-memory">
+          <div class="mem">
+            <div class="card mem-left">
+              <div class="card-h">
+                <b>记忆库</b><span class="hint" id="memStats">读取中…</span>
+              </div>
+              <div class="hint" id="memVec" style="margin: -4px 0 8px">
+                向量索引读取中…
+              </div>
+              <div class="mem-tools">
+                <input
+                  id="memQ"
+                  placeholder="搜内容 / 标签，回车"
+                  onkeydown="
+                    if (event.key === 'Enter') {
+                      memState.q = this.value;
+                      loadMemory();
+                    }
+                  "
+                />
+                <button class="btn" onclick="openMem(null)">＋ 新建</button>
+                <button
+                  class="btn"
+                  onclick="memDecay()"
+                  title="手动跑一次降分（平时每小时自动一次）"
+                >
+                  淡忘一次
+                </button>
+                <button
+                  class="btn"
+                  onclick="memReindex()"
+                  title="全量重建向量索引（几十秒，后台跑，不影响聊天）"
+                >
+                  重建索引
+                </button>
+              </div>
+              <div class="mem-tabs" id="memTabs">
+                <a data-layer="" class="on" onclick="memPick(this)">全部</a>
+                <a data-layer="core" onclick="memPick(this)">永久</a>
+                <a data-layer="long" onclick="memPick(this)">长期</a>
+                <a data-layer="mid" onclick="memPick(this)">中期</a>
+                <a data-layer="short" onclick="memPick(this)">短期</a>
+                <a data-layer="working" onclick="memPick(this)">工作记忆</a>
+                <a data-layer="cold" onclick="memPick(this)">冷藏</a>
+              </div>
+              <div class="list" id="memList">
+                <div class="empty" style="padding: 8px">正在读记忆库…</div>
+              </div>
+            </div>
+            <div class="card mem-right">
+              <div class="card-h">
+                <b id="memEditTitle">选一条记忆，或新建</b
+                ><span class="msg" id="memMsg"></span>
+              </div>
+              <div id="memEditor">
+                <label class="fl"
+                  >内容<textarea
+                    id="memText"
+                    class="tall"
+                    rows="9"
+                    placeholder="一句话说清，以后还用得上的事实"
+                  ></textarea>
+                </label>
+                <div class="fgrid">
+                  <label class="fl"
+                    >分数（决定进哪层）
+                    <input
+                      id="memScore"
+                      type="number"
+                      min="1"
+                      max="100"
+                      value="60"
+                      oninput="memScoreHint()"
+                    />
+                  </label>
+                  <label class="fl"
+                    >层
+                    <select id="memLayer">
+                      <option value="">按分数自动</option>
+                      <option value="core">永久</option>
+                      <option value="long">长期</option>
+                      <option value="mid">中期</option>
+                      <option value="short">短期</option>
+                    </select>
+                  </label>
+                  <label class="fl"
+                    >归属
+                    <select id="memKey">
+                      <option value="private:0">私聊（主人）</option>
+                      <option value="group:0">群（部署后自动填充）</option>
+                      <option value="shared">通用（所有会话）</option>
+                    </select>
+                  </label>
+                  <label class="fl"
+                    >关键词（空格/逗号分隔）
+                    <input id="memTags" placeholder="词1 词2" />
+                  </label>
+                </div>
+                <div class="frow">
+                  <label class="toggle"
+                    ><input type="checkbox" id="memPinned" />
+                    钉住（进永久，不淡忘）</label
+                  >
+                  <span class="msg" id="memHint"
+                    >按分数自动分层：≥88 永久 · 70–87 长期 · 45–69 中期 · 12–44
+                    短期 · 跌破 12 冷藏</span
+                  >
+                </div>
+                <div class="frow" style="margin-top: 12px">
+                  <button class="btn primary" onclick="saveMem()">保存</button>
+                  <button
+                    class="btn danger"
+                    id="memDel"
+                    onclick="delMem()"
+                    style="display: none"
+                  >
+                    删除
+                  </button>
+                  <button class="btn" onclick="openMem(null)">
+                    清空 / 新建
+                  </button>
+                  <span
+                    class="msg"
+                    id="memId"
+                    style="margin-left: auto; font-family: var(--mono)"
+                  ></span>
+                </div>
+              </div>
+              <div id="memWork" style="display: none"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 日志 -->
+        <section class="view" id="view-logs">
+          <div class="card" style="display: flex; flex-direction: column">
+            <div class="card-h">
+              <b>看门人日志</b><span class="hint">最近 80 行 · 3 秒刷新</span>
+            </div>
+            <pre class="log" id="log">-</pre>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const VIEWS = {
+        overview: ["概览", "她这会儿在不在跑、进程、基本信息。"],
+        model: ["模型", "换一个模型跑，换完会自动重启。"],
+        progress: ["任务进度", "每一轮跑到第几步、在用哪个工具。"],
+        sessions: ["会话记录", "和 dsh 里看到的是同一份会话，按轮次回放。"],
+        memory: ["记忆", "五层记忆、分数与淡忘；能查、能改、能增删。"],
+        logs: ["日志", "看门人最近写了什么。"],
+      };
+      let view = "overview";
+
+      const fmt = (ms) => {
+        if (!ms || ms < 0) return "-";
+        const s = Math.floor(ms / 1000),
+          m = Math.floor(s / 60),
+          h = Math.floor(m / 60);
+        return h
+          ? `${h} 小时 ${m % 60} 分`
+          : m
+            ? `${m} 分 ${s % 60} 秒`
+            : `${s} 秒`;
+      };
+      const fmtDur = (ms) => {
+        const s = Math.max(0, Math.round((ms || 0) / 1000));
+        return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+      };
+      const mask = (n) =>
+        String(n).length > 6
+          ? String(n).slice(0, 3) + "***" + String(n).slice(-2)
+          : String(n || "-");
+      const esc = (s) =>
+        String(s ?? "").replace(
+          /[&<>"]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+      const hhmm = (t) =>
+        new Date(t).toLocaleTimeString("zh-CN", {
+          hour12: false,
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+
+      /** GET 一个接口，直接拿 JSON。 */
+      async function apiGet(path) {
+        return (await fetch(path)).json();
+      }
+      /** POST 一个接口，payload 省略就发空 POST，直接拿 JSON。 */
+      async function apiPost(path, payload) {
+        return (
+          await fetch(path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload === undefined ? undefined : JSON.stringify(payload),
+          })
+        ).json();
+      }
+
+      function showView(name) {
+        if (!VIEWS[name]) name = "overview";
+        view = name;
+        for (const a of document.querySelectorAll(".navi"))
+          a.classList.toggle("on", a.dataset.view === name);
+        for (const s of document.querySelectorAll(".view"))
+          s.classList.toggle("on", s.id === "view-" + name);
+        $("vTitle").textContent = VIEWS[name][0];
+        $("vSub").textContent = VIEWS[name][1];
+        if (name === "sessions") loadSessions(true);
+        if (name === "progress") loadProgress();
+        if (name === "memory") loadMemory();
+        if (name === "model") loadGateway();
+        if (name === "overview") load();
+      }
+      function route() {
+        const h = (location.hash || "#overview").slice(1);
+        const [name, qs] = h.split("?");
+        if (qs) {
+          const p = new URLSearchParams(qs);
+          if (p.get("layer") !== null) memState.layer = p.get("layer") || "";
+          if (p.get("id")) memState.needId = p.get("id");
+        }
+        showView(name);
+      }
+      window.addEventListener("hashchange", route);
+
+      async function load() {
+        try {
+          const d = await apiGet("/api/status");
+          $("dot").className = "dot" + (d.running ? " on" : "");
+          $("state").textContent = d.running ? "在跑" : "停着";
+          $("heroPill").className = "pill" + (d.running ? " on" : "");
+          $("heroState").textContent = d.running ? "在线" : "离线";
+          $("name").textContent = d.bot.name || "还没取名（叫它鲸鱼）";
+          $("qq").textContent = d.bot.qq ? "QQ " + mask(d.bot.qq) : "QQ 没填";
+          $("owners").textContent = d.bot.owners.map(mask).join("、") || "没填";
+          $("group").textContent = d.group.enabled
+            ? d.group.allow.join("、") || "开着，不限群"
+            : "关着";
+          const modelText = d.model
+            ? `${d.model.name} · ${d.model.model}${d.model.hasKey ? "" : "（没 key）"}`
+            : "没配";
+          $("model").textContent = modelText;
+          $("model2").textContent = modelText;
+          // 她的作息：概览里一眼看出在睡还是醒着
+          const sl = d.sleep || {};
+          const bedH = Number.isFinite(sl.herBedHour) ? sl.herBedHour : 1;
+          const bedTxt = `${String(bedH).padStart(2, "0")}:00`;
+          if (sl.herAsleep) {
+            $("sleepState").textContent = `睡着 · ${fmtDur(sl.herLeftMs)}后醒`;
+            $("sleepState").className = "zzz";
+            $("sleepDetail").textContent = sl.herWakeAt
+              ? `${hhmm(sl.herWakeAt)} 自己醒 · 明晚约 ${bedTxt} 睡`
+              : `明晚约 ${bedTxt} 睡`;
+          } else {
+            $("sleepState").textContent = "醒着";
+            $("sleepState").className = "awake";
+            $("sleepDetail").textContent = sl.herSleepDay
+              ? `上次 ${sl.herSleepDay} 睡 · 明晚约 ${bedTxt} 自己睡`
+              : `明晚约 ${bedTxt} 自己睡`;
+          }
+          $("mName").textContent = d.model?.name || "没配";
+          $("mId").textContent = d.model?.model || "没配";
+          $("mBase").textContent = d.model?.baseURL || "-";
+          $("mKey").textContent = d.model
+            ? d.model.hasKey
+              ? "已配"
+              : "没配（会报错）"
+            : "-";
+          const fb = d.fallback || {};
+          if ($("fbName")) {
+            $("fbName").textContent = fb.enabled
+              ? `${fb.name} · ${fb.model}`
+              : "没配（没找到官方 key）";
+            $("fbNow").textContent = fb.cooling ? "兜底（冷却中）" : "主模型";
+            $("fbCool").textContent = fb.cooling
+              ? Math.ceil((fb.coolingLeftMs || 0) / 1000) + " 秒"
+              : "没在冷却";
+            $("fbHint").textContent = fb.cooling
+              ? "主模型刚挂过，这几轮直接走兜底"
+              : "主模型调不动时自动顶上";
+          }
+          $("uptime").textContent =
+            d.running && d.since ? fmt(Date.now() - d.since) : "-";
+          $("footUp").textContent =
+            d.running && d.since ? "已运行 " + fmt(Date.now() - d.since) : "—";
+          $("pids").textContent = d.running
+            ? `${d.supervisorPid} / ${d.botPid || "-"}`
+            : "-";
+          const sel = $("models");
+          const want = d.models
+            .map(
+              (m) =>
+                `<option value="${m.i}">${esc(m.name)} · ${esc(m.model)}</option>`,
+            )
+            .join("");
+          if (sel.dataset.sig !== want) {
+            sel.innerHTML = want;
+            sel.dataset.sig = want;
+          }
+          sel.value = String(d.activeModel);
+          const ml = $("modelList");
+          if (ml) {
+            const sig2 =
+              d.models.map((m) => m.i + m.name + m.model).join("|") +
+              "#" +
+              d.activeModel;
+            if (ml.dataset.sig !== sig2) {
+              ml.dataset.sig = sig2;
+              ml.innerHTML = d.models.length
+                ? d.models
+                    .map(
+                      (m) =>
+                        `<div class="mrow" style="cursor:pointer" onclick="pickModel(${m.i})"><span class="kind">${m.i}</span><b style="font-weight:500;font-size:12.5px">${esc(m.name)}</b><span style="color:#5f6b7d;font-family:var(--mono);font-size:11.5px">${esc(m.model)}</span>${m.i === d.activeModel ? '<span class="mdur" style="color:#3fb950">当前在用</span>' : ""}</div>`,
+                    )
+                    .join("")
+                : '<div class="empty">配置里没有别的模型</div>';
+            }
+          }
+          const logEl = $("log");
+          if (logEl.textContent !== (d.log || "(还没有日志)")) {
+            const atBottom =
+              logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+            logEl.textContent = d.log || "(还没有日志)";
+            if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+          }
+          const mini = $("ovLog");
+          if (mini) {
+            const lines =
+              (d.log || "").trimEnd().split("\n").slice(-12).join("\n") ||
+              "(还没有日志)";
+            if (mini.textContent !== lines) {
+              mini.textContent = lines;
+              mini.scrollTop = mini.scrollHeight;
+            }
+          }
+        } catch {
+          $("state").textContent = "连不上面板服务";
+          $("heroState").textContent = "连不上";
+        }
+      }
+
+      async function loadProgress() {
+        try {
+          const d = await apiGet("/api/progress");
+          const nav = $("navProgress");
+          if (d.running.length) {
+            nav.classList.remove("hide");
+            nav.classList.add("live");
+            nav.textContent = d.running.length;
+          } else {
+            nav.classList.add("hide");
+            nav.classList.remove("live");
+          }
+          $("running").innerHTML = d.running.length
+            ? d.running
+                .map((p) => {
+                  const doing = p.tool
+                    ? "正在用工具"
+                    : p.text
+                      ? "刚在想"
+                      : "在想下一步";
+                  const chips = [
+                    `<span class="chip">第 ${p.step || 1} 步</span>`,
+                    p.tool
+                      ? `<span class="chip tool">${esc(p.tool)}</span>`
+                      : "",
+                    `<span class="chip">${fmtDur(Date.now() - p.startedAt)}</span>`,
+                    `<span class="chip">${p.tokens || 0} token</span>`,
+                  ].join("");
+                  const detail = p.text
+                    ? `<div class="pd">${esc(p.text)}</div>`
+                    : p.toolDetail
+                      ? `<div class="pd">${esc(p.toolDetail)}</div>`
+                      : "";
+                  return `<div class="pitem"><span class="spin"></span><div style="min-width:0"><div class="pt">${esc(p.label || p.key)} <span style="color:#5f6b7d;font-size:11px">· ${doing}</span></div><div class="chips">${chips}</div>${detail}</div></div>`;
+                })
+                .join("")
+            : '<div class="empty">这会儿闲着，没跑活儿。</div>';
+          $("recent").innerHTML = d.turns.length
+            ? d.turns
+                .map(
+                  (t) =>
+                    `<tr><td class="n">${new Date(t.ts).toLocaleTimeString("zh-CN", { hour12: false })}</td><td><span class="kind">${esc(t.kind)}</span></td><td class="${t.ok ? "ok" : "bad"}">${t.ok ? "成功" : "失败"}</td><td class="n">${fmtDur(t.ms)}</td><td class="n">${t.steps || 0}</td><td class="n">${t.chars || 0}</td></tr>`,
+                )
+                .join("")
+            : '<tr><td colspan="6" class="empty">还没有跑完的记录</td></tr>';
+          const mini = $("ovRecent");
+          if (mini) {
+            mini.innerHTML = d.turns.length
+              ? d.turns
+                  .slice(0, 5)
+                  .map(
+                    (t) =>
+                      `<div class="mrow"><span class="mtime">${hhmm(t.ts)}</span><span class="kind">${esc(t.kind)}</span><span class="${t.ok ? "ok" : "bad"}">${t.ok ? "成功" : "失败"}</span><span class="mdur">${fmtDur(t.ms)} · ${t.steps || 0} 步</span></div>`,
+                  )
+                  .join("")
+              : '<div class="empty">还没有跑完的记录</div>';
+          }
+        } catch {
+          /* 面板服务断一下不用管 */
+        }
+      }
+
+      // ---- DSH 会话回放 ----
+      let cur = null,
+        sessions = [],
+        lastRows = [],
+        chatSig = "",
+        listSig = "";
+
+      async function loadSessions(force) {
+        try {
+          const d = await apiGet("/api/sessions");
+          sessions = d.sessions || [];
+          const sig = sessions
+            .map(
+              (s) =>
+                s.ws +
+                s.sid +
+                Math.round(s.mtime) +
+                s.total +
+                (s.running ? 1 : 0),
+            )
+            .join("|");
+          if (sig !== listSig) {
+            listSig = sig;
+            $("sessList").innerHTML = sessions.length
+              ? sessions
+                  .map((s) => {
+                    const on =
+                      cur && cur.ws === s.ws && cur.sid === s.sid ? " on" : "";
+                    const t = new Date(s.mtime).toLocaleString("zh-CN", {
+                      hour12: false,
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    });
+                    const name = s.title || s.sid.slice(8, 20);
+                    return `<div class="item${on}" data-ws="${esc(s.ws)}" data-sid="${esc(s.sid)}" onclick="pickEl(this)"><div class="t">${esc(name)}</div><div class="m"><span>${t}</span><span>${s.total} 条</span>${s.running ? '<span class="live"></span>' : ""}</div></div>`;
+                  })
+                  .join("")
+              : '<div class="empty" style="padding:8px">没找到会话</div>';
+          }
+          if (!cur) {
+            const saved = localStorage.getItem("sessSel");
+            const [sws, ssid] = (saved || "").split("|");
+            const prev = sessions.find((s) => s.ws === sws && s.sid === ssid);
+            const whale = sessions.find((s) => s.ws.includes("whale-kit"));
+            const pick = prev || whale || sessions[0];
+            if (pick) selectSession(pick.ws, pick.sid);
+          } else if (force) {
+            chatSig = "";
+            loadSession();
+          }
+          markActive();
+        } catch {
+          /* 面板服务断一下不用管 */
+        }
+      }
+
+      function pickEl(el) {
+        selectSession(el.dataset.ws, el.dataset.sid);
+      }
+
+      function markActive() {
+        for (const el of document.querySelectorAll("#sessList .item")) {
+          const on =
+            cur && el.dataset.ws === cur.ws && el.dataset.sid === cur.sid;
+          el.classList.toggle("on", Boolean(on));
+        }
+      }
+
+      function selectSession(ws, sid) {
+        if (cur && cur.ws === ws && cur.sid === sid) return;
+        cur = { ws, sid };
+        chatSig = "";
+        lastRows = [];
+        localStorage.setItem("sessSel", ws + "|" + sid);
+        $("sessTitle").textContent = "读取中…";
+        $("sessInfo").textContent = "";
+        $("chat").innerHTML = '<div class="empty">正在读会话…</div>';
+        markActive();
+        loadSession();
+      }
+
+      async function loadSession() {
+        if (!cur) return;
+        try {
+          const d = await apiGet(
+            `/api/session?ws=${encodeURIComponent(cur.ws)}&sid=${encodeURIComponent(cur.sid)}`,
+          );
+          if (!d.ok) {
+            $("chat").innerHTML =
+              `<div class="empty">${esc(d.msg || "读不到")}</div>`;
+            return;
+          }
+          $("sessTitle").textContent = d.title || "（没有标题）";
+          $("sessInfo").textContent =
+            `${d.cwd || ""} · 共 ${d.total} 条${d.hidden > 0 ? `，只显示最近 ${d.rows.length} 条` : ""}${d.running ? " · 正在跑" : ""}`;
+          const sig = `${d.total}|${d.rows.length}|${d.running ? 1 : 0}|${d.rows.reduce((a, r) => a + (r.out ? r.out.length : 0) + (r.text ? r.text.length : 0), 0)}`;
+          if (sig !== chatSig) {
+            chatSig = sig;
+            lastRows = d.rows;
+            renderRows();
+          }
+        } catch {
+          /* 面板服务断一下不用管 */
+        }
+      }
+
+      function renderRows() {
+        const el = $("chat");
+        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+        const showThink = $("showThink").checked;
+        const showTool = $("showTool").checked;
+        const rows = lastRows.filter(
+          (r) =>
+            (r.k !== "think" || showThink) &&
+            (r.k !== "tool" || showTool) &&
+            !(r.k === "user" && r.meta),
+        );
+        el.innerHTML =
+          rows.map(rowHtml).join("") ||
+          '<div class="empty">这个会话里没有能显示的内容</div>';
+        if (atBottom) el.scrollTop = el.scrollHeight;
+      }
+
+      // 每条消息默认只露两行，点一下才看全
+      function bubbleRow(cls, who, t, text) {
+        const long = text.length > 90 || text.split("\n").length > 2;
+        return `<div class="r ${cls}"><div class="who">${who} · ${hhmm(t)}</div><div class="bubble${long ? " clamp" : ""}"><span class="bt">${esc(text)}</span></div>${long ? '<button class="more" onclick="toggleLong(this)">展开全部</button>' : ""}</div>`;
+      }
+
+      function toggleLong(btn) {
+        const b = btn.previousElementSibling;
+        b.classList.toggle("open");
+        btn.textContent = b.classList.contains("open") ? "收起" : "展开全部";
+      }
+
+      function rowHtml(r) {
+        switch (r.k) {
+          case "user":
+            return bubbleRow("u", "你", r.t, r.text);
+          case "assistant":
+            return bubbleRow("a", "鲸鱼", r.t, r.text);
+          case "think":
+            return `<div class="r think"><details><summary>思考 ${r.text.length} 字</summary><div class="body">${esc(r.text)}</div></details></div>`;
+          case "tool": {
+            const badge = r.ok === true ? "✅" : r.ok === false ? "❌" : "▸";
+            const args = (r.args || "").replace(/\s+/g, " ");
+            const res = r.out
+              ? `<div class="res">${esc(r.out)}</div>`
+              : '<div class="empty">还没有结果</div>';
+            return `<details class="r tool"><summary><span class="st">${badge}</span><span class="nm">${esc(r.name)}</span><span class="ar">${esc(args)}</span></summary><div class="body"><div class="args">${esc(r.args)}</div>${res}</div></details>`;
+          }
+          case "turn":
+            return `<div class="sep">第 ${r.n} 轮</div>`;
+          case "turnend":
+            return `<div class="sep">第 ${r.n} 轮结束 · ${r.steps} 步 · ${fmtDur(r.ms)}${r.reason && r.reason !== "completed" ? " · " + esc(r.reason) : ""}</div>`;
+          case "note":
+            return `<div class="sep">${esc(r.text)}</div>`;
+          case "todo":
+            return `<div class="r todo">${r.todos.map((t) => `${t.status === "completed" ? "☑" : "☐"} ${esc(t.content)}`).join("\n")}</div>`;
+          default:
+            return "";
+        }
+      }
+
+      async function act(action) {
+        const names = { start: "启动", stop: "停止", restart: "重启" };
+        if (action === "stop" && !confirm("停掉机器人？")) return;
+        $("msg").textContent = names[action] + "中…";
+        const d = await apiPost("/api/action", { action });
+        $("msg").textContent = d.msg || "";
+        setTimeout(load, 1500);
+      }
+
+      function pickModel(i) {
+        $("models").value = String(i);
+        $("models").scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+
+      async function switchModel() {
+        const i = Number($("models").value);
+        const d = await apiPost("/api/model", { index: i });
+        $("mmsg").textContent = d.msg || "";
+        setTimeout(load, 2500);
+      }
+
+      // ---- 转发口（桌面 DSH 里 Our Free Model 挂的网关）----
+      let gw = { data: null, lane: "", busy: false };
+
+      async function loadGateway() {
+        const hint = $("gwHint");
+        if (hint) hint.textContent = "读网关中…";
+        try {
+          const d = await apiGet("/api/gateway");
+          gw.data = d;
+          renderGateway();
+        } catch (e) {
+          if (hint) hint.textContent = "读不到网关";
+          $("gwList").innerHTML =
+            '<div class="empty">读不到网关：' + esc(String(e)) + "</div>";
+        }
+      }
+
+      function renderGateway() {
+        const box = $("gwList");
+        if (!box) return;
+        const d = gw.data;
+        if (!d) return;
+        const hint = $("gwHint");
+        if (!d.ok) {
+          hint.textContent = d.up ? "网关连上了但没读到模型" : "网关没开";
+          box.innerHTML =
+            '<div class="empty">' +
+            esc(d.error || "连不上网关") +
+            "<br>网关由桌面 DSH 里的 Our Free Model 挂起，先把它打开。" +
+            "</div>";
+          $("gwChips").innerHTML = "";
+          return;
+        }
+        const all = d.models || [];
+        hint.textContent = `127.0.0.1:${d.port} · ${all.length} 个模型 · 密钥${d.keyFound ? "有" : "没"}`;
+        // 车道 chips：点一下只看这个来源，再点取消
+        const groups = d.groups || [];
+        const chips = [`<span class="chip${gw.lane ? "" : " tool"}" style="cursor:pointer" onclick="setGwLane('')">全部 ${all.length}</span>`]
+          .concat(
+            groups.map(
+              (g) =>
+                `<span class="chip${gw.lane === g.id ? " tool" : ""}" style="cursor:pointer" onclick="setGwLane('${esc(g.id)}')">${esc(g.label)} ${g.count}</span>`,
+            ),
+          );
+        $("gwChips").innerHTML = chips.join("");
+        const q = ($("gwQ")?.value || "").trim().toLowerCase();
+        const rows = all.filter(
+          (m) =>
+            (!gw.lane || m.provider === gw.lane) &&
+            (!q ||
+              m.id.toLowerCase().includes(q) ||
+              m.name.toLowerCase().includes(q)),
+        );
+        if (!rows.length) {
+          box.innerHTML = '<div class="empty">没有符合条件的模型</div>';
+          return;
+        }
+        box.innerHTML = rows
+          .map((m) => {
+            const using = d.using && d.using[m.id] !== undefined;
+            return (
+              `<div class="mrow2 gwrow">` +
+              `<div style="min-width:0">` +
+              `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">` +
+              `<b style="font-weight:500;font-size:12.5px">${esc(m.name)}</b>` +
+              `<span class="kind">${esc(m.provider)}</span>` +
+              (m.reasoning ? '<span class="kind">推理</span>' : "") +
+              (m.input.includes("image") ? '<span class="kind">看图</span>' : "") +
+              (using ? '<span class="mdur" style="color:#3fb950">已在配置里</span>' : "") +
+              `</div>` +
+              `<div class="mtime" style="font-family:var(--mono);font-size:11px;color:#5f6b7d;margin-top:2px">${esc(m.id)} · ${Math.round(m.contextWindow / 1024)}K</div>` +
+              `</div>` +
+              `<button class="btn" style="padding:4px 10px;font-size:12px" onclick="useGateway('${esc(m.id)}')">用这个</button>` +
+              `</div>`
+            );
+          })
+          .join("");
+      }
+
+      function setGwLane(id) {
+        gw.lane = gw.lane === id ? "" : id;
+        renderGateway();
+      }
+
+      async function useGateway(id) {
+        if (gw.busy) return;
+        gw.busy = true;
+        $("gwMsg").textContent = "正在换成「" + id + "」…";
+        try {
+          const d = await apiPost("/api/gateway/use", { model: id });
+          $("gwMsg").textContent = d.msg || (d.ok ? "换好了" : "没换成");
+          if (d.ok) {
+            setTimeout(load, 1200);
+            setTimeout(loadGateway, 1200);
+          }
+        } catch (e) {
+          $("gwMsg").textContent = "没换成：" + String(e);
+        } finally {
+          gw.busy = false;
+        }
+      }
+
+      // ---- 记忆库（五层 + 打分 + 淡忘）----
+      let memState = {
+        layer: "",
+        q: "",
+        items: [],
+        sel: null,
+        last: null,
+        needId: "",
+      };
+      const MEM_LAYER_NAME = {
+        core: "永久",
+        long: "长期",
+        mid: "中期",
+        short: "短期",
+        cold: "冷藏",
+      };
+      const keyName = (k) =>
+        k === "shared"
+          ? "通用"
+          : k.startsWith("private:")
+            ? "私聊 " + k.slice(8)
+            : k.startsWith("group:")
+              ? "群 " + k.slice(6)
+              : k;
+      const relTime = (ts) => {
+        const d = Math.max(0, Date.now() - ts),
+          m = Math.floor(d / 60000);
+        if (m < 1) return "刚刚";
+        if (m < 60) return m + " 分钟前";
+        const h = Math.floor(m / 60);
+        if (h < 24) return h + " 小时前";
+        return Math.floor(h / 24) + " 天前";
+      };
+
+      function memPick(a) {
+        memState.layer = a.dataset.layer || "";
+        history.replaceState(
+          null,
+          "",
+          "#memory" + (memState.layer ? "?layer=" + memState.layer : ""),
+        );
+        loadMemory();
+      }
+      function memScoreHint() {
+        const s = Number($("memScore").value) || 0;
+        const l =
+          s >= 88
+            ? "永久（≥88）"
+            : s >= 70
+              ? "长期（70–87）"
+              : s >= 45
+                ? "中期（45–69）"
+                : s >= 12
+                  ? "短期（12–44）"
+                  : "冷藏（<12）";
+        $("memHint").textContent =
+          "这一条会进：" +
+          l +
+          "（≥88 永久 · 70–87 长期 · 45–69 中期 · 12–44 短期 · 跌破 12 冷藏）";
+      }
+      function memFillKeys(keys) {
+        const sel = $("memKey");
+        const want = Object.keys(keys || {}).sort();
+        if (!want.includes("shared")) want.push("shared");
+        const sig = want.join("|");
+        if (sel.dataset.sig === sig) return;
+        sel.dataset.sig = sig;
+        const keep = sel.value;
+        sel.innerHTML = want
+          .map((k) => `<option value="${esc(k)}">${esc(keyName(k))}</option>`)
+          .join("");
+        if (want.includes(keep)) sel.value = keep;
+      }
+
+      async function loadMemory() {
+        try {
+          const d = await apiGet(
+            "/api/memory?q=" + encodeURIComponent(memState.q || ""),
+          );
+          memState.last = d.last;
+          const st = d.stats;
+          $("memStats").textContent =
+            `共 ${st.total} 条 · 均分 ${st.avgScore} · 永久 ${st.core} / 长期 ${st.long} / 中期 ${st.mid} / 短期 ${st.short} / 冷藏 ${st.cold}`;
+          const v = d.vector;
+          $("memVec").textContent = v
+            ? `向量索引 ${v.count} 块（其中记忆库 ${v.storeCount} 条）· ${v.dim} 维 · ${v.syncedAt || v.builtAt ? "同步于 " + relTime(Date.parse(v.syncedAt || v.builtAt)) : ""} · ${v.sizeMB}MB`
+            : "向量索引还没建，改完记忆不会立刻被想起来";
+          for (const a of document.querySelectorAll("#memTabs a"))
+            a.classList.toggle(
+              "on",
+              (a.dataset.layer || "") === memState.layer,
+            );
+          memFillKeys(st.keys);
+          if (memState.layer === "working") return renderWorking(d.last);
+          $("memEditor").style.display = "";
+          $("memWork").style.display = "none";
+          let items = d.items;
+          if (memState.layer)
+            items = items.filter((it) =>
+              memState.layer === "cold"
+                ? it.status === "cold"
+                : it.layer === memState.layer && it.status !== "cold",
+            );
+          memState.items = items;
+          $("memList").innerHTML = items.length
+            ? items
+                .map(
+                  (
+                    it,
+                  ) => `<div class="mrow2${memState.sel === it.id ? " on" : ""}" data-id="${esc(it.id)}" onclick="openMem(this.dataset.id)">
+          <div class="mt">${esc(it.text)}</div>
+          <div class="mm"><span class="sc ${it.status === "cold" ? "cold" : it.layer}">${it.score} 分 · ${it.status === "cold" ? "冷藏" : MEM_LAYER_NAME[it.layer] || it.layer}</span>
+          ${it.pinned ? '<span title="钉住">📌</span>' : ""}<span>${esc(keyName(it.key))}</span><span>${relTime(it.updatedAt)}</span>${it.hits ? `<span>用过 ${it.hits} 次</span>` : ""}</div>
+        </div>`,
+                )
+                .join("")
+            : '<div class="empty" style="padding:8px">这一层还没有记忆。点「＋ 新建」加一条。</div>';
+          if (
+            memState.needId &&
+            items.some((it) => it.id === memState.needId)
+          ) {
+            const id = memState.needId;
+            memState.needId = "";
+            openMem(id);
+          }
+        } catch (e) {
+          $("memStats").textContent = "读不到记忆库";
+        }
+      }
+
+      function renderWorking(last) {
+        $("memEditor").style.display = "none";
+        $("memWork").style.display = "";
+        $("memList").innerHTML =
+          '<div class="empty" style="padding:8px">工作记忆是她这一轮实际带进上下文的几块，不在这里增删；<br>要改内容去「全部 / 永久 / 长期…」里改对应条目。</div>';
+        if (!last) {
+          $("memWork").innerHTML =
+            '<div class="empty">她还没跑过一轮，所以还没有"这一轮实际带进提示词的记忆"。随便跟她说句话就有了。</div>';
+          return;
+        }
+        const b = last.blocks || {};
+        const rows = [
+          ["永久", b.core],
+          ["长期", b.long],
+          ["旧账检索", b.retrieved],
+          ["中期", b.mid],
+          ["短期", b.short],
+          ["最近原话", b.tail],
+        ].filter(([, v]) => v);
+        $("memWork").innerHTML =
+          `<div class="empty" style="margin-bottom:10px">最近一轮：${esc(keyName(last.key))} · ${relTime(last.at)} · 共 ${last.chars || 0} 字<br>这就是她开口前实际带进上下文的东西（只读）。</div>` +
+          (rows.length
+            ? rows
+                .map(
+                  ([t, v]) =>
+                    `<div class="wblock"><b>${t}</b><pre>${esc(v)}</pre></div>`,
+                )
+                .join("")
+            : '<div class="empty">这一轮什么记忆都没带。</div>');
+      }
+
+      function openMem(id) {
+        const it = memState.items.find((x) => x.id === id) || null;
+        memState.sel = it ? it.id : null;
+        $("memText").value = it ? it.text : "";
+        $("memScore").value = it ? it.score : 60;
+        $("memLayer").value = it && it.layerFixed ? it.layer : "";
+        $("memTags").value = it ? it.tags.join(" ") : "";
+        $("memPinned").checked = Boolean(it && it.pinned);
+        $("memDel").style.display = it ? "" : "none";
+        $("memEditTitle").textContent = it ? "编辑这一条" : "新建一条记忆";
+        $("memId").textContent = it ? it.id : "";
+        $("memMsg").textContent = "";
+        $("memKey").value = it
+          ? it.key
+          : memState.last?.key || "shared";
+        memScoreHint();
+        for (const el of document.querySelectorAll("#memList .mrow2"))
+          el.classList.toggle("on", Boolean(it) && el.dataset.id === it.id);
+      }
+
+      async function saveMem() {
+        const text = $("memText").value.trim();
+        if (!text) return ($("memMsg").textContent = "内容不能空");
+        const payload = {
+          id: memState.sel || undefined,
+          key: $("memKey").value,
+          text,
+          score: Number($("memScore").value) || 60,
+          tags: $("memTags").value,
+          pinned: $("memPinned").checked,
+          layer: $("memLayer").value || undefined,
+        };
+        const d = await apiPost("/api/memory/save", payload);
+        $("memMsg").textContent = d.ok ? "已保存" : d.msg || "没存上";
+        if (d.ok) {
+          memState.sel = d.item.id;
+          loadMemory();
+        }
+      }
+
+      async function delMem() {
+        if (!memState.sel) return;
+        if (!confirm("删掉这条记忆？删了就找不回来了。")) return;
+        const d = await apiPost("/api/memory/delete", { id: memState.sel });
+        $("memMsg").textContent = d.ok ? "已删除" : "没删成";
+        if (d.ok) {
+          memState.sel = null;
+          openMem(null);
+          loadMemory();
+        }
+      }
+
+      async function memDecay() {
+        const d = await apiPost("/api/memory/decay");
+        $("memMsg").textContent = d.ok
+          ? `淡忘跑完：${d.changed} 条降分，${(d.cold || []).length} 条进了冷藏`
+          : "没跑成";
+        loadMemory();
+      }
+
+      async function memReindex() {
+        const d = await apiPost("/api/memory/reindex");
+        $("memMsg").textContent = d.ok
+          ? "已开始重建索引，几十秒后刷新这页看块数"
+          : "没跑成";
+        loadMemory();
+      }
+
+      $("showThink").onchange = renderRows;
+      $("showTool").onchange = renderRows;
+
+      route();
+      load();
+      loadProgress();
+      setInterval(load, 3000);
+      setInterval(() => {
+        if (view === "progress" || view === "overview") loadProgress();
+      }, 2000);
+      setInterval(() => {
+        if (view === "sessions" && $("live").checked) loadSession();
+      }, 2000);
+      setInterval(() => {
+        if (view === "sessions") loadSessions(false);
+      }, 20000);
+      setInterval(() => {
+        if (view === "memory") loadMemory();
+      }, 8000);
+    </script>
+  </body>
+</html>
