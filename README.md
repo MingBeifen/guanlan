@@ -125,7 +125,7 @@
   bin\
     setup.mjs          设置向导
     check-deps.mjs     依赖自检 + 自动补齐
-    start.mjs          看门人
+    start.mjs          看门人（崩了自动重拉，改坏了自动回滚）
     profile.mjs        生成/切换模型 profile
   panel\               面板（server.mjs + index.html）
   home\                它的窝：人设、记忆、日志全在这
@@ -176,6 +176,14 @@ key 或接口地址错。地址一般要以 `/v1` 结尾，不带 `/chat/complet
 3. `home\voice\say-voice.py` —— **包里已经带了一份**，走 edge-tts；想换别的 TTS 就重写这个脚本，只要命令行参数对得上（`--text --out --voice --rate --pitch`）就行。
 
 合成出来是 mp3，转 silk 是 NapCat 自己干的（它要装 ffmpeg）。断网就合不出来，会静默退回文字。
+
+**它把自己改坏了怎么办**
+看门人（`bin\start.mjs`）会拦三道：
+1. **语法匣**——每次启动前把包里的 `.mjs` 全过一遍 `node --check`。哪份写坏了，就拷到 `runtime\broken\<时间>\` 留个底，然后从上一个提交还原。
+2. **留痕**——启动时发现代码被改过，就自动提交一次（`自改 20261023-025727：…`），每次启动都是一个能回滚到的点。
+3. **退避**——起来就退不会无限重拉：5 秒 → 15 秒 → 1 分 → 5 分；连续 5 次还起不来就停手，面板顶部会跳红条告诉你。点一下「启动」就重新给五次机会。
+
+所以真改坏了：看 `runtime\broken\` 里的原件、看 `logs\supervisor.log`、`git log` 里找上一个能跑的提交，`git checkout <那个提交> -- bot\\panel\\bin` 就回去了。
 
 **会不会偷看屏幕 / 往外发东西**
 不会。截屏默认 0 次；往外发东西、删文件、动系统设置，人设里写死了要先问你。

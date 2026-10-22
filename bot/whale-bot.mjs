@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 // 本小检索：纯本地倒排，从档案五页 / 旧日子账 / 事件卡捞三段带出处。
@@ -294,12 +295,28 @@ const TURNS_LOG = path.join(CFG.logs, "turns.jsonl");
 const MEDIA_DIR = path.join(CFG.home, "media"); // 收发图片都落在这里
 const ARCHIVE_DIR = path.join(CFG.home, "archive"); // 消息档案 + 摘要（无状态会话用）
 const STATELESS_FLAG = path.join(CFG.home, "stateless.flag"); // 有这个文件 = 一条消息一个新会话 + 摘要
-// 权限档开关（加，行程回声的申请）：文件在**窝外**，回声自己写不了——"只有主人能拨"。
-// 桌面那枚「鲸鱼开关」双击一次 = 改这个文件 + 重启本体；本体每次 spawn 时读一次。
-const PERM_FILE = path.join(CFG.root, "permission-mode.txt");
+// 权限档开关：文件必须在**工作区之外**，机器人在 workspace-write 档下写不进去——"只有主人能拨"。
+// 默认放在 %USERPROFILE%\.watching-waves\permission-mode.txt；想换位置就设环境变量 WW_PERM_FILE。
+// 别放回包根：那里在它自己的可写目录里，等于它能把自己拨到 danger-full-access。
+const PERM_FILE =
+  process.env.WW_PERM_FILE || path.join(os.homedir(), ".watching-waves", "permission-mode.txt");
+const PERM_FILE_OLD = path.join(CFG.root, "permission-mode.txt");
+
+// 只警告一次，不然每轮都吵
+let permWarned = false;
 
 // 读开关：只认 DSH 那三档里我们能用的两档；文件缺失/写坏/空 → 一律按最保守的 workspace-write。
 function readPermissionMode() {
+  if (!permWarned) {
+    permWarned = true;
+    try {
+      fs.mkdirSync(path.dirname(PERM_FILE), { recursive: true });
+    } catch { /* 建不了就等你自己建 */ }
+    try {
+      if (fs.existsSync(PERM_FILE_OLD))
+        log(`注意：包根那个 permission-mode.txt 不再生效（那位置它自己能改），开关请写到 ${PERM_FILE}`);
+    } catch { /* 查一下就完事 */ }
+  }
   try {
     const v = fs
       .readFileSync(PERM_FILE, "utf8")

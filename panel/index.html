@@ -367,6 +367,23 @@
           ),
           linear-gradient(180deg, #101a28, #0c121b);
       }
+      .halt {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 10px 14px;
+        margin-bottom: 14px;
+        border-radius: 10px;
+        border: 1px solid #6b2b2b;
+        background: linear-gradient(180deg, #2a1414, #1c0e0e);
+        color: #ffb4b4;
+        font-size: 13px;
+      }
+      .halt b {
+        color: #ff8a8a;
+        white-space: nowrap;
+      }
       .pill {
         display: inline-flex;
         align-items: center;
@@ -1312,6 +1329,10 @@
             </div>
           </div>
           <div class="grid3">
+            <div class="halt" id="haltBox" style="display: none">
+              <b>看门人停手了</b>
+              <span id="haltText"></span>
+            </div>
             <div class="kv"><span>能指挥它的人</span><b id="owners">-</b></div>
             <div class="kv"><span>群聊</span><b id="group">-</b></div>
             <div class="kv"><span>用的模型配置</span><b id="model2">-</b></div>
@@ -1736,6 +1757,15 @@
           $("state").textContent = d.running ? "在跑" : "停着";
           $("heroPill").className = "pill" + (d.running ? " on" : "");
           $("heroState").textContent = d.running ? "在线" : "离线";
+          // 看门人连续 5 次起来就退会自动停手，这里得红着脸说一声
+          const halt = d.halt;
+          if ($("haltBox")) {
+            $("haltBox").style.display = halt ? "flex" : "none";
+            if (halt) {
+              $("haltText").textContent =
+                `连续 ${halt.fails} 次起来就退，不再自动重拉。把最后那次改动改回去，或点右边「启动」重来。`;
+            }
+          }
           $("name").textContent = d.bot.name || "还没取名（叫它鲸鱼）";
           $("qq").textContent = d.bot.qq ? "QQ " + mask(d.bot.qq) : "QQ 没填";
           $("owners").textContent = d.bot.owners.map(mask).join("、") || "没填";

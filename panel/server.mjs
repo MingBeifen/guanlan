@@ -133,6 +133,10 @@ function sleepState() {
   };
 }
 
+function readHalt() {
+  try { return JSON.parse(fs.readFileSync(path.join(RUNTIME, 'supervisor-halt.json'), 'utf8')); } catch { return null; }
+}
+
 function status() {
   const cfg = loadConfig() || {};
   const sup = readPid('supervisor.pid');
@@ -153,6 +157,7 @@ function status() {
     fallback: fallbackState(cfg),
     dsh: cfg.dsh || {},
     sleep: sleepState(),
+    halt: readHalt(),
     log: tailLog('supervisor.log', 80),
     botLog: tailLog('whale-bot.log', 40),
   };
@@ -205,6 +210,8 @@ function gatewayUsage(cfg) {
 
 function startBot() {
   if (alive(readPid('supervisor.pid'))) return { ok: true, msg: '已经在跑了' };
+  // 手动点「启动」= 上一回停手的记录作废，重新给它五次机会
+  fs.rmSync(path.join(RUNTIME, 'supervisor-halt.json'), { force: true });
   spawn(process.execPath, [path.join(ROOT, 'bin', 'start.mjs'), '--detach'], {
     cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true,
   }).unref();
