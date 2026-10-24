@@ -2,20 +2,16 @@
   "bot": {
     "qq": 0,
     "name": "",
-    "names": ["鲸鱼"],
-    "owners": [0],
-    "ownerTag": "主人",
-    "ownerName": "主人",
-    "restartCmds": ["重启", "reboot"],
-    "memoryOpen": true,
-    "vectorMemory": true,
-    "vectorTopK": 3,
-    "vectorMinScore": 0.5,
-    "vectorKeywordFallback": true,
-    "voiceEnabled": false,
-    "dreamEnabled": true,
-    "autoFallback": false,
-    "peekChance": 0
+    "names": [
+      "小鲸",
+      "鲸鱼"
+    ],
+    "owners": [
+      0
+    ],
+    "maxSteps": 40,
+    "maxTokensPerTurn": 3000000,
+    "dreamEnabled": true
   },
   "napcat": {
     "wsHost": "ws://127.0.0.1:3001",
@@ -24,21 +20,12 @@
   "group": {
     "enabled": false,
     "allow": [],
-    "talkAllow": [],
-    "speakGapMs": 30000,
-    "maxBubbles": 3
+    "talkAllow": []
   },
   "dsh": {
     "exe": "",
     "cli": "",
     "profile": "echo-kit"
-  },
-  "voice": {
-    "python": ""
-  },
-  "weather": {
-    "lat": null,
-    "lon": null
   },
   "models": [
     {
@@ -50,5 +37,10 @@
     }
   ],
   "activeModel": 0,
-  "panel": { "port": 8790 }
+  "panel": {
+    "port": 8790
+  },
+  "voice": {
+    "python": ""
+  }
 }

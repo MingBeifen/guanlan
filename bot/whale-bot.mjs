@@ -80,8 +80,6 @@ const CFG = {
     .map((s) => String(s).trim())
     .filter(Boolean),
   allowlist: KIT_OWNERS,
-  // 开源版：主人在提示里的显示名（原来硬编码成某个人名），config.json → bot.ownerName
-  ownerName: String(KIT.bot?.ownerName ?? "").trim() || "主人",
   groupEnabled: Boolean(KIT.group?.enabled),
   groupAllow: KIT_GROUP_ALLOW,
   groupTalkAllow: KIT_GROUP_TALK,
@@ -128,6 +126,21 @@ const CFG = {
   screenDir: path.join(KIT_HOME, "screens"),
   housekeepingTickMs: 60 * 1000,
   maxImagesPerReply: 2,
+  // 单轮预算（2026-10-24 主人要的）：config.json → bot.maxSteps / bot.maxTokensPerTurn。
+  // 实测 private 一轮最狠跑到 80 步 / 4.87M token / 1122 秒，而全仓只有 30 分钟超时兜底。
+  // 默认给 40 步 / 3M token：p90 是 9 步，40 步已经是很宽松的天花板，
+  // 只有真正失控的轮次才会撞上。写 0 = 该维度不限。
+  // 2026-10-24 21:5x 主人要「把每轮 40 步去掉」：显式写 0 现在真的是不限。
+  // 原来写成 `> 0 ? x : 40`，写 0 会被当成没填又退回 40，跟注释里的「0 = 不限」不一致。
+  maxSteps:
+    KIT.bot?.maxSteps != null && Number.isFinite(Number(KIT.bot.maxSteps))
+      ? Number(KIT.bot.maxSteps)
+      : 40,
+  maxTokensPerTurn:
+    KIT.bot?.maxTokensPerTurn != null &&
+    Number.isFinite(Number(KIT.bot.maxTokensPerTurn))
+      ? Number(KIT.bot.maxTokensPerTurn)
+      : 3 * 1000 * 1000,
   voiceEnabled: KIT.bot?.voiceEnabled === true, // 语音开关：config.json → bot.voiceEnabled（默认关）
   // 梦境引擎（2026-10-24）：config.json → bot.dreamEnabled，默认 **开**（成本只在夜里一次，
   // 且写在独立文件不进主库）。不想要就写 false，不用改代码。
@@ -296,9 +309,9 @@ function stripHiddenMarkers(text) {
   const a = takeNameMarkers(String(text ?? ""));
   const b = takeAlterMarker(a.text);
   const c = takeOverlayMarkers(b.text);
-  // 语气标记也是隐藏记号（2026-10-24）：它只给合成用，绝不能进档案/摘要
-  const d = extractTone(c.text);
-  return d.text;
+  // 语气标记也是隐藏记号（2026-10-24）：它只给合成用，绝不能进档案/摘要。
+  // 这里不走 extractTone——那个会把换行压成空格，档案要保住原来的分行。
+  return c.text.replace(TONE_RE, "").trim();
 }
 // 所有往外发的字都过这一道：摘掉隐藏记号、顺手记下"名字问过了"
 function kitNameHook(text, kind, id) {
@@ -339,6 +352,10 @@ const LOG_PATH = path.join(CFG.logs, "whale-bot.log");
 // 每轮一行账（2026-10-19 第三件）：耗时、token、报错都记在这，出事能复盘。
 // 单独一个文件，不跟人看的 whale-bot.log 混在一起；纯追加，出问题也不挡主流程。
 const TURNS_LOG = path.join(CFG.logs, "turns.jsonl");
+// 记忆质量门被拦条目的留档（2026-10-24）。定义放在这里而不是下面质量门那一段，
+// 是因为下面 `maybeRotateRejected` 要在模块加载期就能引用——const 有 TDZ，
+// 后定义的常量在函数体里引用没问题，但如果函数在定义之前被调用就会炸。
+const REJECTED_PATH = path.join(CFG.home, "memory", "rejected.jsonl");
 const MEDIA_DIR = path.join(CFG.home, "media"); // 收发图片都落在这里
 const ARCHIVE_DIR = path.join(CFG.home, "archive"); // 消息档案 + 摘要（无状态会话用）
 const STATELESS_FLAG = path.join(CFG.home, "stateless.flag"); // 有这个文件 = 一条消息一个新会话 + 摘要
@@ -424,6 +441,131 @@ function log(...parts) {
     /* 日志失败不影响主流程 */
   }
 }
+
+// ---------- 日志轮转（2026-10-24 主人要的） ----------
+// 为什么要有：whale-bot.log 一直 appendFileSync，从没人管，跑到 5.5MB 还在长；
+// supervisor.log 也 5MB。日志要看的是「最近」，老的全留着既占盘又拖慢 grep。
+// 策略：单文件超 LOG_ROTATE_BYTES 就改名成 <名字>.<时间>.log，最多留 KEEP 份，
+// 更老的删掉。挂在每小时那班车上（跟淡忘、待判清场同频），所以不会频繁 stat。
+const LOG_ROTATE_BYTES = 5 * 1024 * 1024; // 5MB
+const LOG_KEEP = 3; // 每种留 3 份历史
+function rotateOneLog(file) {
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    return null; // 还没有这个文件
+  }
+  if (st.size < LOG_ROTATE_BYTES) return null;
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\..*$/, "")
+    .replace("T", "-");
+  const base = file.replace(/\.log$/, "");
+  const rotated = `${base}.${stamp}.log`;
+  try {
+    fs.renameSync(file, rotated);
+  } catch (e) {
+    return `改名失败：${errMsg(e)}`;
+  }
+  // 清掉太老的（按文件名里的时间戳排序，保留最新 KEEP 份）
+  try {
+    const dir = path.dirname(file);
+    const prefix = path.basename(base) + ".";
+    const olds = fs
+      .readdirSync(dir)
+      .filter((n) => n.startsWith(prefix) && n.endsWith(".log") && n !== path.basename(file))
+      .sort();
+    const drop = olds.slice(0, Math.max(0, olds.length - LOG_KEEP));
+    for (const n of drop) {
+      try {
+        fs.unlinkSync(path.join(dir, n));
+      } catch {
+        /* 单个删不掉算了 */
+      }
+    }
+    return `${path.basename(file)} 转到 ${path.basename(rotated)}（原 ${(st.size / 1048576).toFixed(1)}MB` +
+      (drop.length ? `，清掉 ${drop.length} 份太老的` : "") +
+      "）";
+  } catch {
+    return `${path.basename(file)} 已转到 ${path.basename(rotated)}`;
+  }
+}
+function maybeRotateLogs() {
+  const notes = [];
+  for (const f of [
+    LOG_PATH,
+    path.join(CFG.logs, "supervisor.log"),
+    path.join(CFG.logs, "autostart.log"),
+  ]) {
+    const r = rotateOneLog(f);
+    if (r) notes.push(r);
+  }
+  // turns.jsonl 是记账不是日志：按行数轮转太蠢，按大小转，留 5 份
+  try {
+    const tf = TURNS_LOG;
+    const st = fs.statSync(tf);
+    if (st.size >= 5 * 1024 * 1024) {
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[-:]/g, "")
+        .replace(/\..*$/, "")
+        .replace("T", "-");
+      fs.renameSync(tf, tf.replace(/\.jsonl$/, `.${stamp}.jsonl`));
+      notes.push(`turns.jsonl 转到 ${(st.size / 1048576).toFixed(1)}MB`);
+      const dir = path.dirname(tf);
+      const olds = fs
+        .readdirSync(dir)
+        .filter((n) => /^turns\.\d{8}-\d{6}\.jsonl$/.test(n))
+        .sort();
+      for (const n of olds.slice(0, Math.max(0, olds.length - 5))) {
+        try {
+          fs.unlinkSync(path.join(dir, n));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch {
+    /* 还没 turns.jsonl */
+  }
+  if (notes.length) for (const n of notes) log(`日志轮转：${n}`);
+}
+
+// ---------- rejected.jsonl 轮转（2026-10-24 主人要的） ----------
+// 记忆质量门拦下的条目会一直往 rejected.jsonl 里追加。它是**审计用**的，
+// 只需要看「最近被拦了什么」，没必要无限长——超过上限就轮转到 .1 / .2，留 2 份。
+// 注意：这不是「删除证据」，是「保留最近两卷」，所以轮转而不是清空。
+const REJECTED_ROTATE_BYTES = 2 * 1024 * 1024; // 2MB（约几千条）
+const REJECTED_KEEP_FILES = 2;
+function maybeRotateRejected() {
+  try {
+    const st = fs.statSync(REJECTED_PATH);
+    if (st.size < REJECTED_ROTATE_BYTES) return;
+    // 从老往新挪：.1 → .2，当前 → .1
+    const f1 = REJECTED_PATH + ".1";
+    const f2 = REJECTED_PATH + ".2";
+    try {
+      fs.unlinkSync(f2);
+    } catch {
+      /* 没有就算了 */
+    }
+    try {
+      fs.renameSync(f1, f2);
+    } catch {
+      /* 没有就算了 */
+    }
+    fs.renameSync(REJECTED_PATH, f1);
+    log(
+      `记忆质量门留档轮转：rejected.jsonl ${(st.size / 1048576).toFixed(1)}MB → .1` +
+        `（最多留 ${REJECTED_KEEP_FILES} 份）`,
+    );
+  } catch {
+    /* 文件还没生成 */
+  }
+}
+
 
 // 一轮一行进 home 外面的 logs\turns.jsonl：谁能复盘、哪条贵、哪条报错都查得到。
 // 字段固定：ts / key / kind / ok / ms / chars / steps / tokens{in,out,cache,total} / reason / error / sid。
@@ -1965,7 +2107,11 @@ async function reply(kind, id, text, opts = {}) {
   // 远的那句才挂引用（近处不挂，见 shouldQuote）
   const quoteId = shouldQuote(kind, id, opts) ? String(opts.messageId) : null;
   // 先把 [语音]...[/语音] 摘出来：那段不念文字，改合成语音发出去
-  const { says, rest } = extractVoiceTags(text);
+  const { says, rest: restRaw } = extractVoiceTags(text);
+  // 语气标记只该待在 [语音] 里；万一写在正文（模型常这么干），这里也得剥掉再发，
+  // 不然 QQ 上会直接看到「[语气:开心]今天真好」（2026-10-24 自检发现）。
+  // 只删标记、不动空白：chunkText 要靠换行分气泡，extractTone 会压掉换行。
+  const rest = restRaw.replace(TONE_RE, "").trim();
   let sent = 0;
   // 文字气泡先切好；群聊再按条数上限并一遍，私聊原样发。语音段不参与合并，并完再垫在后面
   let bubbles = chunkText(rest).flatMap((chunk) => splitBubbles(chunk));
@@ -2145,9 +2291,50 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     let out = "";
     let err = "";
     let killed = false;
+    // 单轮预算（2026-10-24 主人要的）：见 CFG.maxSteps / maxTokensPerTurn。
+    // 为什么放在这里而不是只靠超时：实测 private 一轮能跑 1122 秒 / 80 步 / 4.87M token，
+    // 全仓只有 30 分钟超时兜底——也就是说「又贵又慢但没到 30 分钟」的轮次一路畅通。
+    // 步数和 token 都是**一出现就能判**的信号，比等到超时早得多，也更贴成本。
+    let budgetHits = "";
+    let budgetSteps = 0;
+    let budgetTokens = 0;
+    let budgetKillTimer = null;
+    const hitBudget = (why) => {
+      if (budgetHits) return; // 只报第一次
+      budgetHits = why;
+      log(`[预算] ${why}，掐这一轮（key=${progKey || "-"}）`);
+      // 挪到下一个 tick 再杀：这里还在 stdout 的 data 回调里，同步 kill 可能让
+      // 同一批 buffer 的后续事件丢一半。给一个极短的宽限让 close 正常回。
+      budgetKillTimer = setTimeout(() => {
+        killed = true;
+        killTree(child.pid);
+        try {
+          child.kill();
+        } catch {
+          /* ignore */
+        }
+      }, 200);
+      budgetKillTimer.unref?.();
+    };
     // 进度快照：把每行事件里「她在干什么」记下来（progKey 为空就整段跳过，一点开销都没有）
     let lineBuf = "";
     const onProgressEvent = (e) => {
+      // ⚠️ 预算统计必须在 `if (!progKey) return` **之前**——
+      // 它跟进度快照无关，自测/内部任务这些没有 progKey 的轮次同样要受预算约束，
+      // 否则「不带 progKey 的调用」就成了绕过预算的后门。
+      const etyp = e?.type;
+      if (etyp === "status" && e?.phase === "step_end") {
+        budgetSteps += 1;
+        budgetTokens += Number(e?.usage?.totalTokens) || 0;
+        if (!budgetHits) {
+          if (CFG.maxSteps > 0 && budgetSteps > CFG.maxSteps)
+            hitBudget(`步数超上限（${budgetSteps} > ${CFG.maxSteps}）`);
+          else if (CFG.maxTokensPerTurn > 0 && budgetTokens > CFG.maxTokensPerTurn)
+            hitBudget(
+              `token 超上限（${(budgetTokens / 1000000).toFixed(2)}M > ${(CFG.maxTokensPerTurn / 1000000).toFixed(1)}M）`,
+            );
+        }
+      }
       if (!progKey) return;
       const typ = e?.type;
       if (typ === "status" && e.phase === "step_start") {
@@ -2237,12 +2424,20 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (budgetKillTimer) clearTimeout(budgetKillTimer);
       if (killed) {
-        const mins = Math.round(CFG.agentTimeoutMs / 60000);
+        // 两种被杀原因要说清：预算超了 vs 跑太久。用户看到的措辞不一样——
+        // 「跑太久」像是在怪她慢，「超预算」是在说这次活太大了。
+        const why = budgetHits
+          ? `这一轮活太大，我先停下（${budgetHits}）`
+          : `这一轮跑太久了（超过 ${Math.round(CFG.agentTimeoutMs / 60000)} 分钟），我先停下`;
         resolve({
           ok: false,
-          error: `这一轮跑太久了（超过 ${mins} 分钟），我先停下`,
+          error: why,
           ms: Date.now() - t0,
+          budget: budgetHits || "",
+          steps: budgetSteps,
+          tokens: budgetTokens,
         });
         return;
       }
@@ -2738,9 +2933,7 @@ function isOwnerQQ(id) {
 function qqTag(uid, fallbackName = "") {
   const id = String(uid ?? "");
   if (!/^\d{5,12}$/.test(id)) return null;
-  // 开源版：主人显示名不再硬编码，默认「主人」；要改就写 config.json 的 bot.ownerName
-  if (Number(id) === Number(CFG.allowlist[0]))
-    return `${CFG.ownerName}(爸爸·${id})`;
+  if (Number(id) === Number(CFG.allowlist[0])) return `〔主人〕(爸爸·${id})`;
   if (isOwnerQQ(id)) {
     const name = String(fallbackName || groupNickMap().get(id) || "主人")
       .trim()
@@ -3361,7 +3554,7 @@ const EXTRACT_PROMPT = (day, short, cards) =>
 // 为什么被拦的**不进主库**（独立 rejected.jsonl）：bot/memory-store.mjs 的 normalize()
 // 是逐字段白名单，往里加新字段要么改 normalize 影响全部存量条目，要么字段根本存不住；
 // 独立文件零风险，面板日后要展示也就是多读一个文件。
-const REJECTED_PATH = path.join(CFG.home, "memory", "rejected.jsonl");
+// REJECTED_PATH 定义在文件头（日志那一节），因为轮转函数要提前引用它。
 // 纯语气词：整句只剩这些字就算没内容
 const GATE_FILLER = new Set(
   [..."嗯哦啊呀哈嘿呵唉诶欸哇哎额呃嗷呜呐嘛吧呢了的一好吧行可以对对是没问题收到好的"],
@@ -3927,6 +4120,18 @@ function maybeMemoryDecay() {
     if (n) log(`待判队列清场：摘掉 ${n} 条判不了的对子（其中群 ${r.groups || 0} 条）`);
   } catch (e) {
     log("待判队列清场失败（不影响）：", errMsg(e));
+  }
+  // 日志与留档轮转（2026-10-24 主人要的）：同样一小时至多一次，
+  // 因为轮转是 stat + 改名，挂在高频路径上没必要。
+  try {
+    maybeRotateLogs();
+  } catch (e) {
+    log("日志轮转失败（不影响）：", errMsg(e));
+  }
+  try {
+    maybeRotateRejected();
+  } catch (e) {
+    log("留档轮转失败（不影响）：", errMsg(e));
   }
 }
 // ---------- 每周自检（周日晚上问三句；本地拼句子，不花模型钱） ----------
@@ -5575,8 +5780,20 @@ async function handleOne(key, item) {
       attempts: r.attempts,
       tokens: r.usage,
       error: r.error,
+      budget: r.budget,
       sid: r.sid,
     });
+    // 预算超了（2026-10-24）：这是"活太大"，不是"她坏了"，措辞要分开，
+    // 而且**群里不吱声**——群里的场景本来就不该主动播报自己的内部状态，
+    // 说一句"这轮活太大"给满群看既没意义又出戏。私聊才解释一句。
+    if (r.budget) {
+      if (kind === "private") {
+        await reply(kind, target, "这活儿一时半会儿干不完，我先收手了——你把它拆小点再让我做？");
+      } else {
+        log(`群 ${target} 这一轮超预算，按群里不吱声的规矩跳过`);
+      }
+      return r;
+    }
     await reply(kind, target, r.error);
     return r;
   }
@@ -5822,7 +6039,7 @@ async function buildAmbientText(msg, opts = {}) {
         parts.push(segLabel(seg));
         break;
       case "file": {
-        // 2026-10-21 03:5x 主人问"那个 txt 为啥没下载下来"：这条"没叫我"的路原来没写 file 分支，
+        // 2026-10-21 03:5x 主人问"〔主人〕那个 txt 为啥没下载下来"：这条"没叫我"的路原来没写 file 分支，
         // 文件段落到 default 就只剩一个 [file]，一个字都进不来。现在跟收图一样落盘，文本类带一段开头。
         const label = safeBaseName(d.name ?? d.file) || "文件";
         if (!opts.media) {
@@ -7406,6 +7623,44 @@ if (process.argv.includes("--tone-test")) {
   process.exit(bad ? 1 : 0);
 }
 
+// ---------- 日志/留档轮转自检：只看状态，不真转（真转会改掉正在写的文件） ----------
+// 验证 2026-10-24 主人要的两条轮转策略的参数与阈值是否合预期。
+if (process.argv.includes("--rotate-test")) {
+  const show = (label, file, limit) => {
+    let st = null;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      console.log(`  ${label}: 还没生成（${file}）`);
+      return;
+    }
+    const mb = st.size / 1048576;
+    const pct = ((st.size / limit) * 100).toFixed(1);
+    console.log(
+      `  ${label}: ${mb.toFixed(2)}MB / 上限 ${(limit / 1048576).toFixed(0)}MB（${pct}%）` +
+        (st.size >= limit ? "  ⚠ 下次巡检就会转" : ""),
+    );
+  };
+  console.log(`阈值：日志单卷 ${LOG_ROTATE_BYTES / 1048576}MB / 留 ${LOG_KEEP} 份；` +
+    `留档单卷 ${REJECTED_ROTATE_BYTES / 1048576}MB / 留 ${REJECTED_KEEP_FILES} 份`);
+  console.log("当前：");
+  show("whale-bot.log", LOG_PATH, LOG_ROTATE_BYTES);
+  show("supervisor.log", path.join(CFG.logs, "supervisor.log"), LOG_ROTATE_BYTES);
+  show("autostart.log", path.join(CFG.logs, "autostart.log"), LOG_ROTATE_BYTES);
+  show("turns.jsonl", TURNS_LOG, 5 * 1024 * 1024);
+  show("rejected.jsonl", REJECTED_PATH, REJECTED_ROTATE_BYTES);
+  // 已有的历史卷
+  try {
+    const olds = fs
+      .readdirSync(CFG.logs)
+      .filter((n) => /^(whale-bot|supervisor|autostart)\.\d{8}-\d{6}\.log$/.test(n));
+    console.log(`历史卷：${olds.length ? olds.join("、") : "(无)"}`);
+  } catch {
+    /* ignore */
+  }
+  process.exit(0);
+}
+
 // ---------- 记忆质量门自检：不连 QQ、不花模型钱、不写库 ----------
 // 验证 2026-10-24 主人拍板的三档启发式：太短 / 纯语气词 / 与已有条目重复 一律拦，
 // 其余放行。**只判定不落盘**（连 rejected.jsonl 都不写，免得测试把真库搞脏）。
@@ -7414,9 +7669,8 @@ if (process.argv.includes("--memory-gate-test")) {
     .listItems({ limit: 400 })
     .filter((x) => x.status === "active")
     .map((x) => x.text);
-  // 「与库内重复」这条不能依赖真库：开源版是空库，找不到样本就测不出来。
-  // 所以自己造一条假样本塞进比对池（只在这个自检里用，不写盘）——
-  // 这样无论库空库满，这条用例都有意义。
+  // 「与库内重复」这条不能依赖真库：库空时找不到样本就测不出来（开源版就是空库）。
+  // 所以自己造一条假样本塞进比对池（只在这个自检里用，不写盘）。
   // ⚠️ 样本里**不能带否定词**：「…别放奶」和「…」的否定集合不同，sameness() 会判「不是同一件事」
   //     （这个行为是对的——「别放奶」是附加约束，不该当重复吞掉）。
   const DUP_SAMPLE = "我们约好每周日晚上十点一起复盘这周发生的事";
@@ -7435,7 +7689,6 @@ if (process.argv.includes("--memory-gate-test")) {
     ["太短 5 字", "今天下雨了"],
     ["正常偏好", "爸爸喜欢喝冰美式不加糖"],
     ["正常约定", "主人说以后语音只在真的有情绪的时候发，平常别乱发"],
-    // 比假样本短一截、无否定词 → 必然跟池里那条判为重复
     ["与库内重复", "每周日晚上十点复盘这周发生的事"],
     ["正常长句", "他答应下个月带我去看海边的日出"],
   ];

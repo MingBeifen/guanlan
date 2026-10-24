@@ -277,7 +277,11 @@ function collectStore() {
     return out;
   }
   for (const it of data.items ?? []) {
-    if (!it || it.status === "cold" || it.status === "superseded") continue; // 冷藏/被顶掉的不该被想起来
+    // 时间推理（2026-10-24 主人要的）：原来这里把 superseded 直接丢掉，
+    // 于是「你上个月说过的那个」永远翻不到——历史版本连向量都没有，检索无从谈起。
+    // 现在**不丢，只打标**：进索引时带 st:"superseded"，检索侧默认剔除、
+    // 问句明确指向过去时才放行（见 pickWithHistory）。
+    if (!it || it.status === "cold") continue; // 冷藏的仍然不进索引（它本来就不该被想起来）
     const text = String(it.text ?? "").trim();
     if (text.length < 8) continue;
     const scope = it.key === "shared" || !it.key ? "shared" : it.key;
@@ -288,10 +292,14 @@ function collectStore() {
         : /^group:/.test(scope)
           ? `【群${scope.slice("group:".length)}】`
           : "【私聊】";
+    // 被顶掉的旧版正文后面缀一句「（已过时）」——不光是标签，正文里也让人一眼看出
+    // 这是老说法。检索命中这类块时，模型看到这行就不会把它当现状回答。
+    const isSuper = it.status === "superseded";
     out.push({
       id: "store:" + it.id,
       sid: it.id,
       scope,
+      st: isSuper ? "superseded" : "active",
       src: `${where}记忆/${LAYER_LABEL[it.layer] ?? it.layer ?? "记忆"}`,
       day: it.day || "",
       text,
@@ -358,11 +366,30 @@ export async function buildIndex({ quiet = false } = {}) {
 
   // 4) 五层记忆库：条目按归属进对应 scope，控制台的增删改由 syncStore 增量维护
   let storeItems = 0;
+  let storeSuperseded = 0;
   for (const it of collectStore()) {
-    items.push({ scope: it.scope, src: it.src, day: it.day, text: it.text, id: it.id, sid: it.sid, hash: it.hash });
+    // ⚠️ 加字段必须**两处都改**（2026-10-24 栽过一次）：
+    //   ①这里把 collectStore() 的产物转手进 items 时要带上；
+    //   ②下面 `items.map(...)` 序列化写盘时也要带上。
+    // 漏一处就等于没加，而且不报错——索引里查 st 恒为 undefined。
+    items.push({
+      scope: it.scope,
+      src: it.src,
+      day: it.day,
+      text: it.text,
+      id: it.id,
+      sid: it.sid,
+      hash: it.hash,
+      st: it.st ?? "active",
+    });
     storeItems++;
+    if (it.st === "superseded") storeSuperseded++;
   }
-  if (storeItems) say(`记忆库 ${storeItems} 条也进索引`);
+  if (storeItems)
+    say(
+      `记忆库 ${storeItems} 条也进索引` +
+        (storeSuperseded ? `（其中旧版 ${storeSuperseded} 条带 st=superseded）` : ""),
+    );
 
   say(`切出 ${items.length} 块，开始编码…`);
   const t0 = Date.now();
@@ -704,6 +731,35 @@ function storeInfo() {
   }
 }
 
+// ---------- 时间推理：这句是不是在问「过去」（2026-10-24 主人要的） ----------
+// 为什么需要：记忆里同一件事会留多代（新的来了旧的标 superseded），
+// 但检索默认只认"现在的说法"。于是「你上个月说过什么」「以前是怎么办的」这种问句，
+// 永远只能拿到现状答案——答非所问，而且她察觉不到自己漏了历史。
+//
+// 判据只用**本地词表**，不调模型：
+//   一级（wantsHistory）：明确指向过去的时间词/问法 → 放行 superseded，并降权 + 打标；
+//   二级（asOf）：能解析出具体日期/月份的，留给未来做快照过滤（这版先只识别不实现）。
+//
+// ⚠️ 误判代价不对称：把"现在的问题"误判成"问过去"，只是多带了两条打了「已过时」标的老话；
+//    反过来（漏判）就会答非所问。所以词表**宁宽勿严**。
+const HISTORY_WORDS = [
+  "以前", "之前", "早先", "原来", "当初", "当时", "曾经", "过去",
+  "上次", "上回", "上一版", "旧版", "老规矩", "老办法", "从前", "那年", "那时候",
+  "改过", "改成了", "换成了", "原来不是", "最早", "一开始", "最初",
+  "上个月", "上周", "去年", "前天", "前几天", "前几天说", "以前说",
+];
+// 明确指向"外部世界的历史/别人家的历史"，不该触发自己记忆的历史检索
+const NOT_HISTORY_WORDS = ["很久以前的故事", "历史上", "古代", "昨天看的电影"];
+function detectHistoryIntent(q) {
+  const s = String(q ?? "");
+  if (!s) return false;
+  for (const w of NOT_HISTORY_WORDS) {
+    // 只在**整句就是在问这个外部话题**时才屏蔽（避免"我以前看过这个历史纪录片"被误屏蔽）
+    if (s.trim() === w) return false;
+  }
+  return HISTORY_WORDS.some((w) => s.includes(w));
+}
+
 export async function search(
   query,
   // ⚠️ 2026-10-24（B5 配套）：默认 minScore 从 **0.45 改成 0.26**。
@@ -738,11 +794,19 @@ export async function search(
   const pool = open ? data.items : data.items.filter((it) => allowed.has(it.scope));
   if (!pool.length) return [];
   const info = storeInfo();
-  // 被顶掉的旧说法 / 冷藏的条目：索引里可能还留着，这里直接扔掉
+  // 时间推理（2026-10-24 主人要的）：被顶掉的旧说法怎么处理，取决于**这句在不在问过去**。
+  //   ①默认（问现在）：扔掉 superseded——老说法进池只会污染当前答案。
+  //   ②问过去（wantsHistory）：**放行**，但只作为"补充"参与，不进主排序（后面乘 0.85 降权），
+  //     输出时带「【某个日期的说法，现已改为…】」前缀。
+  //   ③冷藏的永远扔——它是分数掉下去的东西，跟"历史版本"是两码事。
+  const wantsHistory = detectHistoryIntent(q);
   const live = pool.filter((it) => {
     if (!it.sid) return true;
     const st = info.get(it.sid);
-    return !st || (st.status !== "superseded" && st.status !== "cold");
+    if (!st) return true;
+    if (st.status === "cold") return false;
+    if (st.status === "superseded") return wantsHistory; // 只有问过去才放行
+    return true;
   });
   if (!live.length) return [];
   const { rows } = await encode([QUERY_PREFIX + q]);
@@ -844,10 +908,18 @@ export async function search(
       sim >= Number(process.env.WW_SIM_MID ?? 0.35) && (kw >= 1 || (entOn && ent >= 0.25));
     if (!(strongSim || weakButSupported)) continue;
     const st = it.sid ? info.get(it.sid) : null;
-    const rec = recencyOf(it.day, layerOfSrc(it.src));
+    const isSup = Boolean(st && st.status === "superseded");
+    // ⚠️ 问过去时**关掉时间衰减**（2026-10-24 想清楚的一条）：
+    // 「你以前用什么模型」这个问题，答案本身就是**旧**的东西——如果还按「越新越好」打分，
+    // 那条最该被召回的旧块会同时挨两刀（recency 低 + superseded 降权），
+    // 实测就是这样被挤出 top10 的。问历史时"新"不是优点。
+    const rec = wantsHistory ? 1.0 : recencyOf(it.day, layerOfSrc(it.src));
     const imp = st ? Math.min(1, Math.max(0, Number(st.score ?? 40) / 100)) : 0.5;
-    const fused = Math.min(1, 0.6 * textSim + 0.25 * rec + 0.15 * imp);
-    scored.push({ it, fused, sim, textSim, rec, imp, kw, ent });
+    let fused = Math.min(1, 0.6 * textSim + 0.25 * rec + 0.15 * imp);
+    // 被顶掉的旧说法降权 15%，让它排在现状答案后面（问过去时也留这一刀，
+    // 但 rec 已经封顶成 1.0 了，实际只挨这一刀，不再双重惩罚）。
+    if (isSup) fused *= 0.85;
+    scored.push({ it, fused, sim, textSim, rec, imp, kw, ent, superseded: isSup });
   }
   if (!scored.length) {
     // 一条都没够着门槛：词面退路也过同一道关（压中 KW_GATE 处、向量不低于 KW_FLOOR），过不了就老实空着。
@@ -880,6 +952,18 @@ export async function search(
       via: "fused",
       sim: Math.round(h.sim * 1000) / 1000,
     };
+    // 时间推理（2026-10-24）：被顶掉的旧说法出结果时，**在正文前面贴一句日期前缀**。
+    // 为什么要在正文里写而不是只给个字段：这些块最终是拼进提示词的纯文本，
+    // 模型看不到元数据；只有写进正文，它才知道「这是老说法，不是现状」。
+    if (h.superseded) {
+      const when = h.it.day ? `${h.it.day} ` : "";
+      const st2 = h.it.sid ? info.get(h.it.sid) : null;
+      const byWho = st2?.supersededBy
+        ? (info.get(st2.supersededBy)?.text ?? "").slice(0, 40)
+        : "";
+      o.text = `【${when}的说法，${byWho ? `现已改为「${byWho}…」` : "现已过时"}】${h.it.text}`;
+      o.superseded = true;
+    }
     // 调试用：explain 打开时把三样分量也带出来，正常调用不看这些字段
     if (explain)
       o.parts = {
@@ -948,6 +1032,47 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (cmd === "sync") {
     await syncStore();
     process.exit(0);
+  }
+  if (cmd === "history-test") {
+    // 时间推理自检（2026-10-24）：验「问现在 / 问过去」的分流是否按预期。
+    // 不花模型钱：判词只需本地词表，统计只需读 store.json。
+    const cases = [
+      ["爸爸那个语音是怎么弄的", false],
+      ["现在用的哪个模型", false],
+      ["我还欠你什么", false],
+      ["你上个月说过什么", true],
+      ["以前是怎么办的", true],
+      ["原来的规矩是什么", true],
+      ["你之前说的那个口令", true],
+      ["当初为什么这么定", true],
+      ["改过几次", true],
+      ["我们最早聊的是什么", true],
+      ["上周的进度怎么样", true],
+      ["它现在在干嘛", false],
+      ["历史上的今天", false],
+    ];
+    let bad = 0;
+    for (const [q, want] of cases) {
+      const got = detectHistoryIntent(q);
+      const ok = got === want;
+      if (!ok) bad++;
+      console.log(`${ok ? "对 " : "错 "} ${want ? "应问过去" : "应问现在"} → ${got ? "问过去" : "问现在"}  「${q}」`);
+    }
+    // 统计库里有多少 superseded 会被 time-travel 用到
+    const info = storeInfo();
+    let sup = 0;
+    let act = 0;
+    for (const v of info.values()) {
+      if (v.status === "superseded") sup++;
+      else if (v.status === "active") act++;
+    }
+    console.log(`\n库里：active ${act} 条 / superseded ${sup} 条（问过去时可被召回）`);
+    const idx = loadIndex();
+    const idxSup = (idx?.items ?? []).filter((x) => x.st === "superseded").length;
+    console.log(`索引里：带 st=superseded 标记的块 ${idxSup} 个` +
+      (sup && !idxSup ? "  ⚠ 库里有旧版但索引里没有——要跑一次 `node vector-memory.mjs build` 重建" : ""));
+    console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+    process.exit(bad ? 1 : 0);
   }
   if (cmd === "query") {
     const q = process.argv[3] ?? "";
