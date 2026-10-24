@@ -11,9 +11,9 @@ import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadConfig, saveConfig, writeProfile, activeModel, fallbackModel } from '../bin/profile.mjs';
 // 本地转发口：桌面 DSH 里 dsh-our-free-model 挂的 OpenAI 兼容网关（默认 127.0.0.1:8326）
-// 它同时供给第三方账号渠道（workbuddy/trae/qoder 等）、免费车道和 deepseek-official。
+// 它同时供给白嫖渠道（workbuddy/trae/qoder…）、免费车道和 deepseek-official。
 import { gatewayStatus, gatewayKey, gatewayBase, isGatewayModel, providerLabel } from './gateway.mjs';
-// 记忆库：面板和机器人共用 home\memory\store.json（五层 + 打分 + 淡忘）
+// 记忆库：面板和机器人共用 home\memory\store.json（2026-10-21 主人要的五层 + 打分 + 淡忘）
 import * as memStore from '../bot/memory-store.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -104,29 +104,16 @@ function botSince() {
   try { return fs.statSync(path.join(RUNTIME, 'bot.pid')).mtimeMs; } catch { return null; }
 }
 
-// 她的作息：机器人把状态写进 home\state\proactive.json，面板只读文件，
-// 不跟机器人进程打交道。目标是在概览里能看见她在睡还是醒着，所以这里给足字段：
-// 睡没睡 / 几点睡的 / 几点自己醒 / 明晚约几点睡 / 心情。
+// 主人睡（2026-10-20 的老功能）：机器人把状态写进 home\state\proactive.json，
+// 面板只读文件，不跟机器人进程打交道。
 function sleepState() {
   let pro = {};
   try {
     pro = JSON.parse(fs.readFileSync(path.join(ROOT, 'home', 'state', 'proactive.json'), 'utf8')) || {};
   } catch { /* 还没跑过就是空 */ }
-  const now = Date.now();
-  const herAsleep = Boolean(pro.herAsleep);
-  const herWakeAt = Number(pro.herWakeAt) || 0;
   return {
-    // 主人睡（老功能：他说晚安就静音）
     asleep: Boolean(pro.asleep),
     sleepKind: pro.sleepKind || '',
-    // 她自己睡（新加的）
-    herAsleep,
-    herSleepAt: Number(pro.herSleepAt) || null,
-    herWakeAt: herWakeAt || null,
-    herLeftMs: herAsleep && herWakeAt > now ? herWakeAt - now : 0,
-    herBedHour: Number.isFinite(Number(pro.herBedHour)) ? Number(pro.herBedHour) : 1,
-    herSleepDay: pro.herSleepDay || null,
-    herSleepNote: pro.herSleepNote || '',
     // 心情（顺手给概览用，反正已经读了）
     mood: Number.isFinite(Number(pro.mood)) ? Number(pro.mood) : null,
     busy: Boolean(pro.busy),
@@ -163,7 +150,7 @@ function status() {
   };
 }
 
-// 模型兜底状态（加的）：主模型调不动时机器人会自动退到官方 DeepSeek Flash，
+// 模型兜底状态（2026-10-21 加的）：主模型调不动时机器人会自动退到官方 DeepSeek Flash，
 // 冷却期内每轮直接用兜底、不再白试。界面要把这两件事显示出来，否则用户会以为「明明选的免费模型怎么在花官方额度」。
 function fallbackState(cfg) {
   const list = cfg.models || [];
@@ -218,7 +205,7 @@ function startBot() {
   return { ok: true, msg: '已让它起来，等几秒刷新' };
 }
 
-// 面板点重启时留个记号：机器人起来后靠它说准「这回是面板点的重启」。
+// 面板点重启时留个记号：机器人起来后靠它说准「这回是面板点的重启」（2026-10-22）。
 // 机器人读用过会自己撕掉，五分钟内有效。
 function markRestart(by) {
   try {
@@ -245,7 +232,7 @@ function stopBot() {
 
 const PROGRESS = path.join(RUNTIME, 'progress');
 
-// 任务进度（方案 A）：机器人每跑一轮会写一份快照在这里，面板只读文件，不跟机器人进程打交道。
+// 任务进度（2026-10-20 方案 A）：机器人每跑一轮会写一份快照在这里，面板只读文件，不跟机器人进程打交道。
 function progressData() {
   const list = [];
   try {
@@ -264,7 +251,7 @@ function progressData() {
   return { now: Date.now(), running, recent, turns: turns.reverse() };
 }
 
-// ---- DSH 会话回放（路线 1）----
+// ---- DSH 会话回放（2026-10-20 路线 1）----
 // DSH 把每轮事件写进 <DSH_HOME>/sessions/--<工作区>--/<会话id>/session.v4.jsonl.zstd。
 // 这个文件是逐帧追加的 zstd：整解只出第一帧，所以要按帧头魔数切段、逐帧解压再拼成 JSONL。
 // 面板只读这些文件，不碰机器人进程；文件正在写时最后一帧可能半截，解不开就等下次。
@@ -479,26 +466,9 @@ const body = (req) => new Promise((resolve) => {
   });
 });
 
-// 只认本机来源：浏览器从别的网站发的 POST 会带上那个网站的 Origin，这里挡掉。
-// 面板没有登录态，能挡住的就只有「别家网页借你的浏览器调本地接口」这一类（CSRF）。
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
-function sameOrigin(req) {
-  const src = req.headers.origin || req.headers.referer || '';
-  if (!src) return true; // 命令行 curl / 直接开页面（无 Origin）放行
-  try {
-    return LOCAL_HOSTS.has(new URL(src).hostname);
-  } catch {
-    return false;
-  }
-}
-
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   try {
-    // 写操作一律要过来源检查：别家网页不能借你的浏览器停机器人、删记忆
-    if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) {
-      return json(res, 403, { ok: false, msg: '只接受本机面板发来的请求' });
-    }
     if (url.pathname === '/' || url.pathname === '/index.html') {
       const html = fs.readFileSync(path.join(ROOT, 'panel', 'index.html'));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -531,11 +501,35 @@ const server = http.createServer(async (req, res) => {
       const layer = url.searchParams.get('layer') || '';
       const q = url.searchParams.get('q') || '';
       const key = url.searchParams.get('key') || '';
+      const items = memStore.listItems({ layer: layer || undefined, q: q || undefined, key: key || undefined, limit: 500 });
+      // 条目互联：links 存的是 id，链到的那条可能被当前筛选挡在外面（换层/搜索时），
+      // 所以另给一份全库 id → 摘要，前端拿它译名字（2026-10-23）
+      // listItems 默认把冷藏和旧版（superseded）都筛掉了，这里要补上，
+      // 不然链子指向冷藏区那几条就又译不出名字
+      const brief = {};
+      const all = [
+        ...memStore.listItems({ limit: 2000 }),
+        ...memStore.listItems({ layer: 'cold', limit: 2000 }),
+        ...memStore.listItems({ status: 'superseded', limit: 2000 }),
+      ];
+      for (const it of all) {
+        brief[it.id] = {
+          id: it.id,
+          key: it.key,
+          text: it.text,
+          layer: it.layer,
+          status: it.status,
+          score: it.score,
+          tags: it.tags,
+          pinned: it.pinned,
+        };
+      }
       return json(res, 200, {
         ok: true,
         stats: memStore.stats(),
         layerLabel: memStore.LAYER_LABEL,
-        items: memStore.listItems({ layer: layer || undefined, q: q || undefined, key: key || undefined, limit: 500 }),
+        items,
+        brief,
         last: memoryLast(),
         vector: vectorStats(),
       });
@@ -554,7 +548,7 @@ const server = http.createServer(async (req, res) => {
           .slice(0, 8),
         pinned: Boolean(b.pinned),
       };
-      if (b.layer && memStore.LAYERS.includes(b.layer)) patch.layer = b.layer;
+      // 层只由分数决定（2026-10-23 主人定的）：前端传来的 b.layer 不再采信
       if (b.id) {
         const it = memStore.updateItem(b.id, patch);
         if (it) spawnVectorSync();
@@ -603,6 +597,27 @@ const server = http.createServer(async (req, res) => {
       if (b.action === 'stop') return json(res, 200, stopBot());
       if (b.action === 'restart') { markRestart('panel'); stopBot(); return json(res, 200, startBot()); }
       return json(res, 400, { ok: false, msg: '不认识的动作' });
+    }
+    // 重启面板自己（2026-10-23 主人要的概览页按钮）：先回话，再把旧进程放掉、
+    // 由一个隔 1.2 秒的帮手拉起新的——不这样就会撞 8790 端口占用。
+    if (url.pathname === '/api/panel/restart' && req.method === 'POST') {
+      const helper = [
+        "const {spawn}=require('node:child_process');",
+        'setTimeout(()=>{',
+        '  const p=spawn(process.execPath,' + JSON.stringify([path.join(ROOT, 'panel', 'server.mjs')]) + ',',
+        '    {cwd:' + JSON.stringify(ROOT) + ',detached:true,stdio:"ignore",windowsHide:true,',
+        '     env:{...process.env,PANEL_NO_OPEN:"1"}});',
+        '  p.unref();',
+        '},1200);',
+      ].join('\n');
+      try {
+        spawn(process.execPath, ['-e', helper], { cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      } catch (e) {
+        return json(res, 500, { ok: false, msg: '拉不起来：' + (e && e.message) });
+      }
+      json(res, 200, { ok: true, msg: '面板重启中，两秒后自己刷新' });
+      res.on('finish', () => setTimeout(() => process.exit(0), 150));
+      return;
     }
     if (url.pathname === '/api/model' && req.method === 'POST') {
       const b = await body(req);

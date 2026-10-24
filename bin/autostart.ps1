@@ -1,21 +1,20 @@
 ﻿# 开机自启：等桌面起来 → 拉 NapCat/QQ → 拉看门人（机器人+面板）
 # 由计划任务 WhaleKit-Autostart 在登录时以最高权限调用。
 #
-# 【重要】计划任务是 RunLevel=Highest，跑起来是 High 完整性。
+# 【2026-10-22 重要】计划任务是 RunLevel=Highest，跑起来是 High 完整性。
 # 在 High 上下文里，DSH 沙箱派生的受限子进程（pwsh/bash）会在加载 DLL 阶段
-# 直接死掉，报 0xC0000142 / exit 3221225794 —— 机器人因此完全用不了命令行。
+# 直接死掉，报 0xC0000142 / exit 3221225794 —— 观澜因此完全用不了命令行。
 # 所以这里第一件事是把自己降回 Medium（普通用户权限）再干活：
 # 经 explorer.exe 中转启动，Windows 会把完整性级别重置为 Medium。
 param([switch]$Delevated)
 
 $ErrorActionPreference = 'Continue'
-# 路径全部自动推导，不写死盘符：
-#   $ROOT = 本脚本所在目录的上一级（即仓库根）
-#   $NAP  = 同级目录下的 NapCat；也可用环境变量 NAPCAT_DIR 覆盖
-#   $NODE = 优先用 PATH 里的 node，找不到再退回环境变量 NODE_EXE
-$ROOT = Split-Path -Parent $PSScriptRoot
-$NAP  = if ($env:NAPCAT_DIR) { $env:NAPCAT_DIR } else { Join-Path (Split-Path -Parent $ROOT) 'NapCat' }
-$NODE = if ($env:NODE_EXE) { $env:NODE_EXE } else { (Get-Command node -ErrorAction SilentlyContinue).Source }
+# 开源版：包根不再写死，从脚本自身位置往上推一级（bin/autostart.ps1 -> 包根)
+$ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+# 开源版：NapCat 装在哪由你自己填（或先设环境变量 WW_NAPCAT）
+$NAP  = if ($env:WW_NAPCAT) { $env:WW_NAPCAT } else { 'C:\NapCat' }
+# 开源版：node 路径优先用环境变量 WW_NODE，其次 PATH 里的 node（不写死某台机器的安装位置）
+$NODE = if ($env:WW_NODE) { $env:WW_NODE } else { (Get-Command node -ErrorAction SilentlyContinue).Source }
 $LOG  = Join-Path $ROOT 'logs\autostart.log'
 
 function Say([string]$m) {

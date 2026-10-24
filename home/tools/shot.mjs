@@ -1,8 +1,8 @@
-// 整屏截图（要求截整个屏幕，不是单个窗口）
+// 整屏截图（2026-10-22 加的，爸爸要求截图必须是整个屏幕）
 // 用法：node home\tools\shot.mjs [输出路径]
 //   不给路径就存到 home\media\shot-<时间戳>.png
-// 关键点：PowerShell 默认不认 DPI，系统缩放不是 100% 时会量错尺寸、左右各缺一截；
-// 先 SetProcessDPIAware 再 CopyFromScreen，量到的才是真正的物理分辨率。
+// 关键点：PowerShell 默认不认 DPI，150% 缩放时会量成 1707x1067、左右各缺一截；
+// 先 SetProcessDPIAware 再 CopyFromScreen，量到的才是物理分辨率（2560x1600）。
 // 别再用「直接 Add-Type + CopyFromScreen」那套，那个就是缺一截的老毛病。
 import fs from "node:fs";
 import path from "node:path";

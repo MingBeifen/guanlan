@@ -97,3 +97,16 @@ home/_dry-ownthing.txt
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---------- 8. 本机跑出来的新数据（2026-10-24 同步时补） ----------
+# 和 store.json 一样是「这台机器上跑出来的东西」，不入库：
+#   rejected.jsonl = 被记忆质量门拦下的条目留档
+#   dreams.jsonl   = 夜里做的梦（非事实，永不进 store）
+#   state/dream.json = 梦境状态（今天梦过没、失败冷却）
+home/memory/rejected.jsonl
+home/memory/dreams.jsonl
+home/memory/entity-df.json
+# Python 编译缓存（改 say-voice.py 后跑一次就会生成）
+__pycache__/
+*.pyc
+*.pyo

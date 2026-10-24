@@ -37,24 +37,18 @@ function findDsh() {
   // 1) 显式指定优先：环境变量 DSH_EXE
   const guesses = [
     String(process.env.DSH_EXE || '').trim(),
+    'D:\\DSH\\DeepSeek Harness.exe',
     path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe'),
     path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'DeepSeek Harness', 'DeepSeek Harness.exe'),
     path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'DeepSeek Harness', 'DeepSeek Harness.exe'),
   ].filter(Boolean);
   const hit = guesses.find((p) => fs.existsSync(p));
   if (hit) return hit;
-  // 2) 装到自选目录的（不在上面几个标准位置）：只往下扫两层，不碰全盘。
-  //    这里列的是「程序一般会装在哪」，各家机器不一样，所以环境变量也能补。
+  // 2) 装到自选目录的（比如 D:\Software\DeepSeekHarness）：只往下扫两层，不碰全盘
   const roots = [
-    process.env.ProgramFiles,
-    process.env['ProgramFiles(x86)'],
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs'),
-    process.env.SystemDrive && path.join(process.env.SystemDrive + '\\', 'Software'),
-    process.env.SystemDrive && path.join(process.env.SystemDrive + '\\', 'Programs'),
-    path.join(os.homedir(), 'Desktop'),
-    path.join(os.homedir(), 'Downloads'),
-    String(process.env.DSH_SCAN_DIRS || '').trim(),
-  ].filter(Boolean);
+    'D:\\Software', 'D:\\Program Files', 'D:\\Programs', 'C:\\Software',
+    path.join(os.homedir(), 'Desktop'), path.join(os.homedir(), 'Downloads'),
+  ];
   for (const root of roots) {
     let dirs = [];
     try { dirs = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
@@ -73,7 +67,7 @@ const cliOf = (exe) => path.join(path.dirname(exe), 'resources', 'app.asar', 'ds
 
 const cfg = loadConfig() || JSON.parse(fs.readFileSync(path.join(kitRoot(), 'config.example.json'), 'utf8'));
 
-console.log('\n=== 鲸鱼机器人一键包 · 设置 ===');
+console.log('\n=== 小鲸一键包 · 设置 ===');
 console.log('回车 = 保留方括号里的原值。\n');
 
 // 1. QQ
@@ -87,14 +81,14 @@ if (oldName) {
   const again = await ask('要换个名字吗？想换就直接输新名字，直接回车 = 不改', '');
   if (again.trim()) cfg.bot.name = again.trim();
 } else {
-  console.log('\n名字不在这儿问了：先叫「鲸鱼」，等第一次聊天它自己小声问你。');
+  console.log('\n名字不在这儿问了：先叫「小鲸」，等第一次聊天它自己小声问你。');
 }
 cfg.bot.name = String(cfg.bot.name || '').trim();
 if (cfg.bot.name) {
   const keep = (Array.isArray(cfg.bot.names) ? cfg.bot.names : []).filter((x) => x && x !== cfg.bot.name);
   cfg.bot.names = [...new Set([cfg.bot.name, ...keep])];
 } else {
-  cfg.bot.names = ['鲸鱼'];
+  cfg.bot.names = ['小鲸', '鲸鱼'];
 }
 const owners = (await ask('谁能指挥它（你的 QQ 号，多个用逗号分隔）', (cfg.bot.owners || []).filter(Boolean).join(',')))
   .split(/[,，\s]+/).map(Number).filter(Boolean);
@@ -175,7 +169,7 @@ try {
   if (applyNameToPersona(cfg)) {
     console.log(named
       ? `名字已写进 home\\AGENTS.md：它叫「${named}」，以后不会再问你要名字。`
-      : '没取名：先叫「鲸鱼」；等第一次聊天聊开了，它自己会小声问你要一个名字（彩蛋，只问一次）。');
+      : '没取名：先叫「小鲸」；等第一次聊天聊开了，它自己会小声问你要一个名字（彩蛋，只问一次）。');
   }
 } catch (e) {
   console.log('名字没写进人设：' + e.message);
@@ -192,12 +186,11 @@ if (exe) {
 }
 
 console.log(`
-接下来几件（做过的跳过）：
+接下来三件（做过的跳过）：
   1. 装 NapCatQQ，登机器人那个 QQ 号（扫码）；
   2. NapCat 里开 WebSocket 服务器，端口跟上面地址一致（默认 3001），token 跟填的一样；
-  3. 双击「check-deps.bat」把依赖补齐（向量模型、npm 包这些）；
-  4. 双击「start.bat」，然后在 QQ 里跟它说句话。
+  3. 双击「start.bat」，然后在 QQ 里跟它说句话。
 
-要改人设：编辑 home\\AGENTS.md。
+要改人设：编辑 home\\AGENTS.md；要发新包：找做这个包的人。
 `);
 rl.close();

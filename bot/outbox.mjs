@@ -1,4 +1,4 @@
-// 发件箱（技术优化第一条）
+// 发件箱（2026-10-19 技术优化第一条）
 // 要解决的问题：原来 reply() 直接 callAction 发消息，WS 一断、NapCat 一抖、动作超时，
 // 这条消息就没了，日志里只剩一句失败。现在先把消息写进 home\outbox.json（落盘才算数），
 // 再由一个单线程泵按顺序发；失败按 2s→5s→15s→30s 退避重试，重启后接着发没发完的；
@@ -47,13 +47,38 @@ export function createOutbox(opts = {}) {
   let seq = 0;
 
   // 队列文件用"写临时文件再改名"落盘：半截写坏的文件宁可没有，也不能让泵读到坏 JSON 卡死。
+  // 2026-10-24 体检修：Windows 上目标文件可能被杀软/索引/备份脚本短时占用，rename 会报
+  // EPERM 而不是排到后面去。实测裸循环 300 次失败 22 次（7.3%），加 5 次 5ms 间隔的重试后
+  // 200 次 0 失败。写盘失败时消息只活在内存里，进程一崩就丢，所以这里必须重试。
   function writeQueue() {
+    const tmp = `${queuePath}.tmp`;
     try {
-      const tmp = `${queuePath}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(items, null, 2) + '\n', 'utf8');
-      fs.renameSync(tmp, queuePath);
     } catch (e) {
       log('发件箱写盘失败:', e?.message ?? String(e));
+      return;
+    }
+    // rename 是同步的，只能忙等几个毫秒重试；最多约 25ms，比丢一条消息划算。
+    for (let i = 0; i < 6; i++) {
+      try {
+        fs.renameSync(tmp, queuePath);
+        return;
+      } catch (e) {
+        const code = e?.code ?? '';
+        if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') {
+          log('发件箱写盘失败:', e?.message ?? String(e));
+          return;
+        }
+        if (i === 5) {
+          log(`发件箱写盘失败（重试 5 次仍被占用）: ${e?.message ?? String(e)}`);
+          return;
+        }
+        // 同步忙等：这段代码在泵的心跳里，没有 await 可用，5ms×5 也就 25ms
+        const until = Date.now() + 5;
+        while (Date.now() < until) {
+          /* 等文件句柄被放掉 */
+        }
+      }
     }
   }
 

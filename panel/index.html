@@ -8,7 +8,7 @@
       href="/image/DeepSeekHarness-WhaleGirl.ico"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>鲸鱼控制台</title>
+    <title>观澜控制台</title>
     <style>
       :root {
         --bg: #0a0d13;
@@ -427,13 +427,6 @@
         font-weight: 500;
         margin-top: 3px;
         font-family: var(--mono);
-      }
-      /* 她的作息：睡着用紫、醒着用绿，一眼能分出来 */
-      .stat b.zzz {
-        color: var(--accent2);
-      }
-      .stat b.awake {
-        color: var(--ok);
       }
 
       .grid3 {
@@ -1036,6 +1029,50 @@
       .mrow2 .mm > * {
         white-space: nowrap;
       }
+      /* 条目互联（2026-10-23）：这条和哪几条说的是同一摊事，点一下能跳过去 */
+      .mrels {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 5px;
+      }
+      .mrel {
+        font-family: var(--mono);
+        font-size: 10px;
+        color: #8fb8e8;
+        background: #0f1d2b;
+        border: 1px solid #1e3550;
+        border-radius: 5px;
+        padding: 0 6px;
+        line-height: 15px;
+        cursor: pointer;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .mrel:hover {
+        color: #dbeaff;
+        border-color: #2f5480;
+        background: #13263a;
+      }
+      /* 左边细杆的颜色告诉你链到的那条在哪一层（不能复用 .sc：它的圆角/字号会盖掉 .mrel） */
+      .mrel.core {
+        border-left: 2px solid #f0c674;
+      }
+      .mrel.long {
+        border-left: 2px solid #9ecbff;
+      }
+      .mrel.mid {
+        border-left: 2px solid #a6e3b2;
+      }
+      .mrel.short {
+        border-left: 2px solid #b8c3d1;
+      }
+      .mrel.cold {
+        border-left: 2px solid #6b7789;
+        opacity: 0.7;
+      }
       .sc {
         font-family: var(--mono);
         font-size: 10.5px;
@@ -1190,7 +1227,7 @@
         <div class="brand">
           <div class="logo">鲸</div>
           <div class="brand-t">
-            <b>鲸鱼控制台</b><span>127.0.0.1 · 只对本机开放</span>
+            <b>观澜控制台</b><span>127.0.0.1 · 只对本机开放</span>
           </div>
         </div>
         <nav class="nav">
@@ -1320,23 +1357,19 @@
               <div class="hero-sub" id="qq">-</div>
             </div>
             <div class="hero-r">
-              <div class="stat">
-                <span>作息</span><b id="sleepState">-</b>
-              </div>
               <div class="stat"><span>模型</span><b id="model">-</b></div>
               <div class="stat"><span>已运行</span><b id="uptime">-</b></div>
               <div class="stat"><span>进程</span><b id="pids">-</b></div>
             </div>
           </div>
+          <div class="halt" id="haltBox" style="display: none">
+            <b>看门人停手了</b>
+            <span id="haltText"></span>
+          </div>
           <div class="grid3">
-            <div class="halt" id="haltBox" style="display: none">
-              <b>看门人停手了</b>
-              <span id="haltText"></span>
-            </div>
             <div class="kv"><span>能指挥它的人</span><b id="owners">-</b></div>
             <div class="kv"><span>群聊</span><b id="group">-</b></div>
             <div class="kv"><span>用的模型配置</span><b id="model2">-</b></div>
-            <div class="kv"><span>她的作息</span><b id="sleepDetail">-</b></div>
           </div>
           <div class="grid2">
             <div class="card">
@@ -1353,6 +1386,21 @@
               </div>
               <pre class="log mini" id="ovLog">-</pre>
             </div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>控制台自己</b
+              ><span class="hint">改了 server.mjs 才需要；只改 index.html 刷新就行</span>
+            </div>
+            <div
+              style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap"
+            >
+              <button class="btn" onclick="restartPanel()">重启控制台</button>
+              <span class="msg" id="pmsg"></span>
+            </div>
+            <p class="hint" style="margin: 8px 0 0">
+              只换掉这一个面板进程，机器人、NapCat、网关都不动。重启后页面会自己刷回来。
+            </p>
           </div>
         </section>
 
@@ -1405,7 +1453,7 @@
               <div class="empty">读取中…</div>
             </div>
           </div>
-          <!-- 本地转发口：桌面 DSH 里 Our Free Model 挂的 OpenAI 兼容网关（第三方账号渠道都在这里） -->
+          <!-- 本地转发口：桌面 DSH 里 Our Free Model 挂的 OpenAI 兼容网关（白嫖渠道都在这里） -->
           <div class="card">
             <div class="card-h">
               <b>转发口模型</b><span class="hint" id="gwHint">读网关中…</span>
@@ -1596,20 +1644,10 @@
                     />
                   </label>
                   <label class="fl"
-                    >层
-                    <select id="memLayer">
-                      <option value="">按分数自动</option>
-                      <option value="core">永久</option>
-                      <option value="long">长期</option>
-                      <option value="mid">中期</option>
-                      <option value="short">短期</option>
-                    </select>
-                  </label>
-                  <label class="fl"
                     >归属
                     <select id="memKey">
-                      <option value="private:0">私聊（主人）</option>
-                      <option value="group:0">群（部署后自动填充）</option>
+                      <option value="private:1000000001">私聊（主人）</option>
+                      <option value="group:1000000002">群 1000000002</option>
                       <option value="shared">通用（所有会话）</option>
                     </select>
                   </label>
@@ -1621,10 +1659,10 @@
                 <div class="frow">
                   <label class="toggle"
                     ><input type="checkbox" id="memPinned" />
-                    钉住（进永久，不淡忘）</label
+                    钉住（不淡忘）</label
                   >
                   <span class="msg" id="memHint"
-                    >按分数自动分层：≥88 永久 · 70–87 长期 · 45–69 中期 · 12–44
+                    >分层只看分数：≥88 永久 · 70–87 长期 · 45–69 中期 · 12–44
                     短期 · 跌破 12 冷藏</span
                   >
                 </div>
@@ -1766,7 +1804,7 @@
                 `连续 ${halt.fails} 次起来就退，不再自动重拉。把最后那次改动改回去，或点右边「启动」重来。`;
             }
           }
-          $("name").textContent = d.bot.name || "还没取名（叫它鲸鱼）";
+          $("name").textContent = d.bot.name || "还没取名（叫它小鲸）";
           $("qq").textContent = d.bot.qq ? "QQ " + mask(d.bot.qq) : "QQ 没填";
           $("owners").textContent = d.bot.owners.map(mask).join("、") || "没填";
           $("group").textContent = d.group.enabled
@@ -1777,23 +1815,6 @@
             : "没配";
           $("model").textContent = modelText;
           $("model2").textContent = modelText;
-          // 她的作息：概览里一眼看出在睡还是醒着
-          const sl = d.sleep || {};
-          const bedH = Number.isFinite(sl.herBedHour) ? sl.herBedHour : 1;
-          const bedTxt = `${String(bedH).padStart(2, "0")}:00`;
-          if (sl.herAsleep) {
-            $("sleepState").textContent = `睡着 · ${fmtDur(sl.herLeftMs)}后醒`;
-            $("sleepState").className = "zzz";
-            $("sleepDetail").textContent = sl.herWakeAt
-              ? `${hhmm(sl.herWakeAt)} 自己醒 · 明晚约 ${bedTxt} 睡`
-              : `明晚约 ${bedTxt} 睡`;
-          } else {
-            $("sleepState").textContent = "醒着";
-            $("sleepState").className = "awake";
-            $("sleepDetail").textContent = sl.herSleepDay
-              ? `上次 ${sl.herSleepDay} 睡 · 明晚约 ${bedTxt} 自己睡`
-              : `明晚约 ${bedTxt} 自己睡`;
-          }
           $("mName").textContent = d.model?.name || "没配";
           $("mId").textContent = d.model?.model || "没配";
           $("mBase").textContent = d.model?.baseURL || "-";
@@ -2062,7 +2083,7 @@
         if (atBottom) el.scrollTop = el.scrollHeight;
       }
 
-      // 每条消息默认只露两行，点一下才看全
+      // 每条消息默认只露两行，点一下才看全（2026-10-22 主人要的）
       function bubbleRow(cls, who, t, text) {
         const long = text.length > 90 || text.split("\n").length > 2;
         return `<div class="r ${cls}"><div class="who">${who} · ${hhmm(t)}</div><div class="bubble${long ? " clamp" : ""}"><span class="bt">${esc(text)}</span></div>${long ? '<button class="more" onclick="toggleLong(this)">展开全部</button>' : ""}</div>`;
@@ -2079,7 +2100,7 @@
           case "user":
             return bubbleRow("u", "你", r.t, r.text);
           case "assistant":
-            return bubbleRow("a", "鲸鱼", r.t, r.text);
+            return bubbleRow("a", "观澜", r.t, r.text);
           case "think":
             return `<div class="r think"><details><summary>思考 ${r.text.length} 字</summary><div class="body">${esc(r.text)}</div></details></div>`;
           case "tool": {
@@ -2110,6 +2131,19 @@
         const d = await apiPost("/api/action", { action });
         $("msg").textContent = d.msg || "";
         setTimeout(load, 1500);
+      }
+
+      /** 只重启面板自己（不动机器人）：旧进程退出后由帮手拉起新的，页面等两秒自己刷新。 */
+      async function restartPanel() {
+        const m = $("pmsg");
+        if (m) m.textContent = "重启中…";
+        try {
+          const d = await apiPost("/api/panel/restart");
+          if (m) m.textContent = d.msg || "重启中…";
+        } catch (e) {
+          if (m) m.textContent = "面板没响应，可能已经在重启了";
+        }
+        setTimeout(() => location.reload(), 2600);
       }
 
       function pickModel(i) {
@@ -2234,6 +2268,9 @@
         sel: null,
         last: null,
         needId: "",
+        // 全库 id → 条目：服务端 brief + 每次翻到的条目攒起来，
+        // 链子指向别的层/冷藏区时也能译出名字（2026-10-23）
+        known: {},
       };
       const MEM_LAYER_NAME = {
         core: "永久",
@@ -2308,7 +2345,8 @@
           memState.last = d.last;
           const st = d.stats;
           $("memStats").textContent =
-            `共 ${st.total} 条 · 均分 ${st.avgScore} · 永久 ${st.core} / 长期 ${st.long} / 中期 ${st.mid} / 短期 ${st.short} / 冷藏 ${st.cold}`;
+            `共 ${st.total} 条 · 均分 ${st.avgScore} · 永久 ${st.core} / 长期 ${st.long} / 中期 ${st.mid} / 短期 ${st.short} / 冷藏 ${st.cold}` +
+            (st.superseded ? ` · 旧版 ${st.superseded} 条（已被并掉，留着能翻回去，不算在里面）` : "");
           const v = d.vector;
           $("memVec").textContent = v
             ? `向量索引 ${v.count} 块（其中记忆库 ${v.storeCount} 条）· ${v.dim} 维 · ${v.syncedAt || v.builtAt ? "同步于 " + relTime(Date.parse(v.syncedAt || v.builtAt)) : ""} · ${v.sizeMB}MB`
@@ -2330,6 +2368,21 @@
                 : it.layer === memState.layer && it.status !== "cold",
             );
           memState.items = items;
+          // 攒一份「见过就记住」的 id 表：服务端 brief（全库）+ 每次翻到的条目
+          memState.known = { ...memState.known, ...(d.brief || {}) };
+          for (const it of items) memState.known[it.id] = it;
+          // 条目互联：把 id 译成「第几条」+ 开头几个字，生成可点的链（2026-10-23）
+          // 先找当前这层的列表，找不着再去 known 里翻（链到别的层、冷藏区）
+          const relLabel = (id) => {
+            const t =
+              items.find((x) => x.id === id) || memState.known[id] || null;
+            if (!t) return null;
+            return {
+              id,
+              text: t.text.replace(/\s+/g, " ").slice(0, 22),
+              cls: t.status === "cold" ? "cold" : t.layer,
+            };
+          };
           $("memList").innerHTML = items.length
             ? items
                 .map(
@@ -2339,6 +2392,7 @@
           <div class="mt">${esc(it.text)}</div>
           <div class="mm"><span class="sc ${it.status === "cold" ? "cold" : it.layer}">${it.score} 分 · ${it.status === "cold" ? "冷藏" : MEM_LAYER_NAME[it.layer] || it.layer}</span>
           ${it.pinned ? '<span title="钉住">📌</span>' : ""}<span>${esc(keyName(it.key))}</span><span>${relTime(it.updatedAt)}</span>${it.hits ? `<span>用过 ${it.hits} 次</span>` : ""}</div>
+          ${(it.links || []).length ? `<div class="mrels">${it.links.map((lid) => { const r = relLabel(lid); return r ? `<span class="mrel ${r.cls}" title="${esc(r.text)}" onclick="event.stopPropagation();openMem('${esc(r.id)}')">↗ ${esc(r.text)}</span>` : ""; }).join("")}</div>` : ""}
         </div>`,
                 )
                 .join("")
@@ -2388,11 +2442,13 @@
       }
 
       function openMem(id) {
-        const it = memState.items.find((x) => x.id === id) || null;
+        const it =
+          memState.items.find((x) => x.id === id) ||
+          (id ? memState.known[id] : null) ||
+          null;
         memState.sel = it ? it.id : null;
         $("memText").value = it ? it.text : "";
         $("memScore").value = it ? it.score : 60;
-        $("memLayer").value = it && it.layerFixed ? it.layer : "";
         $("memTags").value = it ? it.tags.join(" ") : "";
         $("memPinned").checked = Boolean(it && it.pinned);
         $("memDel").style.display = it ? "" : "none";
@@ -2401,7 +2457,7 @@
         $("memMsg").textContent = "";
         $("memKey").value = it
           ? it.key
-          : memState.last?.key || "shared";
+          : memState.last?.key || "private:1000000001";
         memScoreHint();
         for (const el of document.querySelectorAll("#memList .mrow2"))
           el.classList.toggle("on", Boolean(it) && el.dataset.id === it.id);
@@ -2417,7 +2473,6 @@
           score: Number($("memScore").value) || 60,
           tags: $("memTags").value,
           pinned: $("memPinned").checked,
-          layer: $("memLayer").value || undefined,
         };
         const d = await apiPost("/api/memory/save", payload);
         $("memMsg").textContent = d.ok ? "已保存" : d.msg || "没存上";

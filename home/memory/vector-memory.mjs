@@ -1,4 +1,4 @@
-// 本地向量记忆
+// 观澜的本地向量记忆（2026-10-20 晚上主人拍板「开始吧」）
 // 做的事：把档案页、日记、事件卡、日子账、原话底账切块 -> 本地 bge-base-zh 编码 -> 存 home\memory\vectors\index.json
 // 查的时候：一句话编码，跟索引里的块算余弦，取最像的几条。
 // 全部在本机跑，不花钱；模型在 home\models\bge-base-zh-v1.5。
@@ -10,6 +10,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  entitiesIn,
+  entityScore,
+  initEntityTerms,
+  entityDf,
+  ENT_DF_MAX,
+} from "./entity-terms.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = path.resolve(HERE, "..");
@@ -21,13 +28,33 @@ const INDEX_FILE = path.join(INDEX_DIR, "index.json");
 const STORE_FILE = path.join(HERE, "store.json");
 const LAYER_LABEL = { core: "永久", long: "长期", mid: "中期", short: "短期" };
 const PAGE_DIR = path.join(HOME, "档案");
-const DIARY_DIR = path.join(HOME, "档案");
+const DIARY_DIR = path.join(HOME, "哦鲸鲸的窝");
 const ARCHIVE_DIR = path.join(HOME, "archive");
 const DAYS_DIR = path.join(ARCHIVE_DIR, "days");
 // bge 官方建议：短查询前面加这句，检索更准；存进索引的正文不加。
 const QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章：";
 const CHUNK_CHARS = 260;
 const MAX_ITEMS_PER_SOURCE = 4000;
+
+// 实体表的加载（2026-10-23）：第一次用到时读一次，读不到也不拦检索
+let entReady = false;
+function ensureEntities() {
+  if (entReady) return;
+  entReady = true;
+  try {
+    initEntityTerms(HOME);
+  } catch {
+    /* 词表读不到就只用向量+词面两路 */
+  }
+}
+
+// 实体的 df（出现在多少个索引块里）——决定它能当锁还是不能。
+// 表本身在 entity-terms.mjs 里算（挂链也用同一份，别各算各的），这里只是取一下：
+// ENT_DF_MAX=48 是实测定的阀，df 比它高的（主人 534 / 余额 438 / 提示词 182 / 重启 173）
+// 拿来做信号只会往哪里都沾。
+function entDf(term) {
+  return entityDf().get(term) ?? 0;
+}
 
 let extractorPromise = null;
 function getExtractor() {
@@ -133,17 +160,31 @@ function collectDayCards(key) {
     } catch {
       continue;
     }
-    let cur = "";
+    // ⚠️ 2026-10-24 修（B7）：**一张卡一块**，不再把多张卡挤进 260 字里。
     for (const f of files.slice(0, MAX_ITEMS_PER_SOURCE)) {
       const body = readText(path.join(dir, f)).trim();
       if (!body) continue;
-      if (cur && cur.length + body.length > CHUNK_CHARS) {
-        out.push({ day, text: cur.trim() });
-        cur = "";
+      // 原因：事件卡讲的是一件独立的事（"他今天说要换工作"），
+      // 几张不相关的卡塞成一块后，向量和 BM25 都会被稀释
+      // ——实测问「观澜的语音」会捞到「太白喵猫娘」那种卡，就是被同块里别的卡带上来的。
+      // 单卡超长时再按 CHUNK_CHARS 硬切，保证不会出现巨型块。
+      const parts = [];
+      if (body.length <= CHUNK_CHARS) parts.push(body);
+      else {
+        // 按句子边界尽量切，切不整齐就直接按字数切
+        let rest = body;
+        while (rest.length > CHUNK_CHARS) {
+          let cut = CHUNK_CHARS;
+          const window = rest.slice(0, CHUNK_CHARS + 40);
+          const m = window.match(/[\s\S]*[。！？\n]/);
+          if (m && m[0].length > CHUNK_CHARS * 0.5) cut = m[0].length;
+          parts.push(rest.slice(0, cut).trim());
+          rest = rest.slice(cut);
+        }
+        if (rest.trim()) parts.push(rest.trim());
       }
-      cur += (cur ? "\n" : "") + body;
+      for (const p of parts) if (p) out.push({ day, text: p });
     }
-    if (cur.trim()) out.push({ day, text: cur.trim() });
   }
   return out;
 }
@@ -236,7 +277,7 @@ function collectStore() {
     return out;
   }
   for (const it of data.items ?? []) {
-    if (!it || it.status === "cold") continue; // 冷藏的不该被想起来
+    if (!it || it.status === "cold" || it.status === "superseded") continue; // 冷藏/被顶掉的不该被想起来
     const text = String(it.text ?? "").trim();
     if (text.length < 8) continue;
     const scope = it.key === "shared" || !it.key ? "shared" : it.key;
@@ -346,7 +387,14 @@ export async function buildIndex({ quiet = false } = {}) {
     })),
   };
   fs.mkdirSync(INDEX_DIR, { recursive: true });
-  fs.writeFileSync(INDEX_FILE, JSON.stringify(out), "utf8");
+  // ⚠️ 2026-10-24 修：原来直接 writeFileSync 覆盖 INDEX_FILE，
+  // 写到一半崩/断电会留下半截 JSON（readJson 容错会当没索引，整库检索全废）。
+  // 改成和 syncStore 一样的 tmp + rename 原子替换。
+  {
+    const tmp = INDEX_FILE + ".build.tmp";
+    fs.writeFileSync(tmp, JSON.stringify(out), "utf8");
+    fs.renameSync(tmp, INDEX_FILE);
+  }
   const mb = (fs.statSync(INDEX_FILE).size / 1048576).toFixed(1);
   say(
     `索引写好：${items.length} 条，${dim} 维，${mb}MB，用 ${((Date.now() - t0) / 1000).toFixed(1)}s -> ${INDEX_FILE}`,
@@ -434,7 +482,7 @@ export async function syncStore({ quiet = false } = {}) {
   return { added: encoded.length, reused, removed, total: finalItems.length };
 }
 
-// ---------- 关键词退路 ----------
+// ---------- 关键词退路（2026-10-21 下午，主人说「你试试」） ----------
 // 向量分不够的时候，同一批块再按词面翻一遍：中文切二字词、英文数字连着的词，BM25 算分。
 // 不花钱、不占显存，纯字符串比对。词面完全不重合的句子它也找不出来——找不出来就空着，不硬凑。
 const KW_STOP_WORDS = [
@@ -443,6 +491,13 @@ const KW_STOP_WORDS = [
   "多少", "为什么", "是不是", "有没有", "记得", "记不", "还记", "刚才",
 ];
 const KW_QUESTION_CHARS = /[吗呢吧啊么哪怎什谁啥]/;
+// 2026-10-24 加（B2）：命中的关键词要覆盖全部关键词 idf 的至少这个比例才算真的"压中了"。
+// 取 0.45：短问句里高频 bigram（观澜/澜的）自己撑不到 45%，必须带上真关键词；
+// 长问句命中多个词时很容易过，不会误伤。可用 WW_KW_IDF_COVER 覆盖。
+const KW_IDF_COVER = (() => {
+  const v = Number(process.env.WW_KW_IDF_COVER);
+  return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.45;
+})();
 
 function kwTerms(q) {
   let s = String(q ?? "").toLowerCase().replace(/\[cq:[^\]]*\]/g, " ");
@@ -464,7 +519,7 @@ function kwTerms(q) {
   return [...terms];
 }
 
-function keywordSearch(q, pool, { topK = 3, minMatched = 2, minScore = 1.2 } = {}) {
+function keywordSearch(q, pool, { topK = 3, minMatched = 2, minScore = 1.2, all = false, strict = false } = {}) {
   const terms = kwTerms(q);
   if (!terms.length || !pool.length) return [];
   const N = pool.length;
@@ -485,12 +540,25 @@ function keywordSearch(q, pool, { topK = 3, minMatched = 2, minScore = 1.2 } = {
     const d = df.get(t) ?? 0;
     idf.set(t, Math.log(1 + (N - d + 0.5) / (d + 0.5)));
   }
+  // ⚠️ 2026-10-24 修（B2 最终）：早期版本用「命中 idf 合计 / 全部 idf 合计 ≥ 45%」当门槛，
+  // 实测发现**单块根本达不到**：一句「观澜的语音是怎么弄的」6 个 bigram 的 idf 合计 33.97，
+  // 45% 就是 15.29，而单个块最多命中 2-3 个词（拿到 14 左右就到顶了）——于是整条词面路全灭。
+  // 改成「命中"核心词"（idf 最高的那一档，df>0 的才算）**且**条数够」：
+  //   相关问句会在那个关键 bigram 上命中（如「语音/音是」），无关问句命中不了。
+  // strict 模式（只给退路用）额外要求核心词，主路不强制（主路靠条数+分数）。
   const need = Math.min(minMatched, terms.length);
+  const idfSorted = [...idf.entries()].filter(([t, v]) => v > 0 && (df.get(t) ?? 0) > 0).sort((a, b) => b[1] - a[1]);
+  const topIdf = idfSorted.length ? idfSorted[0][1] : 0;
+  // 核心词 = idf 在最高档 75% 以上的那些（比 85% 宽一点，避免只有一个词够格时过严）
+  const coreTerms = new Set(idfSorted.filter(([, v]) => v >= topIdf * 0.75).map(([k]) => k));
+  if (coreTerms.size === 0) return [];
   const out = [];
   for (const d of docs) {
     const dl = d.text.length || 1;
     let score = 0;
     let matched = 0;
+    let idfHit = 0; // 保留占位（下面评分已在别处算，这里只统计核心词命中）
+    let coreHit = false; // 是否命中了核心词
     for (const t of terms) {
       if (!df.get(t)) continue;
       let tf = 0;
@@ -504,13 +572,19 @@ function keywordSearch(q, pool, { topK = 3, minMatched = 2, minScore = 1.2 } = {
       }
       if (!tf) continue;
       matched++;
+      idfHit += idf.get(t);
+      if (coreTerms.has(t)) coreHit = true;
       score += (idf.get(t) * (tf * (k1 + 1))) / (tf + k1 * (1 - bb + (bb * dl) / avgdl));
     }
-    if (matched >= need && score >= minScore)
-      out.push({ score, text: d.it.text, src: d.it.src, day: d.it.day, via: "keyword", matched });
+    // 两道门：①命中条数够 ②strict 模式下还要求命中核心词
+    //   strict 只给"词面退路"用（一路都没够着门槛时），主路不强制核心词——
+    //   主路已经有三道门槛（sim / kw / ent）把关，再叠核心词会把正常召回也砍掉。
+    const strictOk = strict ? coreHit : true;
+    if (matched >= need && strictOk && score >= minScore)
+      out.push({ it: d.it, score, text: d.it.text, src: d.it.src, day: d.it.day, via: "keyword", matched });
   }
   out.sort((x, y) => y.score - x.score);
-  return out.slice(0, topK);
+  return all ? out : out.slice(0, topK);
 }
 
 // ---------- 查询 ----------
@@ -529,11 +603,125 @@ function loadIndex() {
 }
 
 // scope: 当前会话键（private:xxx / group:xxx）。
-// 全解开：opts.open=true 时所有会话的块都进候选，群聊也能想起私聊和别的群；
+// 2026-10-22 主人要的「全解开」：opts.open=true 时所有会话的块都进候选，群聊也能想起私聊和别的群；
 // 默认还是各看各的（私聊能看 shared 的档案页和日记，群聊只看本群）。
+//
+// 2026-10-23 改打分：不再只看余弦取前三。三样加权——
+//   文字像不像 0.6（向量 0.75 + 词面 0.25，两样归一化后合成，词面不再是「一条都没有」才用的退路）
+//   新近度 0.25（按层给半衰期：短期 2 天、中期 14 天、长期 90 天、永久不过期）
+//   记忆分数 0.15（库里那条的 score；不是记忆库里的块给中性的 0.5）
+// 检索到一条记忆库条目时，顺手把它挂着 links 的关联条目带出来（最多 2 条）。
+//
+// 2026-10-23 收门槛（主人点头改的）：词面得压中三处才算数、向量门槛照 minScore 不打九折、
+// 老的关键词退路也过同一道关，过不了就返回空——不再拿「两个常见词凑一起」当像。
+const HALF_LIFE = { core: 0, long: 90, mid: 14, short: 2 };
+const KW_GATE = 3; // 词面至少压中三处（2026-10-23 08:3x 主人点头从四降回三：四太严，自然问句大量捞不到）
+// 光靠词面挤进来的，向量还得有这点底：0.25～0.29 那种纯噪声别再顶上来
+// ⚠️ 2026-10-24（B5 配套）：KW_FLOOR 从 0.3 提到 0.35。
+// 0.3 是相对分时代的遗留值；改成绝对余弦后，实测无关查询的 sim 也能到 0.295~0.336，
+// 0.3 拦不住——于是"词面压中3处"这条路成了无关结果的主要入口。
+// 提到 0.35：无关查询（0.28~0.34）基本压不进来，相关的（0.30~0.52）仍能过。
+const KW_FLOOR = Number(process.env.WW_KW_FLOOR ?? 0.35);
+// 实体信号（2026-10-23 加的第三路，对标 Mem0 的 entity linking）：
+// 问句里提到的东西（显卡/密钥/白色风车/重启）在块里也出现了，算另一种"像"。
+// 提得够全（≥六成）且向量不至于风马牛（≥ENT_FLOOR）就放进来。
+// 为什么要它：「她用的是哪张显卡」这种问句，向量和词面都容易滑到聊天闲话上去，
+// 但"显卡"这个实体只出现在少数几条里，实体一路算是个硬锁。
+// 实体路的三个门槛，都能环境变量覆盖（方便扫档调参，但线上读默认值）。
+// 2026-10-23 实测定档：ENT_GATE 取 0.4 —— 0.6 会把「显卡」从 5 条压到 1 条（块里
+// 实体多、密度算得低），0.3 与 0.4 结果完全一致，所以取更保守的 0.4，不放到 0.3。
+const ENT_GATE = Number(process.env.WW_ENT_GATE ?? 0.4);
+// 2026-10-23 从 0.25 提到 0.30：问「她用的是哪张显卡」时，一条向量只有 0.257 的
+// 「私聊余额是 90.71」靠实体分混进首位；提到 0.30 它就掉了，正确那条（0.385）升到首条，
+// 同一批 8 个实体问句跑下来没有一个掉答案，所以照着收。
+const ENT_FLOOR = Number(process.env.WW_ENT_FLOOR ?? 0.3);
+// 实体得够稀有才能当锁（2026-10-23 实测后加的）：
+// 先试过「只提到一个实体就不启用实体路」，结果把「余额还剩多少」「白色风车是什么」
+// 这类该出结果的问句全干掉了；又试过「单实体也启用」，结果问「401 密钥的事」时，
+// 档案页只是顺带提到「密钥」就拿到 ent=1 把整页顶到首条。矛盾在“实体有多泛”
+// 而不在“几个”：统计了索引 3383 块里每个实体的 df——
+//   主人 df=534（谁都沾）、余额 df=438、提示词 df=182、重启 df=173 → 做信号没意义
+//   显卡 df=9、白色风车 df=10、分层 df=15、备份 df=60 → 几乎能唯一定位
+// 所以照 IDF 来：至少有一个实体的 df ≤ ENT_DF_MAX 才算“够稀有”，才开实体路。
+// （ENT_DF_MAX 挪到 entity-terms.mjs 里了：挂链也用同一条线，省得两边跑偏）
+const ENT_MIN_Q = 1; // 稀有实体一个就够
+// 互联带出来的那条，必须自己跟问句的向量像到这个数才带。
+// 这一项比「共享一个词」硬：问「大白饭」时捎来的「命令行修好」向量只有 0.2 出头，挡掉；
+// 真有关联的（同一件事的另一半）向量通常在 0.35 以上。
+// 2026-10-23 又调（主人说「你再改改试试」）：一条门槛太粗，改成两条，够了任一条就带——
+//   甲、跟问句共享至少一个稀罕词，向量 ≥0.30 就行（共享词本身就是「同一件事」的证据）
+//   乙、不共享词也行，但向量得硬到 ≥0.42（纯靠「像」说话，就得真像）
+// 实测 18 个问句：单一门槛 0.32 会留下「备份到 GitHub → 重启口令」、「我还欠着 → 三张卡里
+// 没留底」这种只靠向量凑近的；改双门槛后留下的 2 条都是共享了稀罕词的（欠着 / api）。
+const LINK_SIM_MIN = Number(process.env.WW_LINK_SIM_MIN ?? 0.42);
+const LINK_SHARED_SIM_MIN = Number(process.env.WW_LINK_SHARED_SIM_MIN ?? 0.3);
+// 大杂烩不参与带出：自己体内稀罕实体超过这个数的（当天小结那种 600 多字、
+// 什么都聊一句的），什么问句都能沾上，一律不带。
+const LINK_DOC_RARE_MAX = Number(process.env.WW_LINK_DOC_RARE_MAX ?? 8);
+const ENT_W = 0.2; // 实体在「文字像不像」里的权重（有实体时才拆出来，没有就退回 0.75/0.25）
+
+// 2026-10-24 加（B5）：把「文字像不像」的权重提成具名常量，方便调；数值与原来一致。
+// SIM_W 是**绝对余弦**的权重（原来是相对 maxSim 的，那是个 bug）。
+const SIM_W = 0.6; // 有实体路时，向量余弦占 0.6
+const KW_W = 0.2; // 有实体路时，词面占 0.2
+const SIM_W2 = 0.75; // 无实体路时，向量余弦占 0.75
+const KW_W2 = 0.25; // 无实体路时，词面占 0.25
+// 2026-10-24 加（B8）：问句里只有人名/高频词（df > ENT_DF_MAX）时，实体路的权重打折。
+// 人名 df 天然极高（主人 530 / 〔主人名〕 850），不能当"锁"，但也不该完全不用。
+const ENT_WEAK_RATIO = Number(process.env.WW_ENT_WEAK_RATIO ?? 0.5);
+
+function layerOfSrc(src) {
+  const m = /记忆\/(永久|长期|中期|短期)/.exec(String(src || ""));
+  if (m) return { 永久: "core", 长期: "long", 中期: "mid", 短期: "short" }[m[1]];
+  if (/^档案\//.test(src)) return "core";
+  if (/^日记\//.test(src)) return "long";
+  if (/^原话\//.test(src)) return "short";
+  return "mid"; // 事件卡、日子账
+}
+
+function recencyOf(day, layer) {
+  const hl = HALF_LIFE[layer];
+  if (hl === 0) return 1; // 永久层不过期
+  const t = Date.parse(day ? `${day}T12:00:00+08:00` : "");
+  if (!Number.isFinite(t)) return 0.5; // 没日期：给个中性值，别当成今天
+  const days = Math.max(0, (Date.now() - t) / 86400000);
+  return Math.pow(0.5, days / (hl || 30));
+}
+
+// 记忆库的分数 / 层 / 互联：store.json 改了（mtime 变）再重读，平时吃缓存。
+let storeCache = { mtime: 0, byId: null };
+function storeInfo() {
+  try {
+    const st = fs.statSync(STORE_FILE);
+    if (storeCache.byId && storeCache.mtime === st.mtimeMs) return storeCache.byId;
+    const o = JSON.parse(fs.readFileSync(STORE_FILE, "utf8"));
+    const byId = new Map();
+    for (const it of o.items ?? []) if (it?.id) byId.set(it.id, it);
+    storeCache = { mtime: st.mtimeMs, byId };
+    return byId;
+  } catch {
+    return storeCache.byId || new Map();
+  }
+}
+
 export async function search(
   query,
-  { scope = "private", topK = 3, minScore = 0.45, keywordFallback = true, open = false } = {},
+  // ⚠️ 2026-10-24（B5 配套）：默认 minScore 从 **0.45 改成 0.26**。
+  // 0.45 是「相对分时代」的遗留值——那时向量分是 sim/maxSim，top1 恒为 1.0，0.45 很宽松。
+  // B5 改成绝对余弦后，0.45 变成「余弦必须 ≥0.45」，实测**相关问句 top1 只有 0.30~0.52**，
+  // 「我还欠你什么没做」top1 sim=0.386 直接过不了、召回为 0。
+  // 实测分布：相关 0.303~0.523，无关 0.164~0.211，中间 0.21~0.30 是可分空档；
+  // 取 0.26（落在空档里、偏保守），4/4 相关召回、0/3 无关漏进。可用 WW_SIM_MIN 覆盖。
+  // 实测分布（**索引重建到 5779 块之后重新校准**）：相关 top1 0.303~0.523，无关 0.281~0.285，
+  // 空档只剩 0.285~0.303。取 0.29（空档中点偏上）。可用 WW_SIM_MIN 覆盖。
+  {
+    scope = "private",
+    topK = 3,
+    minScore = Number(process.env.WW_SIM_MIN ?? 0.29),
+    keywordFallback = true,
+    open = false,
+    explain = false,
+  } = {},
 ) {
   const q = String(query ?? "").trim();
   if (q.length < 4) return [];
@@ -549,21 +737,204 @@ export async function search(
   }
   const pool = open ? data.items : data.items.filter((it) => allowed.has(it.scope));
   if (!pool.length) return [];
+  const info = storeInfo();
+  // 被顶掉的旧说法 / 冷藏的条目：索引里可能还留着，这里直接扔掉
+  const live = pool.filter((it) => {
+    if (!it.sid) return true;
+    const st = info.get(it.sid);
+    return !st || (st.status !== "superseded" && st.status !== "cold");
+  });
+  if (!live.length) return [];
   const { rows } = await encode([QUERY_PREFIX + q]);
   const qv = rows[0];
-  const scored = [];
-  for (const it of pool) {
+  // 问句里的实体（2026-10-23）：提到的东西算一路信号，问句抽不出实体就整路跳过
+  ensureEntities();
+  const qEnts = entitiesIn(q);
+  // 实体路只在问句里至少有一个「够稀有」的实体时才开（df 低的才算锁，见 ENT_DF_MAX 注释）。
+  // ⚠️ 2026-10-24 修（B8）：原来只认 df ≤ 48 的"稀罕词"，但**人名 df 天然极高**
+  // （实测 主人 530 / 〔主人名〕 850 / 观澜 456 / 〔昵称甲〕 71 / 〔群友乙〕 123），全被挡在门外——
+  // 结果问「爸爸那个语音」时人名完全不起作用。
+  // 但也不能把线放宽到人名（df 高的当锁就是引噪，这正是当初收紧的理由）。
+  // 折中：**允许人名当"弱信号"参与加权，但不当"开路的锁"**：
+  //   ①qRare 里的稀罕词照旧开实体路（强）；
+  //   ②没有稀罕词、只有人名时，把实体路开成"弱模式"：权重砍半，且不参与 EW 门槛。
+  const qRare = qEnts.filter((e) => entDf(e) <= ENT_DF_MAX);
+  const qWeak = qEnts.filter((e) => entDf(e) > ENT_DF_MAX);
+  const entOn = qRare.length >= ENT_MIN_Q;
+  // 弱实体路：只有人名/高频词、没有稀罕词时开，权重打折
+  const entWeakOn = !entOn && qWeak.length > 0;
+  const entTerms = entOn ? qRare : entWeakOn ? qWeak : [];
+  // ⚠️ 2026-10-24 修（她指出）：原来 entWeight 和下面的 ent 各乘了一次 ENT_WEAK_RATIO，
+  // 0.5×0.5=0.25，人名权重只剩四分之一，等于白加。现在**只在 ent 这一处打折**。
+  const sims = new Map();
+  for (const it of live) {
     const buf = Buffer.from(it.vec, "base64");
     const v = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-    const s = dot(qv, v);
-    if (s >= minScore)
-      scored.push({ score: s, text: it.text, src: it.src, day: it.day, via: "vector" });
+    sims.set(it, dot(qv, v));
   }
-  scored.sort((a, b) => b.score - a.score);
-  if (scored.length) return scored.slice(0, topK);
-  // 向量一条都没够分：退一步按词面找同一批块，跟翻笔记一个路子
-  if (!keywordFallback) return [];
-  return keywordSearch(q, pool, { topK });
+  // 词面分也全算一遍（BM25），跟向量分合成「文字像不像」
+  const kwScore = new Map();
+  const kwHits = new Map();
+  let maxKw = 0;
+  for (const h of keywordSearch(q, live, { all: true, minMatched: 2, minScore: 0 })) {
+    kwScore.set(h.it, h.score);
+    kwHits.set(h.it, h.matched);
+    if (h.score > maxKw) maxKw = h.score;
+  }
+  const scored = [];
+  for (const it of live) {
+    const sim = sims.get(it) ?? 0;
+    const k = kwScore.get(it) ?? 0;
+    const kw = kwHits.get(it) ?? 0;
+    // 实体分：问句里那几个稀有实体，这条盖住几成（0~1）
+    const ent = entTerms.length ? entityScore(entTerms, entitiesIn(it.text)) * (entWeakOn ? ENT_WEAK_RATIO : 1) : 0;
+    // 「文字像不像」：向量 + 词面 + 实体三个分项加权。
+    // 实体路不开时退回两路。
+    // ⚠️ 2026-10-24 修（B5）：原来向量分用 `sim/maxSim`（除以本次池内最高分）——
+    // 这会把**池子里最差的那条也抬到接近满分**：不管问什么，总有一条 maxSim，它必然得 1.0，
+    // 于是 CTRL 的绝对门槛（sim≥0.38 之类）全部失效，问什么都能返回点什么。
+    // 改成**绝对余弦**：gemini/bge 的 embedding 已是归一化向量，dot 就是余弦相似度 ∈ [-1,1]，
+    // 直接夹到 [0,1] 用。这样「不像」就是不像，门槛才有意义。
+    // 词面 k/maxKw 保留相对归一（BM25 原始分量纲不稳定，没有绝对的"像"可言）。
+    let textSim;
+    if (entOn) {
+      textSim = Math.min(
+        1,
+        SIM_W * Math.max(0, Math.min(1, sim)) +
+          KW_W * (maxKw > 0 ? k / maxKw : 0) +
+          ENT_W * ent,
+      );
+    } else if (entWeakOn) {
+      // 弱实体路：只有人名/高频词时，实体分量权重减半。
+      // ⚠️ 2026-10-24 修：打折只在这里做**一次**（上面第 785 行算 ent 时已经乘过一次，
+      // 原来这里又乘一次变成 0.25，现在这行用 ENT_W 不再重复乘）。
+      textSim = Math.min(
+        1,
+        SIM_W * Math.max(0, Math.min(1, sim)) +
+          KW_W * (maxKw > 0 ? k / maxKw : 0) +
+          ENT_W * ent,
+      );
+    } else {
+      textSim = Math.min(
+        1,
+        SIM_W2 * Math.max(0, Math.min(1, sim)) + KW_W2 * (maxKw > 0 ? k / maxKw : 0),
+      );
+    }
+    // 门槛：三道任一过关就进来——
+    //  ①向量够得像（minScore）；②词面压中 KW_GATE 处且向量不低于 KW_FLOOR；
+    //  ③实体盖住六成以上且向量不低于 ENT_FLOOR（只对**强**实体路生效）
+    // ⚠️ 2026-10-24（B5 配套 + 真实校准）：单靠 sim 分不开！
+    // 真实分布校准（290 条历史真实问句 + 13 条真实无关）：真实问句 p10=0.411 / p50=0.681；
+    // 真实无关落在 0.406~0.454 → SIM_STRONG=0.47 能把无关全清。
+    // 注：曾怀疑 0.47 砍掉了「我还欠你什么没做」(0.386) 和「爸爸那个语音」(0.287)，
+    // 后经实测确认是**测试时没传 open:true**（只搜了私聊 scope）造成的假象——
+    // 用真实参数（open=CFG.memoryOpen）时前者 sim=0.41、后者 sim=0.53，都能正常召回。**无需后门。**
+    const SIM_STRONG = Number(process.env.WW_SIM_STRONG ?? 0.47);
+    const strongSim = sim >= SIM_STRONG;
+    const kwOk = kw >= KW_GATE && sim >= KW_FLOOR;
+    const entOk = entOn && ent >= ENT_GATE && sim >= ENT_FLOOR;
+    // ⚠️ 2026-10-24 修（她指出「我还欠你什么没做捞不到」后查实）：
+    // 原来中段（minScore~SIM_STRONG）**必须**有 kwOk 或 entOk 佐证，两者都没有就直接扔。
+    // 但实测这条问句 sim=0.386（已过 p25 水平）、kw 只命中 2 个 bigram（差 1 个到 KW_GATE）——
+    // 明明挺像，却因为"词面差一点"被否。
+    // 试过放宽到 kw>=2：相关 8/8 全召回，但无关也漏进 4/7（股市/天气/地铁/算法都能凑 2 个 bigram）。
+    // 所以**不放宽 kw 条数**，改为：由「sim 更高」来兜——中段的 sim 门槛从 minScore(0.29) 提到 0.35，
+    // 同时允许"词面只要命中 1 个稀有词"就佐证（稀有词 = idf 高，比条数更有意义）。
+    const weakButSupported =
+      sim >= Number(process.env.WW_SIM_MID ?? 0.35) && (kw >= 1 || (entOn && ent >= 0.25));
+    if (!(strongSim || weakButSupported)) continue;
+    const st = it.sid ? info.get(it.sid) : null;
+    const rec = recencyOf(it.day, layerOfSrc(it.src));
+    const imp = st ? Math.min(1, Math.max(0, Number(st.score ?? 40) / 100)) : 0.5;
+    const fused = Math.min(1, 0.6 * textSim + 0.25 * rec + 0.15 * imp);
+    scored.push({ it, fused, sim, textSim, rec, imp, kw, ent });
+  }
+  if (!scored.length) {
+    // 一条都没够着门槛：词面退路也过同一道关（压中 KW_GATE 处、向量不低于 KW_FLOOR），过不了就老实空着。
+    if (!keywordFallback) return [];
+    if (kwTerms(q).length < KW_GATE) return [];
+    const hits = keywordSearch(q, live, { all: true, minMatched: KW_GATE, minScore: 1.2, strict: true })
+      .filter((h) => (sims.get(h.it) ?? 0) >= KW_FLOOR)
+      .slice(0, topK);
+    // ⚠️ 2026-10-24 修（B4）：原来直接吐 `score: h.score`（BM25 原始分，13.5 这种），
+    // 跟正常路的 `fused`（0~1）**不是一个量纲**，下游拿它比较/排序全错。
+    // 现在换算到 0~1：用这批命中里最高 BM25 分做分母，再乘一个上限系数
+    // （退路本来就是"勉强够着"，不给满分，封顶 0.5），保证和 fused 可比。
+    const maxHit = hits.reduce((a, h) => Math.max(a, h.score), 0);
+    return hits.map((h) => ({
+      score: Math.round(Math.min(0.5, (maxHit > 0 ? h.score / maxHit : 0) * 0.5) * 1000) / 1000,
+      text: h.text,
+      src: h.src,
+      day: h.day,
+      via: "keyword",
+    }));
+  }
+  scored.sort((a, b) => b.fused - a.fused);
+  const top = scored.slice(0, topK);
+  const out = top.map((h) => {
+    const o = {
+      score: Math.round(h.fused * 1000) / 1000,
+      text: h.it.text,
+      src: h.it.src,
+      day: h.it.day,
+      via: "fused",
+      sim: Math.round(h.sim * 1000) / 1000,
+    };
+    // 调试用：explain 打开时把三样分量也带出来，正常调用不看这些字段
+    if (explain)
+      o.parts = {
+        textSim: Math.round(h.textSim * 1000) / 1000,
+        rec: Math.round(h.rec * 1000) / 1000,
+        imp: Math.round(h.imp * 1000) / 1000,
+        kw: h.kw,
+        ent: Math.round((h.ent ?? 0) * 1000) / 1000,
+      };
+    return o;
+  });
+  // 互联：命中的记忆库条目顺带把挂着 links 的带出来（最多 2 条）
+  // 2026-10-23 收口（主人点头「就按你说的调吧」）：这条链要过三道筛——
+  //   ①问句里至少得有一个稀罕词（df ≤ ENT_DF_MAX），没有就不开这条带出通道。
+  //     原来是问句抽不出稀罕词时「不过滤、全带」，问「大白饭」就捎来两条八竿子打不着的。
+  //   ②它自己得跟问句像：向量相似度（循环里早就算过了，直接拿来用）。
+  //     2026-10-23 再调成双门槛：共享稀罕词时 0.30 就够，不共享词得 0.42（见 LINK_SIM_MIN 注释）。
+  //     这一条最关键——以前带出来的从头到尾没跟问句比过像不像，只看「有没有同一个词」。
+  //   ③不能是「顺手带一句」的大杂烩：体内稀罕实体超过 LINK_DOC_RARE_MAX 的
+  //     （645 字那块体内 20 个稀罕词、853 字那块 17 个）什么问句都能沾上，一律不带。
+  // 分数压到命中分的 0.75 倍，永远排在正主后头，不抢首条位置。
+  const bySid = new Map();
+  for (const it of live) if (it.sid) bySid.set(it.sid, it);
+  const seen = new Set(out.map((x) => x.text));
+  let extra = 0;
+  for (const h of top) {
+    if (extra >= 2) break;
+    if (!qRare.length) break; // 没有稀罕锁：宁可不带
+    const st = h.it.sid ? info.get(h.it.sid) : null;
+    for (const lid of st?.links || []) {
+      if (extra >= 2) break;
+      const link = info.get(lid);
+      const hit = bySid.get(lid);
+      if (!link || !hit || link.status !== "active") continue;
+      if (seen.has(hit.text)) continue;
+      const hitEnts = entitiesIn(hit.text);
+      const hitRare = hitEnts.filter((e) => entDf(e) <= ENT_DF_MAX);
+      if (hitRare.length > LINK_DOC_RARE_MAX) continue; // 大杂烩
+      const sim = sims.get(hit) ?? 0;
+      const sharedRare = qRare.some((e) => hitRare.includes(e));
+      // 甲：共享稀罕词 + 向量 0.30；乙：不共享词，但向量得 0.42
+      if (!(sim >= LINK_SIM_MIN || (sharedRare && sim >= LINK_SHARED_SIM_MIN))) continue;
+      seen.add(hit.text);
+      extra++;
+      out.push({
+        score: Math.round(h.fused * 750) / 1000,
+        text: hit.text,
+        src: hit.src,
+        day: hit.day,
+        via: "link",
+        sim: Math.round((sims.get(hit) ?? 0) * 1000) / 1000,
+      });
+    }
+  }
+  return out;
 }
 
 // ---------- 命令行 ----------
@@ -580,7 +951,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   if (cmd === "query") {
     const q = process.argv[3] ?? "";
-    const scope = process.argv[4] ?? "shared";
+    const scope = process.argv[4] ?? "private:1000000001";
     const hits = await search(q, { scope, topK: 5, minScore: 0.3 });
     console.log(`问：${q}（范围 ${scope}）`);
     if (!hits.length) console.log("  没有够像的");
@@ -589,7 +960,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
   if (cmd === "kw") {
     const q = process.argv[3] ?? "";
-    const scope = process.argv[4] ?? "shared";
+    const scope = process.argv[4] ?? "private:1000000001";
     const data = loadIndex();
     const allowed = new Set([scope, "shared", "private"]);
     if (String(scope).startsWith("group:")) {

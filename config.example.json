@@ -5,6 +5,7 @@
     "names": ["鲸鱼"],
     "owners": [0],
     "ownerTag": "主人",
+    "ownerName": "主人",
     "restartCmds": ["重启", "reboot"],
     "memoryOpen": true,
     "vectorMemory": true,
@@ -12,6 +13,8 @@
     "vectorMinScore": 0.5,
     "vectorKeywordFallback": true,
     "voiceEnabled": false,
+    "dreamEnabled": true,
+    "autoFallback": false,
     "peekChance": 0
   },
   "napcat": {
@@ -29,6 +32,13 @@
     "exe": "",
     "cli": "",
     "profile": "echo-kit"
+  },
+  "voice": {
+    "python": ""
+  },
+  "weather": {
+    "lat": null,
+    "lon": null
   },
   "models": [
     {

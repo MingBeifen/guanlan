@@ -1,4 +1,4 @@
-// 档案翻页记录（加的）
+// 档案翻页记录（2026-10-18 加的）
 // 用法：
 //   node tools\pages.mjs 打开 A     翻一页，顺手记下时间，页面内容直接打印
 //   node tools\pages.mjs 清单       每页上次翻是什么时候、隔了几天、索引里在不在
@@ -7,11 +7,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pageIndexState } from './page-index.mjs';
 
 const HOME = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PAGE_DIR = path.join(HOME, '档案');
 const LOG_PATH = path.join(PAGE_DIR, '_翻页记录.json');
-const BASE_DIR = path.join(HOME, 'archive');
 const MAX_DAYS = 30;
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -39,13 +39,7 @@ function saveLog(log) {
 }
 
 function listPages() {
-  let dirs = [];
-  try {
-    dirs = fs.readdirSync(PAGE_DIR, { withFileTypes: true });
-  } catch {
-    return []; // 档案目录还没建，当空处理，别直接报 ENOENT
-  }
-  return dirs
+  return fs.readdirSync(PAGE_DIR, { withFileTypes: true })
     .filter((d) => d.isFile() && /^[A-Z]\d*[-_— ].+\.md$/.test(d.name))
     .map((d) => d.name)
     .sort();
@@ -66,13 +60,14 @@ function resolvePage(arg) {
   return null;
 }
 
-function baseIndexText() {
+// 2026-10-24 19:2x 修：原来这里是去 archive\*.base.md 找页名，可底账 10-21 就搬进
+// memory\store.json + 向量库了，base.md 全是 0 字节，于是永远报「底账还没建」。
+// 现在查真正装页的那份：memory\vectors\index.json 里 src 以「档案/页名.md」开头的块。
+function pageIndex() {
   try {
-    const bases = fs.readdirSync(BASE_DIR).filter((f) => f.endsWith('.base.md')).sort();
-    if (!bases.length) return '';
-    return fs.readFileSync(path.join(BASE_DIR, bases[bases.length - 1]), 'utf8');
-  } catch {
-    return '';
+    return pageIndexState();
+  } catch (e) {
+    return { ok: false, counts: new Map(), at: '', why: `查索引出错：${e?.message || e}` };
   }
 }
 
@@ -96,7 +91,7 @@ function hhmm(iso) {
 function status() {
   const pages = listPages();
   const log = loadLog();
-  const base = baseIndexText();
+  const idx = pageIndex();
   if (!pages.length) {
     console.log('档案目录里一页也没找到：' + PAGE_DIR);
     return;
@@ -105,7 +100,7 @@ function status() {
   const since = log._since && log._since.last ? log._since.last : null;
   for (const name of pages) {
     const rec = log[name];
-    const inIndex = base.includes(name);
+    const inIndex = idx.ok && (idx.counts.get(name) || 0) > 0;
     const parts = [name];
     if (!rec || !rec.last) {
       const d = since ? daysSince(since) : null;
@@ -124,11 +119,16 @@ function status() {
         parts.push(`过了 ${MAX_DAYS} 天，该沉底`);
       }
     }
-    if (!base) parts.push('底账还没建，索引待建');
-    else parts.push(inIndex ? '索引里有' : '索引里没有 ← 漏了');
+    if (!idx.ok) parts.push(`${idx.why}，索引查不了`);
+    else if (inIndex) parts.push(`索引里有（${idx.counts.get(name)} 块）`);
+    else parts.push('索引里没有 ← 漏了');
     console.log('· ' + parts.join(' · '));
   }
-  if (stale.length) console.log(`\n要沉底的：${stale.join('、')}（挪 档案\\历史档案\\ 并从底账索引删行）`);
+  if (idx.ok && idx.at) {
+    const t = fmtDay(idx.at);
+    console.log(`\n索引这份是 ${t} 的，页改了要重建（node memory\\vector-memory.mjs build）才算进去`);
+  }
+  if (stale.length) console.log(`\n要沉底的：${stale.join('、')}（挪 档案\\历史档案\\ 并重建索引）`);
 }
 
 function open(arg) {

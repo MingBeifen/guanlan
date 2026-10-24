@@ -21,10 +21,16 @@ fs.mkdirSync(LOGS, { recursive: true });
 const say = (s) => {
   const line = `[${new Date().toLocaleString('zh-CN', { hour12: false })}] ${s}`;
   console.log(line);
+  // 2026-10-23：后台模式下看门人自己的话（护栏、重拉、停手）原来只走它自己的 stdout，
+  // 而面板是用 stdio:'ignore' 把它拉起来的，那些话等于全丢了；补一份进 supervisor.log，
+  // 不然改动到底验没验过、提交没有，日志里一点痕迹都没有。
+  if (DETACH) {
+    try { fs.appendFileSync(path.join(LOGS, 'supervisor.log'), line + '\n'); } catch { /* 写不下就算了 */ }
+  }
 };
 
 // ---- 自改护栏 ----
-// 机器人自己（或你）改了代码之后，看门人负责三道闸：
+// 她（或主人）改了代码之后，看门人负责三道闸：
 //   1) 语法匣：所有 .mjs 先过 node --check；坏的那份留档到 runtime\broken\<时间>\，再从上一个提交还原
 //   2) 留痕：验过的改动自动 commit，每次启动都是一个能回滚到的点
 //   3) 退避：起来就退不无限重拉，连续 5 次就停手，理由写 runtime\supervisor-halt.json
@@ -53,15 +59,28 @@ function mjsFiles() {
   return out;
 }
 
+// 注意：「检查自己没跑起来」和「语法真的错」是两码事。2026-10-23 踩到的坑：
+// spawnSync 失败时 status 是 null，老代码把它当成每个文件都坏了，又因为 git 查不到记录，
+// 结果把 bot/panel/bin 里所有 .mjs 全删空，机器人起不来。跑不起来的检查一律不动文件。
 function syntaxError(file) {
   const r = spawnSync(process.execPath, ['--check', file], {
     encoding: 'utf8',
     windowsHide: true,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   });
+  if (r.error || r.status === null) {
+    const why = r.error?.code || r.error?.message || '被掐掉了';
+    return { skip: true, err: `检查没能跑起来（${why}），这个文件没动` };
+  }
   if (r.status === 0) return null;
+  // node --check 只在对语法报错时返回 1。别的非零码是检查本身出了问题
+  // （参数不对、文件读不到、被拦），不能当成语法错去还原或删文件。
+  if (r.status !== 1) {
+    return { skip: true, err: `检查没能跑起来（退出码 ${r.status}），这个文件没动` };
+  }
   const txt = String(r.stderr || r.stdout || '').trim();
-  return txt.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 3).join(' | ') || `node --check 退出码 ${r.status}`;
+  const msg = txt.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 3).join(' | ') || `node --check 退出码 ${r.status}`;
+  return { skip: false, err: msg };
 }
 
 function guard() {
@@ -69,31 +88,69 @@ function guard() {
   if (!fs.existsSync(path.join(ROOT, '.git'))) return; // 不是 git 仓就当没这回事
   const broken = [];
   for (const f of mjsFiles()) {
-    const err = syntaxError(f);
-    if (err) broken.push({ f, err });
+    const got = syntaxError(f);
+    if (!got) continue;
+    if (got.skip) { say(`语法匣：${path.relative(ROOT, f)} ${got.err}`); continue; }
+    broken.push({ f, err: got.err });
   }
   if (broken.length) {
     const dir = path.join(BROKEN_DIR, stamp());
     fs.mkdirSync(dir, { recursive: true });
+    // 先存好备份再动树；哪个存不下，那个就原样留着——宁可不修，不能删了没处找
+    const saved = new Map();
+    for (const { f } of broken) {
+      try {
+        fs.copyFileSync(f, path.join(dir, path.basename(f)));
+        saved.set(f, true);
+      } catch (e) {
+        saved.set(f, false);
+        say(`语法匣：${path.relative(ROOT, f)} 的备份没存下去（${e.code || e.message}），这个文件不动`);
+      }
+    }
     for (const { f, err } of broken) {
       const rel = path.relative(ROOT, f);
-      try { fs.copyFileSync(f, path.join(dir, path.basename(f))); } catch { /* 存不下也先把树还原 */ }
-      const tracked = git(['ls-files', '--error-unmatch', rel]).status === 0;
-      if (tracked) {
-        git(['checkout', 'HEAD', '--', rel]);
-        say(`语法匣：${rel} 有错（${err}），已从上一个提交还原；坏的那份留在 ${path.relative(ROOT, dir)}`);
+      const kept = `坏的那份留在 ${path.relative(ROOT, dir)}`;
+      if (!saved.get(f)) continue; // 上面已经说过
+      const ls = git(['ls-files', '--error-unmatch', rel]);
+      // 0 = 在库里，1 = 新加的还没提交过，其它（含 spawn 失败）一律当查不清，别动
+      if (ls.error || ls.status === null || (ls.status !== 0 && ls.status !== 1)) {
+        const why = ls.error?.code || `退出码 ${ls.status}`;
+        say(`语法匣：${rel} 有错（${err}），但查不到 git 记录（${why}），先没动它；${kept}`);
+        continue;
+      }
+      if (ls.status === 0) {
+        const co = git(['checkout', 'HEAD', '--', rel]);
+        if (co.status === 0) say(`语法匣：${rel} 有错（${err}），已从上一个提交还原；${kept}`);
+        else say(`语法匣：${rel} 有错（${err}），还原没成功（${String(co.stderr || '').trim().split(/\r?\n/)[0] || `退出码 ${co.status}`}），先没动它；${kept}`);
       } else {
         fs.rmSync(f, { force: true });
-        say(`语法匣：${rel} 有错（${err}），这是新加的没提交过，已挪走；坏的那份留在 ${path.relative(ROOT, dir)}`);
+        say(`语法匣：${rel} 有错（${err}），这是新加的没提交过，已挪走；${kept}`);
       }
     }
   }
   const st = git(['status', '--porcelain']);
-  const dirty = String(st.stdout || '').trim();
-  if (st.status === 0 && dirty) {
-    const names = dirty.split(/\r?\n/).map((l) => l.slice(3).trim()).filter(Boolean);
+  if (st.error || st.status !== 0) {
+    if (st.error || st.status !== null) say(`留痕：git status 没跑成（${st.error?.code || `退出码 ${st.status}`}），这次不提交`);
+    return;
+  }
+  // ⚠️ 这里**不能**对 st.stdout 整体 trim：porcelain 第一行的首字符可能就是状态位前
+  // 的空格（" M path"），trim 掉它会让后面 slice(3) 多切一个字符（曾把 bot/ 切成 ot/）。
+  const dirty = String(st.stdout || '').replace(/\s+$/, '');
+  if (dirty.trim()) {
+    const names = dirty
+      .split(/\r?\n/)
+      .map((l) => {
+        const code = l.slice(0, 2);
+        if (!code.trim()) return '';
+        return l.slice(3).trim() || l.slice(2).trim();
+      })
+      .filter(Boolean);
     const brief = names.slice(0, 6).join('、') + (names.length > 6 ? ` 等 ${names.length} 个文件` : '');
-    git(['add', '-A']);
+    const add = git(['add', '-A']);
+    if (add.status !== 0) {
+      say(`留痕：git add 没跑成（${String(add.stderr || '').trim().split(/\r?\n/)[0] || `退出码 ${add.status}`}），改动还在，只是没提交`);
+      return;
+    }
     const c = git(['commit', '-m', `自改 ${stamp()}：${brief}`]);
     if (c.status === 0) say(`留痕：动了 ${names.length} 个文件，已提交（${stamp()}）`);
     else say(`留痕没成功（${String(c.stderr || '').trim().split(/\r?\n/)[0]}），改动还在，只是没提交`);
@@ -108,7 +165,7 @@ function halt(code) {
     at: new Date().toISOString(),
     fails,
     code,
-    hint: `连续 ${fails} 次起来就退，看门人停手了。把最后一次改动改回去，或到面板点「启动」重来。`,
+    hint: `连续 ${fails} 次起来就退，看门人停手了。把最后一次改动改回去，或在面板点「启动」重来。`,
   };
   try { fs.writeFileSync(HALT_FILE, JSON.stringify(info, null, 2) + '\n', 'utf8'); } catch { /* 写不下也照样停手 */ }
 }
