@@ -11,7 +11,15 @@
     ],
     "maxSteps": 40,
     "maxTokensPerTurn": 3000000,
-    "dreamEnabled": true
+    "longTailTokens": 2000000,
+    "dreamEnabled": true,
+    "voiceEnabled": true,
+    "voiceDailyLimit": 40,
+    "voiceInMaxSeconds": 90,
+    "voiceAsrPython": "",
+    "voiceAsrScript": "",
+    "voiceAsrModels": "",
+    "autoFallback": false
   },
   "napcat": {
     "wsHost": "ws://127.0.0.1:3001",
@@ -20,7 +28,10 @@
   "group": {
     "enabled": false,
     "allow": [],
-    "talkAllow": []
+    "talkAllow": [],
+    "images": "all",
+    "speakGapMs": 30000,
+    "maxBubbles": 3
   },
   "dsh": {
     "exe": "",

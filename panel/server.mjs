@@ -106,6 +106,8 @@ function botSince() {
 
 // 主人睡（2026-10-20 的老功能）：机器人把状态写进 home\state\proactive.json，
 // 面板只读文件，不跟机器人进程打交道。
+// 2026-10-25：心情/氛围/主动生活的字段也一并读出来（原来只给 asleep/busy/mood 三样，
+// 面板上除了概览一无所知，主人在概览里根本看不到「她现在心情几分」）。
 function sleepState() {
   let pro = {};
   try {
@@ -114,9 +116,199 @@ function sleepState() {
   return {
     asleep: Boolean(pro.asleep),
     sleepKind: pro.sleepKind || '',
+    sleepNote: pro.sleepNote || '',
+    sleepSince: pro.sleepSince || null,
     // 心情（顺手给概览用，反正已经读了）
     mood: Number.isFinite(Number(pro.mood)) ? Number(pro.mood) : null,
+    moodAt: pro.moodAt || null,
     busy: Boolean(pro.busy),
+    busyNote: pro.busyNote || '',
+    // 氛围偏移（Alter），超阈值才注入；负=闷、正=轻快
+    alterScore: Number.isFinite(Number(pro.alterScore)) ? Number(pro.alterScore) : 0,
+    alterNote: pro.alterNote || '',
+    // 三档问候各自的最后一天 + 该补没补的那一档
+    greet: pro.greet || {},
+    pendingGreet: pro.pendingGreet || null,
+    // 她自己做的事：今天有没有找事/做梦（日期口径，不是时间戳）
+    ownDay: pro.ownDay || '',
+    lastOwnAt: pro.lastOwnAt || null,
+    planDay: pro.planDay || '',
+    nightDay: pro.nightDay || '',
+  };
+}
+
+/** 读一份 JSON，读不到给 fallback（面板里到处要用）。 */
+function readJsonFile(file, fallback = null) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * 用户画像列表（home\画像\*.md，每晚模型归纳一次）。
+ * 文件名就是「昵称-【QQ号】.md」，正文开头有一行 <!-- profile {...} --> 带统计。
+ * 这里只取列表与元信息，正文按需单独取（别一次全塞给前端）。
+ */
+function profileList() {
+  const dir = path.join(ROOT, 'home', '画像');
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.endsWith('.md'));
+  } catch {
+    return { dir, items: [], total: 0, updatedAt: null, msgs: 0 };
+  }
+  const items = [];
+  let updatedAt = null;
+  let msgs = 0;
+  for (const n of names) {
+    let meta = null;
+    let size = 0;
+    try {
+      const p = path.join(dir, n);
+      size = fs.statSync(p).size;
+      // 只读开头 1KB 找那行 <!-- profile ... -->，别整份读
+      const fd = fs.openSync(p, 'r');
+      const buf = Buffer.alloc(1024);
+      const got = fs.readSync(fd, buf, 0, 1024, 0);
+      fs.closeSync(fd);
+      const head = buf.subarray(0, got).toString('utf8');
+      const m = head.match(/<!--\s*profile\s*(\{[\s\S]*?\})\s*-->/);
+      if (m) meta = JSON.parse(m[1]);
+    } catch {
+      /* 单份读不了就只给文件名 */
+    }
+    const title = (meta && meta.nick) || n.replace(/-\u3010?\d+\u3011?\.md$/, '');
+    const qq = (meta && meta.qq) || (n.match(/(\d{5,})/) || [])[1] || '';
+    if (meta && Number.isFinite(Number(meta.updatedAt))) {
+      updatedAt = Math.max(updatedAt || 0, Number(meta.updatedAt));
+    }
+    if (meta && Number.isFinite(Number(meta.msgs))) msgs += Number(meta.msgs);
+    items.push({
+      file: n,
+      nick: title,
+      qq,
+      msgs: meta ? Number(meta.msgs) || 0 : null,
+      updatedAt: meta ? Number(meta.updatedAt) || null : null,
+      aliases: Array.isArray(meta?.aliases) ? meta.aliases : [],
+      size,
+    });
+  }
+  // 消息多的排前面（画像价值高的先看到）
+  items.sort((a, b) => (b.msgs || 0) - (a.msgs || 0));
+  return { dir, items, total: items.length, updatedAt, msgs };
+}
+
+/** 单份画像正文（点开某个人时取）。只允许读画像目录下的 .md，挡住路径穿越。 */
+function profileOne(file) {
+  const base = path.basename(String(file || ''));
+  if (!base.endsWith('.md')) return null;
+  const p = path.join(ROOT, 'home', '画像', base);
+  try {
+    return { file: base, text: fs.readFileSync(p, 'utf8') };
+  } catch {
+    return null;
+  }
+}
+
+/** 提醒列表（home\reminders.json）：到点由机器人发，面板只读。 */
+function reminderList() {
+  const raw = readJsonFile(path.join(ROOT, 'home', 'reminders.json'), []);
+  const arr = Array.isArray(raw) ? raw : [];
+  const now = Date.now();
+  const items = arr.map((r) => {
+    const at = Date.parse(String(r?.at ?? ''));
+    const ms = Number.isFinite(at) ? at - now : null;
+    return {
+      id: r?.id || '',
+      at: r?.at || '',
+      content: String(r?.content || ''),
+      toUser: r?.toUser || null,
+      createdAt: r?.createdAt || '',
+      // 还有多久：负数=已经过期（机器人最多补发 24 小时，太老的会丢弃）
+      inMs: ms,
+      due: ms !== null && ms <= 0,
+    };
+  });
+  items.sort((a, b) => (a.inMs ?? Infinity) - (b.inMs ?? Infinity));
+  return { items, total: items.length, due: items.filter((x) => x.due).length };
+}
+
+/** 昨晚做的梦（home\memory\dreams.jsonl）。这是「不是真事」的东西，单独一页看。 */
+function dreamList(limit = 20) {
+  const p = path.join(ROOT, 'home', 'memory', 'dreams.jsonl');
+  let lines = [];
+  try {
+    lines = fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean);
+  } catch {
+    return { items: [], total: 0, told: null };
+  }
+  const items = [];
+  for (const l of lines) {
+    try {
+      const o = JSON.parse(l);
+      items.push({
+        at: o.at || null,
+        day: o.day || '',
+        text: String(o.text || ''),
+        materialCount: o.materialCount ?? null,
+        status: o.status || '',
+        isGroundTruth: o.isGroundTruth === true,
+      });
+    } catch {
+      /* 坏行跳过 */
+    }
+  }
+  items.sort((a, b) => (b.at || 0) - (a.at || 0));
+  const state = readJsonFile(path.join(ROOT, 'home', 'state', 'dream.json'), {});
+  return { items: items.slice(0, limit), total: items.length, told: state?.lastToldDay || null };
+}
+
+/**
+ * 记忆质量门留档（home\memory\rejected.jsonl）。
+ * 这是审计用的：看「她本来会记什么、被哪条规则拦下了」。
+ * 文件可能不存在（上线后还没真拦过一条），这种情况要明确说「没有」而不是报错。
+ */
+function rejectedList(limit = 50) {
+  const p = path.join(ROOT, 'home', 'memory', 'rejected.jsonl');
+  const files = [p, p + '.1', p + '.2'];
+  let exists = false;
+  const items = [];
+  for (const f of files) {
+    let lines = [];
+    try {
+      lines = fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean);
+      exists = true;
+    } catch {
+      continue;
+    }
+    for (const l of lines) {
+      try {
+        const o = JSON.parse(l);
+        items.push({
+          at: o.at || null,
+          key: o.key || '',
+          day: o.day || '',
+          text: String(o.text || ''),
+          reason: o.reason || '',
+          quality: o.quality ?? null,
+          source: o.source || '',
+        });
+      } catch {
+        /* 坏行跳过 */
+      }
+    }
+  }
+  items.sort((a, b) => (b.at || 0) - (a.at || 0));
+  const byReason = {};
+  for (const it of items) byReason[it.reason || '(未写原因)'] = (byReason[it.reason || '(未写原因)'] || 0) + 1;
+  return {
+    exists,
+    items: items.slice(0, limit),
+    total: items.length,
+    byReason,
+    note: exists ? '' : '还没有被拦下的条目（质量门上线后抽记忆次数还很少）',
   };
 }
 
@@ -572,6 +764,17 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/memory/reindex' && req.method === 'POST') {
       return json(res, 200, { ok: true, building: spawnVectorSync(true), vector: vectorStats() });
     }
+    // ---- 画像 / 提醒 / 梦 / 质量门留档（2026-10-25 主人要的四个盲区）----
+    // 这四样数据本来就在盘上、也一直在长，只是面板没有入口，主人只能靠我口头汇报。
+    if (url.pathname === '/api/profiles') return json(res, 200, { ok: true, ...profileList() });
+    if (url.pathname === '/api/profile') {
+      const one = profileOne(url.searchParams.get('file'));
+      if (!one) return json(res, 404, { ok: false, msg: '找不到这份画像' });
+      return json(res, 200, { ok: true, ...one });
+    }
+    if (url.pathname === '/api/reminders') return json(res, 200, { ok: true, ...reminderList() });
+    if (url.pathname === '/api/dreams') return json(res, 200, { ok: true, ...dreamList(Number(url.searchParams.get('limit')) || 20) });
+    if (url.pathname === '/api/rejected') return json(res, 200, { ok: true, ...rejectedList(Number(url.searchParams.get('limit')) || 50) });
     if (url.pathname === '/api/sessions') return json(res, 200, { now: Date.now(), sessions: listSessions(25) });
     if (url.pathname === '/api/session') {
       const file = sessionFile(url.searchParams.get('ws'), url.searchParams.get('sid'));

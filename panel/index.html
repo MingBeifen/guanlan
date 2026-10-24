@@ -1219,6 +1219,258 @@
         padding: 7px 10px;
         font-size: 13px;
       }
+
+      /* ===== 2026-10-25 四个新页签（画像 / 提醒 / 梦 / 质量门留档）===== */
+      /* 主人一贯要的：分类要能一眼分开，长内容在区域内滚，不要撑高整页 */
+      .qa-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+      .qa-row input[type="text"] {
+        flex: 1;
+        min-width: 160px;
+        background: #0b1119;
+        color: var(--text);
+        border: 1px solid var(--line2);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font-size: 13px;
+      }
+      /* 可点的彩色分类块（主人明确要过「不同等级用不同颜色」） */
+      .seg {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .seg a {
+        font-size: 12px;
+        padding: 4px 11px;
+        border-radius: 20px;
+        border: 1px solid var(--line2);
+        color: var(--dim);
+        cursor: pointer;
+        user-select: none;
+        background: #0d131b;
+        transition: all 0.15s;
+      }
+      .seg a:hover {
+        color: var(--text);
+        border-color: #33506f;
+      }
+      .seg a.on {
+        color: #0a0d13;
+        background: var(--accent);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      .seg a .n {
+        font-family: var(--mono);
+        opacity: 0.7;
+        margin-left: 3px;
+      }
+      /* 竖向可滚的列表容器：数据长了不撑页面 */
+      .scroller {
+        max-height: 62vh;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #0b1119;
+        padding: 6px;
+      }
+      .pf-item {
+        padding: 9px 11px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        cursor: pointer;
+        margin-bottom: 3px;
+        transition: background 0.15s;
+      }
+      .pf-item:hover {
+        background: #121b26;
+        border-color: #22303f;
+      }
+      .pf-item .top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .pf-item .nick {
+        font-size: 13.5px;
+        color: #d7e2f0;
+        font-weight: 600;
+      }
+      .pf-item .qq {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--dim2);
+      }
+      .pf-item .meta {
+        font-size: 11.5px;
+        color: var(--dim);
+        margin-top: 4px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        font-family: var(--mono);
+      }
+      /* 消息量色条：一眼看出谁话最多 */
+      .bar {
+        height: 4px;
+        border-radius: 3px;
+        background: #17212e;
+        margin-top: 6px;
+        overflow: hidden;
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+        background: linear-gradient(90deg, #2f7cf6, #7c5cff);
+      }
+      .rm-item {
+        padding: 10px 12px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: #0d141d;
+        margin-bottom: 6px;
+      }
+      .rm-item.due {
+        border-color: #5c3a10;
+        background: #1a1408;
+      }
+      .rm-item .when {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--accent);
+      }
+      .rm-item.due .when {
+        color: var(--warn);
+      }
+      .rm-item .body {
+        font-size: 13px;
+        color: #cfd9e6;
+        line-height: 1.5;
+        margin: 5px 0 3px;
+        white-space: pre-wrap;
+      }
+      .rm-item .id {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim2);
+      }
+      .dream-item {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: linear-gradient(180deg, #131022, #0d131b);
+        padding: 12px 14px;
+        margin-bottom: 8px;
+      }
+      .dream-item .dh {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        flex-wrap: wrap;
+      }
+      .dream-item .dh b {
+        font-size: 13px;
+        color: #c9b8ff;
+      }
+      .dream-item .warn {
+        font-size: 11px;
+        color: var(--warn);
+        border: 1px solid #5c3a10;
+        background: #1a1408;
+        border-radius: 20px;
+        padding: 1px 9px;
+      }
+      .dream-item .txt {
+        font-size: 13px;
+        line-height: 1.75;
+        color: #c3cbdb;
+        white-space: pre-wrap;
+        max-height: 300px;
+        overflow: auto;
+      }
+      .rej-item {
+        padding: 9px 11px;
+        border-radius: 8px;
+        border-left: 3px solid var(--bad);
+        background: #14100f;
+        margin-bottom: 5px;
+      }
+      .rej-item .rh {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 4px;
+      }
+      .rej-item .rsn {
+        font-size: 11.5px;
+        color: #ff9c94;
+        border: 1px solid #5c1f1a;
+        background: #1e1210;
+        border-radius: 20px;
+        padding: 1px 9px;
+      }
+      .rej-item .qt {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim2);
+      }
+      .rej-item .txt {
+        font-size: 13px;
+        color: #cbd3df;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+      .pill-mood {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 2px 10px;
+        border-radius: 20px;
+        border: 1px solid var(--line2);
+        background: #0d131b;
+      }
+      .pill-mood i {
+        width: 46px;
+        height: 5px;
+        border-radius: 3px;
+        background: #17212e;
+        overflow: hidden;
+        display: inline-block;
+      }
+      .pill-mood i > b {
+        display: block;
+        height: 100%;
+        border-radius: 3px;
+      }
+      .md-body {
+        white-space: pre-wrap;
+        font-size: 13px;
+        line-height: 1.7;
+        color: #c8d2e0;
+        max-height: 62vh;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #0b1119;
+        padding: 12px 14px;
+      }
+      .md-body h1,
+      .md-body h2,
+      .md-body h3 {
+        font-size: 13.5px;
+        color: #9ecbff;
+        margin: 12px 0 6px;
+      }
     </style>
   </head>
   <body>
@@ -1307,6 +1559,52 @@
             </svg>
             记忆</a
           >
+          <a class="navi" href="#people" data-view="people">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="9" cy="8" r="3.2" />
+              <path d="M3.5 19.5c0-2.8 2.5-4.6 5.5-4.6s5.5 1.8 5.5 4.6" />
+              <path d="M16 7.2a2.6 2.6 0 0 1 0 5.1M17.6 19.5c0-2.1-.7-3.6-2-4.4 3 .1 5.4 1.7 5.4 4.4" />
+            </svg>
+            画像</a
+          >
+          <a class="navi" href="#remind" data-view="remind">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M6 9.5a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6" />
+              <path d="M10 19.5a2 2 0 0 0 4 0" />
+            </svg>
+            提醒</a
+          >
+          <a class="navi" href="#dream" data-view="dream">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M20 13.5A8 8 0 0 1 9.2 4a6.8 6.8 0 0 0 10.8 9.5z" />
+              <path d="M6 16.5l.6 1.6 1.6.6-1.6.6L6 21l-.6-1.7-1.6-.6 1.6-.6z" />
+            </svg>
+            梦与留档</a
+          >
           <a class="navi" href="#logs" data-view="logs">
             <svg
               class="ic"
@@ -1370,6 +1668,17 @@
             <div class="kv"><span>能指挥它的人</span><b id="owners">-</b></div>
             <div class="kv"><span>群聊</span><b id="group">-</b></div>
             <div class="kv"><span>用的模型配置</span><b id="model2">-</b></div>
+          </div>
+          <div class="grid3">
+            <div class="kv">
+              <span>心情</span>
+              <b id="moodPill" class="pill-mood" style="margin: 0"
+                ><i><b id="moodBar" style="width: 0%"></b></i
+                ><span id="moodNum">-</span></b
+              >
+            </div>
+            <div class="kv"><span>氛围偏差</span><b id="alterVal">-</b></div>
+            <div class="kv"><span>问候 / 她自己的事</span><b id="greetVal">-</b></div>
           </div>
           <div class="grid2">
             <div class="card">
@@ -1646,7 +1955,8 @@
                   <label class="fl"
                     >归属
                     <select id="memKey">
-                      <!-- 选项由 memFillKeys() 按真实会话动态生成，这里只留一个兜底 -->
+                      <option value="private:1000000001">私聊（主人）</option>
+                      <option value="group:1000000002">群 1000000002</option>
                       <option value="shared">通用（所有会话）</option>
                     </select>
                   </label>
@@ -1690,6 +2000,99 @@
           </div>
         </section>
 
+        <!-- 画像（2026-10-25）：她给每个人攒的笔记本，每晚模型归纳一次 -->
+        <section class="view" id="view-people">
+          <div class="card">
+            <div class="card-h">
+              <b>用户画像</b><span class="hint" id="pfStats">读取中…</span>
+            </div>
+            <div class="qa-row">
+              <input
+                id="pfQ"
+                type="text"
+                placeholder="搜昵称 / QQ 号"
+                oninput="pfRender()"
+              />
+              <button class="btn" onclick="loadProfiles(true)">刷新</button>
+            </div>
+            <div class="grid2" style="align-items: stretch">
+              <div>
+                <div class="seg" id="pfSeg" style="margin-bottom: 8px">
+                  <a class="on" data-k="all" onclick="pfPick(this)">全部<span class="n" id="pfNAll">0</span></a>
+                  <a data-k="hot" onclick="pfPick(this)">话多的<span class="n" id="pfNHot">0</span></a>
+                  <a data-k="quiet" onclick="pfPick(this)">很少说话的<span class="n" id="pfNQuiet">0</span></a>
+                </div>
+                <div class="scroller" id="pfList">
+                  <div class="empty" style="padding: 8px">正在读画像…</div>
+                </div>
+              </div>
+              <div>
+                <div class="card-h" style="margin-top: 0">
+                  <b id="pfTitle">挑一个人看</b
+                  ><span class="hint" id="pfSub"
+                    >每晚 23:30 之后模型归纳一次；「回答谁就带谁」</span
+                  >
+                </div>
+                <div class="md-body" id="pfBody">
+                  左边点一个人，这里显示她的笔记（原文，不加工）。
+                </div>
+              </div>
+            </div>
+            <p class="hint" style="margin: 8px 0 0">
+              这份数据她每轮只带「正在回答的那个人」那一段，不会一次把几十个人全塞给模型。
+            </p>
+          </div>
+        </section>
+
+        <!-- 提醒（2026-10-25）：她自己写进 reminders.json 的，到点由机器人发 -->
+        <section class="view" id="view-remind">
+          <div class="card">
+            <div class="card-h">
+              <b>提醒</b><span class="hint" id="rmStats">读取中…</span>
+            </div>
+            <div class="scroller" id="rmList">
+              <div class="empty" style="padding: 8px">正在读提醒…</div>
+            </div>
+            <p class="hint" style="margin: 8px 0 0">
+              数据来自 <code>home\reminders.json</code>。她自己写进去的，到点由机器人发给你；
+              过期太久的（超过 24 小时）会被丢弃，这里标黄色的是已经到点还没发出去。
+            </p>
+          </div>
+        </section>
+
+        <!-- 梦与质量门留档（2026-10-25）：两个「不是真事 / 没进库」的独立数据 -->
+        <section class="view" id="view-dream">
+          <div class="grid2" style="align-items: start">
+            <div class="card">
+              <div class="card-h">
+                <b>她做的梦</b><span class="hint" id="drStats">读取中…</span>
+              </div>
+              <div class="scroller" id="drList">
+                <div class="empty" style="padding: 8px">正在读 dreams.jsonl…</div>
+              </div>
+              <p class="hint" style="margin: 8px 0 0">
+                梦**不进主记忆库**、也不会被当成真事（<code>isGroundTruth:false</code>）。
+                素材是她当天的真实记忆，拼法随机，所以内容不能当事实核对。
+              </p>
+            </div>
+            <div class="card">
+              <div class="card-h">
+                <b>质量门留档</b><span class="hint" id="rjStats">读取中…</span>
+              </div>
+              <div class="seg" id="rjSeg" style="margin-bottom: 8px">
+                <a class="on" data-k="all" onclick="rjPick(this)">全部<span class="n" id="rjNAll">0</span></a>
+              </div>
+              <div class="scroller" id="rjList" style="max-height: 52vh">
+                <div class="empty" style="padding: 8px">正在读 rejected.jsonl…</div>
+              </div>
+              <p class="hint" style="margin: 8px 0 0">
+                被拦下的条目**不进主记忆库**，原文一字不丢地留在这里，带「为什么被拦」。
+                文件不存在 = 上线以来一条都没拦过（不是坏了）。
+              </p>
+            </div>
+          </div>
+        </section>
+
         <!-- 日志 -->
         <section class="view" id="view-logs">
           <div class="card" style="display: flex; flex-direction: column">
@@ -1710,6 +2113,9 @@
         progress: ["任务进度", "每一轮跑到第几步、在用哪个工具。"],
         sessions: ["会话记录", "和 dsh 里看到的是同一份会话，按轮次回放。"],
         memory: ["记忆", "五层记忆、分数与淡忘；能查、能改、能增删。"],
+        people: ["画像", "她给每个人攒的笔记本；每晚模型归纳一次，回答谁就带谁。"],
+        remind: ["提醒", "她自己写进去的提醒，到点由机器人发给你。"],
+        dream: ["梦与留档", "她做的梦（不进记忆库）和质量门拦下的条目（审计留档）。"],
         logs: ["日志", "看门人最近写了什么。"],
       };
       let view = "overview";
@@ -1773,6 +2179,9 @@
         if (name === "progress") loadProgress();
         if (name === "memory") loadMemory();
         if (name === "model") loadGateway();
+        if (name === "people") loadProfiles();
+        if (name === "remind") loadReminders();
+        if (name === "dream") loadDreams();
         if (name === "overview") load();
       }
       function route() {
@@ -1888,6 +2297,33 @@
               mini.textContent = lines;
               mini.scrollTop = mini.scrollHeight;
             }
+          }
+          // 心情 / 氛围 / 问候（2026-10-25）：原来面板完全看不到这三样，
+          // 而它们正是「她今天什么状态」的核心。心情 35 以下她会少冒头。
+          const sl = d.sleep || {};
+          if ($("moodNum")) {
+            const mv = Number.isFinite(sl.mood) ? sl.mood : null;
+            $("moodNum").textContent = mv === null ? "未知" : `${mv} 分`;
+            const bar = $("moodBar");
+            bar.style.width = mv === null ? "0%" : Math.max(0, Math.min(100, mv)) + "%";
+            // 低于 35 她少冒头 → 红色；正常 → 绿色；两档之间 → 黄
+            bar.style.background =
+              mv === null ? "#3a4453" : mv < 35 ? "var(--bad)" : mv < 60 ? "var(--warn)" : "var(--ok)";
+            $("moodPill").title = sl.moodAt ? "更新于 " + fmtStamp(sl.moodAt) : "";
+          }
+          if ($("alterVal")) {
+            const a = Number(sl.alterScore) || 0;
+            const label = a <= -3 ? "有点闷" : a >= 3 ? "轻快些" : "没什么起伏";
+            $("alterVal").textContent = `${a.toFixed(1)}　${label}`;
+          }
+          if ($("greetVal")) {
+            const g = sl.greet || {};
+            const bits = [];
+            if (g.morning) bits.push("早 " + g.morning.slice(5));
+            if (g.noon) bits.push("午 " + g.noon.slice(5));
+            if (g.night) bits.push("晚 " + g.night.slice(5));
+            if (sl.pendingGreet) bits.push(`待补 ${sl.pendingGreet.kind}`);
+            $("greetVal").textContent = bits.length ? bits.join(" · ") : "-";
           }
         } catch {
           $("state").textContent = "连不上面板服务";
@@ -2423,6 +2859,7 @@
         const rows = [
           ["永久", b.core],
           ["长期", b.long],
+          ["画像", b.profile],
           ["旧账检索", b.retrieved],
           ["中期", b.mid],
           ["短期", b.short],
@@ -2454,11 +2891,9 @@
         $("memEditTitle").textContent = it ? "编辑这一条" : "新建一条记忆";
         $("memId").textContent = it ? it.id : "";
         $("memMsg").textContent = "";
-        // 新建时默认落在「上一次用过的会话」，没有就落到下拉里第一个真实选项——
-        // 不能写死某个号码（那是部署时才有的东西，开源包里没有）
         $("memKey").value = it
           ? it.key
-          : memState.last?.key || $("memKey").options[0]?.value || "shared";
+          : memState.last?.key || "private:1000000001";
         memScoreHint();
         for (const el of document.querySelectorAll("#memList .mrow2"))
           el.classList.toggle("on", Boolean(it) && el.dataset.id === it.id);
@@ -2509,6 +2944,214 @@
           ? "已开始重建索引，几十秒后刷新这页看块数"
           : "没跑成";
         loadMemory();
+      }
+
+      // ===== 画像 / 提醒 / 梦 / 质量门留档（2026-10-25）=====
+      // 四块都是「数据一直在长、但面板没有入口」。这里只读，不改任何东西。
+
+      /** 时间戳 → 「10-25 04:12」 */
+      function fmtStamp(ms) {
+        if (!ms) return "-";
+        const d = new Date(ms);
+        const p = (n) => String(n).padStart(2, "0");
+        return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      }
+      /** 距今多久 → 「3 天前」 */
+      function fmtAgo(ms) {
+        if (!ms) return "";
+        const s = Math.floor((Date.now() - ms) / 1000);
+        if (s < 0) return "";
+        if (s < 60) return "刚刚";
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m} 分钟前`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `${h} 小时前`;
+        return `${Math.floor(h / 24)} 天前`;
+      }
+      /** 还有多久 → 「还有 17 天」/「已到点」 */
+      function fmtUntil(ms) {
+        if (ms === null || ms === undefined) return "时间看不懂";
+        if (ms <= 0) return "已到点";
+        const m = Math.floor(ms / 60000);
+        if (m < 60) return `还有 ${m} 分钟`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `还有 ${h} 小时`;
+        return `还有 ${Math.floor(h / 24)} 天`;
+      }
+
+      // ---- 画像 ----
+      let pfState = { items: [], pick: "all", sel: "" };
+
+      async function loadProfiles(force) {
+        try {
+          const d = await apiGet("/api/profiles");
+          pfState.items = d.items || [];
+          $("pfStats").textContent = d.total
+            ? `${d.total} 份 · 合计 ${d.msgs} 条消息 · 最近更新 ${fmtAgo(d.updatedAt)}`
+            : "还没有画像（她还没归纳过）";
+          pfRender();
+        } catch (e) {
+          $("pfStats").textContent = "读不到：" + e.message;
+        }
+      }
+      function pfPick(a) {
+        for (const x of document.querySelectorAll("#pfSeg a")) x.classList.remove("on");
+        a.classList.add("on");
+        pfState.pick = a.dataset.k;
+        pfRender();
+      }
+      function pfRender() {
+        const all = pfState.items;
+        const q = ($("pfQ")?.value || "").trim().toLowerCase();
+        const match = (it) =>
+          !q || String(it.nick).toLowerCase().includes(q) || String(it.qq).includes(q);
+        // 分类阈值不能拍脑袋：按实际分布取「中位数以上」为话多的，
+        // 否则像 36 份都是 30 条以上时会变成「话多的 = 全部」，分类就没意义了。
+        const sorted = all.map((x) => x.msgs || 0).sort((a, b) => a - b);
+        const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+        const hot = all.filter((it) => (it.msgs || 0) > median);
+        const quiet = all.filter((it) => (it.msgs || 0) <= median);
+        $("pfNAll").textContent = all.length;
+        $("pfNHot").textContent = hot.length;
+        $("pfNQuiet").textContent = quiet.length;
+        let list = pfState.pick === "hot" ? hot : pfState.pick === "quiet" ? quiet : all;
+        list = list.filter(match);
+        const maxMsgs = Math.max(1, ...all.map((x) => x.msgs || 0));
+        $("pfList").innerHTML = list.length
+          ? list
+              .map((it) => {
+                const on = it.file === pfState.sel ? " on" : "";
+                const pct = Math.round(((it.msgs || 0) / maxMsgs) * 100);
+                const ali = (it.aliases || []).filter(Boolean).slice(0, 2);
+                return `<div class="item pf-item${on}" onclick="pfOpen('${esc(it.file)}')">
+                  <div class="top">
+                    <span class="nick">${esc(it.nick)}</span>
+                    <span class="qq">${esc(it.qq)}</span>
+                  </div>
+                  <div class="meta">
+                    <span>${it.msgs === null ? "消息数未知" : it.msgs + " 条"}</span>
+                    <span>${fmtAgo(it.updatedAt) || "没写更新时刻"}</span>
+                    ${ali.length ? `<span>又叫 ${ali.map(esc).join(" / ")}</span>` : ""}
+                  </div>
+                  <div class="bar"><i style="width:${pct}%"></i></div>
+                </div>`;
+              })
+              .join("")
+          : `<div class="empty" style="padding: 8px">${q ? "没有匹配的人" : "这个分类下没人"}</div>`;
+      }
+      async function pfOpen(file) {
+        pfState.sel = file;
+        pfRender();
+        try {
+          const d = await apiGet("/api/profile?file=" + encodeURIComponent(file));
+          if (!d.ok) {
+            $("pfBody").textContent = "读不到这份画像。";
+            return;
+          }
+          $("pfTitle").textContent = file.replace(/\.md$/, "");
+          $("pfSub").textContent = "原文，不加工 · " + file;
+          $("pfBody").textContent = d.text;
+        } catch (e) {
+          $("pfBody").textContent = "读不到：" + e.message;
+        }
+      }
+
+      // ---- 提醒 ----
+      async function loadReminders() {
+        try {
+          const d = await apiGet("/api/reminders");
+          $("rmStats").textContent = d.total
+            ? `${d.total} 条${d.due ? ` · ${d.due} 条已到点` : ""}`
+            : "还没有提醒";
+          $("rmList").innerHTML = d.total
+            ? d.items
+                .map(
+                  (r) => `<div class="rm-item${r.due ? " due" : ""}">
+                    <div class="when">${esc(r.at)}　·　${fmtUntil(r.inMs)}</div>
+                    <div class="body">${esc(r.content)}</div>
+                    <div class="id">${esc(r.id)}　发给他 ${esc(r.toUser ?? "?")}　建于 ${esc(r.createdAt || "-")}</div>
+                  </div>`,
+                )
+                .join("")
+            : `<div class="empty" style="padding: 8px">还没有提醒。她答应你的事会自己写进这里。</div>`;
+        } catch (e) {
+          $("rmStats").textContent = "读不到：" + e.message;
+        }
+      }
+
+      // ---- 梦 + 质量门留档 ----
+      let rjState = { items: [], pick: "all" };
+
+      async function loadDreams() {
+        try {
+          const d = await apiGet("/api/dreams");
+          $("drStats").textContent = d.total
+            ? `${d.total} 篇${d.told ? ` · 最近讲过 ${d.told} 的` : ""}`
+            : "还没做过梦";
+          $("drList").innerHTML = d.total
+            ? d.items
+                .map(
+                  (x) => `<div class="dream-item">
+                    <div class="dh">
+                      <b>${esc(x.day || fmtStamp(x.at))}</b>
+                      <span class="chip">素材 ${x.materialCount ?? "?"} 条</span>
+                      ${x.isGroundTruth ? "" : '<span class="warn">不是真事</span>'}
+                    </div>
+                    <div class="txt">${esc(x.text)}</div>
+                  </div>`,
+                )
+                .join("")
+            : `<div class="empty" style="padding: 8px">还没有梦。她只在 3-6 点之间、一天一次、素材够 3 条时才做。</div>`;
+        } catch (e) {
+          $("drStats").textContent = "读不到：" + e.message;
+        }
+        try {
+          const r = await apiGet("/api/rejected");
+          rjState.items = r.items || [];
+          $("rjStats").textContent = r.exists
+            ? `${r.total} 条被拦`
+            : "还没有留档文件";
+          // 按原因做彩色分类块（主人要的可视化）
+          const reasons = Object.keys(r.byReason || {});
+          $("rjSeg").innerHTML =
+            `<a data-k="all" class="on" onclick="rjPick(this)">全部<span class="n">${r.total}</span></a>` +
+            reasons
+              .map(
+                (k) =>
+                  `<a data-k="${esc(k)}" onclick="rjPick(this)">${esc(k)}<span class="n">${r.byReason[k]}</span></a>`,
+              )
+              .join("");
+          rjRender();
+          if (!r.exists && r.note) {
+            $("rjList").innerHTML = `<div class="empty" style="padding: 10px">${esc(r.note)}</div>`;
+          }
+        } catch (e) {
+          $("rjStats").textContent = "读不到：" + e.message;
+        }
+      }
+      function rjPick(a) {
+        for (const x of document.querySelectorAll("#rjSeg a")) x.classList.remove("on");
+        a.classList.add("on");
+        rjState.pick = a.dataset.k;
+        rjRender();
+      }
+      function rjRender() {
+        const list =
+          rjState.pick === "all"
+            ? rjState.items
+            : rjState.items.filter((x) => (x.reason || "(未写原因)") === rjState.pick);
+        if (!list.length) return; // 空的时候保留上面的说明文字，不要覆盖成空白
+        $("rjList").innerHTML = list
+          .map(
+            (x) => `<div class="rej-item">
+              <div class="rh">
+                <span class="rsn">${esc(x.reason || "(未写原因)")}</span>
+                <span class="qt">质量 ${x.quality ?? "?"}　${esc(fmtStamp(x.at))}　${esc(x.day || "")}</span>
+              </div>
+              <div class="txt">${esc(x.text)}</div>
+            </div>`,
+          )
+          .join("");
       }
 
       $("showThink").onchange = renderRows;

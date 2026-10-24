@@ -20,6 +20,9 @@ import { createOutbox } from "./outbox.mjs";
 import * as memStore from "./memory-store.mjs";
 // 出处（2026-10-23 主人定的）：小结/日子账/记忆库每条结论都要能指回原话或新闻文件
 import * as cite from "./cite.mjs";
+// 用户画像（2026-10-24 主人要的）：一个真人一份，文件名「昵称-【QQ号】」，认号不认名。
+// 两层：节律靠本地统计（零成本、可回溯），是谁/在乎什么/最近靠每晚一次模型归纳。
+import * as profile from "./user-profile.mjs";
 import { applyName, takeNameMarkers, ensureFallbackModel, fallbackModel, writeProfile } from "../bin/profile.mjs";
 
 // ---------- 配置 ----------
@@ -141,10 +144,21 @@ const CFG = {
     Number.isFinite(Number(KIT.bot.maxTokensPerTurn))
       ? Number(KIT.bot.maxTokensPerTurn)
       : 3 * 1000 * 1000,
+  // 长尾警戒线（2026-10-25）：单轮 token 越过它就记一笔日志 + 在 turns.jsonl 打标记。
+  // **只记账、不拦截** —— maxSteps:0 是主人明确要的「去掉上限」，这条不许变硬拦。
+  // 实测依据：7 天 34 轮 >2M 吃掉 124.7M（占全部 38%），单轮最高 9.80M。
+  // config.json → bot.longTailTokens，默认 2M。
+  longTailTokens:
+    KIT.bot?.longTailTokens != null && Number.isFinite(Number(KIT.bot.longTailTokens))
+      ? Number(KIT.bot.longTailTokens)
+      : 2 * 1000 * 1000,
   voiceEnabled: KIT.bot?.voiceEnabled === true, // 语音开关：config.json → bot.voiceEnabled（默认关）
   // 梦境引擎（2026-10-24）：config.json → bot.dreamEnabled，默认 **开**（成本只在夜里一次，
   // 且写在独立文件不进主库）。不想要就写 false，不用改代码。
   dreamEnabled: KIT.bot?.dreamEnabled !== false,
+  // 画像每批问几个人（2026-10-25）：主人指出一晚把三十几个人一次丢给模型、两万多字，
+  // 容易漏人或写串。改成一批 6 个（每批约 4~5 千字），config.json → bot.profileBatchSize 可调。
+  profileBatchSize: Number(KIT.bot?.profileBatchSize) || 6,
   // 主模型挂了要不要自动退官方模型（要花钱）：config.json → bot.autoFallback，默认 **关**。
   // 2026-10-23 主人拍板关掉：实测一天因兜底打了 221 次官方请求。
   autoFallback: KIT.bot?.autoFallback === true,
@@ -157,12 +171,43 @@ const CFG = {
     return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
   })(),
   voiceDir: path.join(KIT_HOME, "voice"),
-  voicePython: String(KIT.voice?.python ?? ""), // 合成用的 python 绝对路径（GPT-SoVITS 自带 runtime）
-  ffprobe: "ffprobe",
-  ffmpeg: "ffmpeg",
-  voiceWhisper: "",
-  voiceWhisperModel: "",
-  voiceDefault: { voice: "zh-CN-YunxiaNeural", rate: "-5%", pitch: "-2Hz" },
+  voicePython: String(KIT.voice?.python ?? ""), // 合成用的 python 绝对路径（CosyVoice3 的 py310，2026-10-25 换）
+  // 语音日上限（2026-10-25 主人拍板「让她更爱说话，日上限提高」）：config.json → bot.voiceDailyLimit
+  voiceDailyLimit: Number(KIT.bot?.voiceDailyLimit) || 80,
+  // 群里收到的语音转写时长上限（2026-10-25）：config.json → bot.voiceInMaxSeconds，默认 90 秒
+  voiceInMaxSeconds: Number(KIT.bot?.voiceInMaxSeconds) || 90,
+  // ffprobe/ffmpeg：原来写死裸名 "ffprobe"，可 PATH 里根本没有 → probeDuration() 里
+  // fs.existsSync("ffprobe") 恒为 false，直接 resolve(0)，于是「语音合成 ?s」一直是问号、
+  // 而且 VOICE_MIN_SECONDS/VOICE_MAX_SECONDS 两道闸门从来没生效过（2026-10-25 发现）。
+  // 现在优先用 CosyVoice3 目录里那份（从 GPT-SoVITS runtime 复制来的），找不到才退回裸名。
+  ffprobe: (() => {
+    const py = String(KIT.voice?.python ?? "");
+    const dir = py ? path.dirname(path.dirname(py)) : "";
+    const cand = dir ? path.join(dir, "ffprobe.exe") : "";
+    return cand && fs.existsSync(cand) ? cand : "ffprobe";
+  })(),
+  ffmpeg: (() => {
+    const py = String(KIT.voice?.python ?? "");
+    const dir = py ? path.dirname(path.dirname(py)) : "";
+    const cand = dir ? path.join(dir, "ffmpeg.exe") : "";
+    return cand && fs.existsSync(cand) ? cand : "ffmpeg";
+  })(),
+  // 语音转写（2026-10-25 换成本机 funasr）：见 transcribeAudio()。
+  // 三件都可配：python 解释器 / 转写脚本 / ASR 模型根目录（留空就用脚本内置默认）。
+  voiceAsrPython: (() => {
+    const v = String(KIT.bot?.voiceAsrPython ?? "");
+    if (v && fs.existsSync(v)) return v;
+    // 默认跟语音合成共用一个解释器（CosyVoice3 的 py310 里就装着 funasr）
+    const py = String(KIT.voice?.python ?? "");
+    return py && fs.existsSync(py) ? py : "";
+  })(),
+  voiceAsrScript: (() => {
+    const v = String(KIT.bot?.voiceAsrScript ?? "");
+    const cand = v || path.join(KIT_HOME, "voice", "transcribe.py");
+    return fs.existsSync(cand) ? cand : "";
+  })(),
+  voiceAsrModels: String(KIT.bot?.voiceAsrModels ?? "").trim(),
+  voiceDefault: { voice: "CosyVoice3", rate: "-5%", pitch: "-2Hz" },
   syncSessionRoot: "",
   syncScript: "",
   syncOut: path.join(KIT_HOME, "sync-from-dsh.md"),
@@ -170,6 +215,8 @@ const CFG = {
 
 // 记忆库（五层 + 打分 + 淡忘）落在 home\memory\store.json，机器人和面板共用
 memStore.initMemoryStore(CFG.home);
+// 用户画像落在 home\画像\，每晚重算一次；读不到就是没有，不影响开跑
+profile.initUserProfile(CFG.home);
 
 // ---------- 进度快照（2026-10-20 主人选的方案 A） ----------
 // 只记录、不干预：runWhale 每收到一行 dsh 事件就更新这里，落一份 runtime\progress\<会话>.json。
@@ -420,16 +467,65 @@ function pruneMedia() {
     return; /* 目录都读不了就算了，清理失败不影响运行 */
   }
   const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+  let dropped = 0;
   for (const f of names) {
     if (!MEDIA_IMG_EXT.has(path.extname(f).toLowerCase())) continue;
     const p = path.join(MEDIA_DIR, f);
     try {
       const st = fs.statSync(p);
-      if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(p);
+      if (st.isFile() && st.mtimeMs < cutoff) {
+        fs.unlinkSync(p);
+        dropped += 1;
+      }
     } catch {
       /* 单个文件删不掉就跳过，别拖累整轮 */
     }
   }
+  // 顺手清掉去重索引里的死链（2026-10-25）：上面删完后，content-index.json 里
+  // 仍留着指向已删文件的 sha→路径条目。实测 1045 条里有 140 条是死链。
+  // 不清不会崩（findStoredByHash 会兜底扫目录，1048 个文件只要 7ms），
+  // 但索引会一直虚胖，而且下次同样的图回来会扫一遍全目录才发现「原件没了」。
+  try {
+    pruneMediaIndex();
+  } catch {
+    /* 索引清理失败不影响运行 */
+  }
+  if (dropped) log(`老图清理：删掉 ${dropped} 张 7 天前的图`);
+}
+
+// 去重索引（home\media\content-index.json）里指向已不存在文件的条目：直接摘掉。
+// 返回删了几条，给日志用。只在 pruneMedia 之后调用，所以此刻刚删过的文件一定是死的。
+function pruneMediaIndex() {
+  let idx = null;
+  try {
+    idx = JSON.parse(fs.readFileSync(MEDIA_INDEX_PATH, "utf8"));
+  } catch {
+    return 0; /* 还没有索引文件 */
+  }
+  if (!idx || typeof idx !== "object" || Array.isArray(idx)) return 0;
+  let dead = 0;
+  for (const [hash, p] of Object.entries(idx)) {
+    if (typeof p !== "string" || !p) continue;
+    try {
+      if (!fs.existsSync(p)) {
+        delete idx[hash];
+        dead += 1;
+      }
+    } catch {
+      /* 单条判不了就留着 */
+    }
+  }
+  if (dead) {
+    try {
+      writeJson(MEDIA_INDEX_PATH, idx);
+      // 内存缓存必须一起清，否则本次运行还会按旧索引去指向已删文件
+      mediaIndexCache = idx;
+      log(`去重索引清理：摘掉 ${dead} 条指向已删文件的死链`);
+    } catch {
+      /* 写不回去就算了，下次启动还会再试 */
+    }
+  }
+  return dead;
 }
 
 function log(...parts) {
@@ -934,33 +1030,65 @@ const VOICE_STATE_PATH = path.join(CFG.home, "media", "voice-state.json");
 const VOICE_LAST_PATH = path.join(CFG.home, "media", "voice", "last.txt");
 const VOICE_MAX_SECONDS = 60; // QQ 语音上限约 60 秒
 const VOICE_MIN_SECONDS = 1.5; // 太短发出去显示异常
-const VOICE_DAILY_LIMIT = 40; // 一天最多合成几条，防手滑刷爆
+// 群里「收到的语音」转写上限（2026-10-25）：超过这个时长不转。
+// 为什么要有：群里发一段几分钟的录音，转写要跑几十秒 CPU、还可能塞爆上下文预算。
+// 私聊不设这个限制（主人自己发的，长一点也认）。
+const VOICE_IN_MAX_SECONDS = Number(CFG.voiceInMaxSeconds) || 90;
+const VOICE_DAILY_LIMIT = Number(CFG.voiceDailyLimit) || 80; // 一天最多合成几条（2026-10-25 从 40 提到 80，新音色好听、主人要她更爱说话）
 const VOICE_RE = /\[语音\]([\s\S]*?)\[\/语音\]/g;
 // 语气标记（2026-10-24 主人拍板）：[语气:开心] 这种写在 [语音] 里面，代码剥掉不发。
-// 为什么不用 CX-O 那套 emo_alpha：本机 GPT-SoVITS 是 v2ProPlus，grep 全仓确认它
-// **没有** emo_alpha / emo_ref_path 参数（TTS_infer_pack/TTS.py 里 0 命中）。
-// 所以语气只能落到两处真能影响声音的东西上：语速 speed_factor + 换一条参考音。
+// 语气现在落到两个真能影响声音的地方：instruct2 的情绪指令（--tone）+ 语速倍率 speed。
+// 2026-10-25 之前这里写的是「GPT-SoVITS 没有 emo_alpha」，那套引擎已删，别再照旧注释推。
 const TONE_RE = /\[语气[:：]\s*([^\]]{1,24})\]/g;
+// 残留标记扫尾（2026-10-25）：TONE_RE 要求 `[语气:内容]` 三件齐全，所以 `[语气:]`（空值）
+// 和 `[语气:开心 内容`（忘写 ]）都匹配不上 → 会在 QQ 上原样显示。这条专管那两种残体。
+// **限量 12 字且停在标点/空白**：不能 `[^\]\n]*` 一路吃到行尾（实测会把后半句正文一起吞掉）。
+// 剥标记的两个入口（synthVoice 与发消息前的 bubble 清洗）都走它，别再各写一份。
+const TONE_RESIDUE_RE = /\[语气[:：][^\]\n\s，。！？、,.!?]{0,12}\]?/g;
+const TONE_BARE_RE = /\[语气\]/g;
+// 剥完标记后，**句首**残留的标点也一并去掉：`[语气:开心，今天真好` 剥完会剩
+// `，今天真好`——那个逗号是标记的残渣（没人以逗号起句）。只动句首，句中不动。
+const TONE_LEAD_PUNCT_RE = /^[，。！？、,.!?；;：:…\s]+/;
+
+/** 剥掉一段文本里全部语气标记（含空值/忘闭合/裸标记）+ 句首残留标点。 */
+function stripToneMarks(text) {
+  return String(text ?? "")
+    .replace(TONE_RE, "")
+    .replace(TONE_RESIDUE_RE, "")
+    .replace(TONE_BARE_RE, "")
+    .replace(TONE_LEAD_PUNCT_RE, "");
+}
 // 语气词 → 语速倍率。1.0 是正常；只做温和偏移，别做出电子音的感觉。
 // 命中靠子串包含（「开心地笑」也算开心），所以这里放的是词根。
+//
+// 2026-10-25 大改，两条实测依据：
+// ①**情绪指令自己就会提速 30~44%**（同一句 13 字：中性 3.61 字/秒、开心 4.71、撒娇 5.20）。
+//   原来这里开心 1.08 / 撒娇 1.04 是在「已经加速」的基础上再乘一次 → 短句冲到 5.7 字/秒就是「赶」的来源。
+//   现在所有倍率统一压到 0.92~0.95 区间（困 0.88），把情绪还原成「只管音色、不管快慢」。
+// ②**不能放单字词根**：原来是「气」，会误命中天气/空气/语气/客气 → 只要她说到这些词语速就被静默改掉。
+//   现在最长的词组优先，单字只保留「困」「累」「懒」「睡」这类不会在别的词里高频出现的（见下）。
+// 中文日常对话基准约 4~6 字/秒，压到这套值后观澜落在 3.5~4.5。
 const TONE_SPEED = [
-  [["开心", "高兴", "兴奋", "雀跃", "欢喜", "笑"], 1.08],
-  [["撒娇", "黏", "软", "轻快", "俏皮"], 1.04],
-  [["认真", "郑重", "严肃", "正经", "郑重其事"], 0.96],
-  [["难过", "失落", "委屈", "低落", "闷", "伤心"], 0.92],
-  [["困", "累", "疲惫", "懒", "睡"], 0.9],
-  [["生气", "气", "凶", "恼", "不爽"], 1.05],
-  [["温柔", "轻声", "慢", "缓", "安抚"], 0.94],
+  [["开心", "高兴", "兴奋", "雀跃", "欢喜", "笑"], 0.95],
+  [["撒娇", "黏", "轻快", "俏皮", "软软", "软糯"], 0.95],
+  [["认真", "郑重", "严肃", "正经", "郑重其事"], 0.93],
+  [["难过", "失落", "委屈", "低落", "伤心", "闷闷"], 0.95],
+  [["困", "累", "疲惫", "懒", "睡"], 0.88],
+  [["生气", "赌气", "怒气", "凶", "恼", "不爽"], 0.95],
+  [["温柔", "轻声", "慢", "缓", "安抚"], 0.92],
 ];
 
 // 从一段话里剥出语气词，返回 { text, tone, speed }
 // 没写语气 = tone 空、speed 1.0，跟原来完全一样（零行为变化）
 function extractTone(raw) {
   let tone = "";
-  const text = String(raw ?? "").replace(TONE_RE, (whole, body) => {
-    if (!tone) tone = String(body ?? "").trim();
-    return "";
-  });
+  // 先把真正的 `[语气:内容]` 取出来（顺手记 tone），再让 stripToneMarks 统一扫残体。
+  const text = stripToneMarks(
+    String(raw ?? "").replace(TONE_RE, (whole, body) => {
+      if (!tone) tone = String(body ?? "").trim();
+      return "";
+    }),
+  );
   let speed = 1.0;
   if (tone) {
     for (const [words, sp] of TONE_SPEED) {
@@ -989,6 +1117,11 @@ function toneRefAudio(tone) {
   }
   return null;
 }
+
+// 2026-10-25 换成 CosyVoice3 之后，情绪不再靠「换参考音文件」（那个路子会污染
+// 参考音、还有并发换文件的隐患），改用模型的 instruct2 情绪指令：把语气词原样传给
+// say-voice.py，由它映射成「用开心的语气说这句话。」这种指令。
+// 保留 toneRefAudio 只给 --tone-test 打印对照用，合成路径不再调它。
 
 function readVoiceConfig() {
   return { ...CFG.voiceDefault, ...readJson(VOICE_CONFIG_PATH, {}) };
@@ -1030,7 +1163,6 @@ async function synthVoice(text) {
     log("语音：找不到合成脚本", gen);
     return null;
   }
-  const ref = toneRefAudio(toned.tone);
   const r = await runProc(
     CFG.voicePython,
     [
@@ -1045,12 +1177,15 @@ async function synthVoice(text) {
       cfg.rate ?? "-5%",
       "--pitch",
       cfg.pitch ?? "-2Hz",
-      // 语气透传（2026-10-24）：speed 一定传；分情绪参考音有才传
+      // 语气透传（2026-10-25 改）：speed + 语气词都给，情绪由 CosyVoice3 的
+      // instruct2 指令实现（say-voice.py 里映射），不再换参考音文件。
       "--speed",
-      String(ref ? 1.0 : toned.speed),
-      ...(ref ? ["--emotion-ref", ref.wav, "--emotion-ref-text", ref.txt] : []),
+      String(toned.speed),
+      ...(toned.tone ? ["--tone", toned.tone] : []),
     ],
-    { timeoutMs: 120000 },
+    // CosyVoice3 首句要等模型 + 生成，RTF 约 1x，长句能给到 30 秒；
+    // 算上服务冷启（理论 12 秒）也留足余量。
+    { timeoutMs: 180000 },
   );
   if (!r.ok || !fs.existsSync(out)) {
     log("语音合成失败:", (r.err || r.out || "").slice(0, 200));
@@ -1068,7 +1203,7 @@ async function synthVoice(text) {
   log(
     `语音合成 ${dur ? dur.toFixed(1) + "s" : "?"} ${kb}KB voice=${cfg.voice}` +
       (toned.tone
-        ? ` 语气=${toned.tone} speed=${ref ? "1.0(换了参考音)" : toned.speed}`
+        ? ` 语气=${toned.tone} speed=${toned.speed}`
         : "") +
       `: ${clean.slice(0, 40)}`,
   );
@@ -1189,12 +1324,10 @@ function probeDuration(file) {
       { windowsHide: true },
     );
     let o = "";
-    child.stdout?.on("data", (d) => {
-      o += String(d);
-    });
-    child.on("error", () => resolve(0));
-    child.on("close", () => resolve(Number.parseFloat(o.trim()) || 0));
-    setTimeout(() => {
+    // 2026-10-25 修：这个 15 秒兜底定时器原来没人清——每次探测都在事件循环里留一个
+    // 15 秒的 timer，而 whale-bot 是长存活进程（一天几十条语音 = 几十个悬挂 timer）。
+    // 正常 close/error 时清掉它；timer 自己是最后一道兜底，走完就不用再清。
+    const timer = setTimeout(() => {
       try {
         child.kill();
       } catch {
@@ -1202,6 +1335,17 @@ function probeDuration(file) {
       }
       resolve(0);
     }, 15000);
+    child.stdout?.on("data", (d) => {
+      o += String(d);
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(0);
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      resolve(Number.parseFloat(o.trim()) || 0);
+    });
   });
 }
 
@@ -1213,12 +1357,64 @@ function probeDuration(file) {
 const VOICE_MAX_PER_REPLY = 2;
 function extractVoiceTags(text) {
   const says = [];
-  const rest = String(text ?? "").replace(VOICE_RE, (whole, body) => {
+  const src = String(text ?? "");
+  let repaired = 0; // 兜回来的「漏写闭合」段数，调用方据此打日志
+  // 第一遍：正常成对的 [语音]…[/语音]
+  let rest = src.replace(VOICE_RE, (whole, body) => {
     const s = String(body ?? "").trim();
-    if (s && says.length < VOICE_MAX_PER_REPLY) says.push(s);
-    return "";
+    if (!s) return "";
+    if (says.length < VOICE_MAX_PER_REPLY) {
+      says.push(s);
+      return "";
+    }
+    // 2026-10-25 修：超额（第 3 段及以后）原来是 return "" 直接吞——模型写三段且都正规闭合时，
+    // 第三段说的话在 QQ 上彻底消失（一个字都不剩）。这里改成把内容当正文留着、只剥标记，
+    // 与第二遍漏闭合分支的 `else keep.push(body)` 保持同一口径：宁可当文字发出去，也不要吞。
+    return `\n\n${s}\n\n`;
   });
-  return { says, rest: rest.replace(/\n{3,}/g, "\n\n").trim() };
+  // 第二遍：只有 [语音] 没有 [/语音]（模型常漏写收尾）。
+  // 2026-10-25 实测：她一次回复写了两段都漏闭合，结果整个 [语音] 标记原样被当文字发到 QQ，
+  // 语音一条都没合成——主人看到的就是「[语音]喂喂，听得见吗…」这种字面气泡。
+  // 兜法：从 [语音] 起到空行或结尾算一段正文，别让内容丢、也别让标记流出去。
+  // 2026-10-25 02:45 补：原来只按空行分段，一行里写了两个 [语音] 时会被整条粘成一段念出来
+  // （主人的那条回复就是这样：两段挤在同一行，结果只成了一条语音，后面那段话被念进了同一条）。
+  // 现在改成遇到下一个 [语音] 或换行就收手，剩下的继续走循环。
+  if (rest.includes("[语音]")) {
+    const keep = [];
+    for (const piece of rest.split(/\n{2,}/)) {
+      let left = piece;
+      while (left.includes("[语音]")) {
+        const idx = left.indexOf("[语音]");
+        const head = left.slice(0, idx).trim();
+        if (head) keep.push(head);
+        const tail = left.slice(idx + "[语音]".length);
+        const cut = tail.search(/\[语音\]|\n/);
+        const body = (cut < 0 ? tail : tail.slice(0, cut))
+          .replace(/\[\/?语音\]/g, "")
+          .trim();
+        if (body) {
+          if (says.length < VOICE_MAX_PER_REPLY) {
+            says.push(body);
+            repaired += 1;
+          } else keep.push(body); // 超额的那段当文字留着，不吞内容
+        }
+        if (cut < 0) {
+          left = "";
+          break;
+        }
+        left = tail.slice(cut); // 剩下的（含下一个 [语音]）接着兜
+      }
+      if (left.trim()) keep.push(left.trim());
+    }
+    rest = keep.join("\n\n");
+  }
+  // 落单的 [/语音]（没有开头）一律清掉：这类标记绝不能出现在 QQ 上
+  rest = rest.replace(/\[\/?语音\]/g, "");
+  return {
+    says,
+    rest: rest.replace(/\n{3,}/g, "\n\n").trim(),
+    repaired, // 兜回来的漏闭合段数（调用方据此打日志）
+  };
 }
 
 function sanitize(text) {
@@ -1562,8 +1758,12 @@ const EAR_ASK_RE =
 //       ③但要先剔除「含疑问字、实为陈述/客套」的固定搭配（CX-O 有 14 条，这里挑常用的）。
 const REQUEST_WORDS =
   /(帮我|帮忙|给我|替我|让我|叫你|喊你|找你|来一下|来一句|试一下|试试|看看|看一下|说说|讲讲|告诉我|问一下|查一下|发一下|写一下|你能|你会|你可不可以|能不能|可以吗|行吗|好吗)/;
+// 2026-10-25 补：原来「有人吗」判不出来——词表里没有任何形式能命中它（`吗` 是单字，
+// 单独放进去会把「好吗」「行吗」这类全放进来）。所以补的是**带「有人」的完整问法**，
+// 而不是单字 `吗`：有人[吗么嘛没] / 有没有人。
+// 故意**不**收「有人在」「有人来过」这种陈述（群里「有人在群里发图」不该惊动模型）。
 const QUESTION_WORDS =
-  /(谁|什么|啥|怎么|为什么|为啥|哪[里个些儿]|几[点个天号]|多少|多久|多[大小远近长]|是不是|有没有|会不会|能不能|要不要|该不该|对不对|好不好|行不行|可不可以|在不在|在吗|在不|咋)/;
+  /(谁|什么|啥|怎么|为什么|为啥|哪[里个些儿]|几[点个天号]|多少|多久|多[大小远近长]|是不是|有没有|会不会|能不能|要不要|该不该|对不对|好不好|行不行|可不可以|在不在|在吗|在不|有人[吗么嘛没]|有没有人|咋)/;
 // 先剔掉这些「含疑问字但不是问」的固定搭配，再判疑问词
 const NON_QUESTION_PHRASES = [
   "是不是啊",
@@ -1626,7 +1826,15 @@ function rememberEarLine(msg, spoken) {
     };
     groupEars.set(gid, ear);
   }
-  ear.lines.push({ nick, uid: msg.user_id, text, ts: Date.now() });
+  // messageId 留着是为了她答完能反查「她到底在答哪一句」——引用框挂对地方（2026-10-24 修）
+  ear.lines.push({
+    nick,
+    uid: msg.user_id,
+    text,
+    ts: Date.now(),
+    messageId: msg.message_id ? String(msg.message_id) : "",
+    sender: Number(msg.user_id) || 0,
+  });
   ear.sinceJudge = (ear.sinceJudge ?? 0) + 1;
   const keep = CFG.groupEarsKeep ?? 10;
   if (ear.lines.length > keep) ear.lines.splice(0, ear.lines.length - keep);
@@ -1653,7 +1861,14 @@ function rememberBotEarLine(gid, text) {
     };
     groupEars.set(id, ear);
   }
-  ear.lines.push({ nick: "我", uid: CFG.adminQq, text: t, ts: Date.now() });
+  ear.lines.push({
+    nick: "我",
+    uid: CFG.adminQq,
+    text: t,
+    ts: Date.now(),
+    messageId: "",
+    sender: Number(CFG.adminQq) || 0,
+  });
   if (EAR_ASK_RE.test(t)) {
     ear.awaitingAnswerUntil = Date.now() + 2 * 60 * 1000;
   }
@@ -1779,6 +1994,15 @@ async function maybeJudgeEars(msg, spoken, seqInfo) {
     .slice(-8)
     .map((l) => `${l.nick}(${l.uid})：${l.text}`)
     .join("\n");
+  // 引用候选也要在**提问这一刻**就拍下来：模型看的是上面这 8 句，
+  // 答复要 6~8 秒，期间 new 消息会挤进 ear.lines，到时候再 slice 就和它看到的不一致了。
+  const quoteCandidates = ear.lines
+    .slice(-8)
+    .filter((l) => l.messageId)
+    .map((l) => ({
+      sender: Number(l.sender ?? l.uid) || 0,
+      messageId: String(l.messageId),
+    }));
   const who = msg.sender?.card || msg.sender?.nickname || String(msg.user_id);
   // 这几句里带了刚存下来的图：准它看一眼再决定接不接，别对着 [图片] 瞎猜（2026-10-20）
   const hasImage = /图片已存到本机/.test(
@@ -1841,7 +2065,10 @@ async function maybeJudgeEars(msg, spoken, seqInfo) {
   appendArchive(`group:${gid}`, "me", stripHiddenMarkers(answer)); // 主动插的话也进群上下文，别人接着回复才接得住
   // 主动插话也要能挂引用（2026-10-22 补）：原来这里不传第 4 参，messageId 永远为空，
   // shouldQuote 恒为 false，群里所有主动接话都挂不上引用框。
-  await reply("group", gid, answer, seqInfo);
+  // ⚠️ 2026-10-24 修（主人实拍：她答的是林那条「大傻鱼」，引用框却挂在〔群友己〕「在研究编曲」上）：
+  // 读空气这一轮看的 recent 是最近 8 句，她**会挑不是最后一句的**来答，所以不能只传触发这条的消息 id。
+  // 候选用上面那份快照，reply() 里按她回答中 [@号] 反查；反查不到就不挂，宁可不引也不引错。
+  await reply("group", gid, answer, { ...seqInfo, quoteCandidates });
 }
 
 // ---------- 发件箱（2026-10-19 · 技术优化第一条） ----------
@@ -1947,6 +2174,27 @@ function bumpSeq(key) {
   const n = (convSeq.get(key) ?? 0) + 1;
   convSeq.set(key, n);
   return n;
+}
+
+// 她 @ 人的两种写法都要认：`[@123456789]`，以及 `[@昵称(123456789)]`（textToSegments 都支持）。
+// 只认 5~12 位纯数字，`[@all]` 或 `[@1]` 这种列表编号不算。
+const AT_SEG_RE = /\[@([^\]\n]{1,60})\]/;
+const AT_UID_NUM_RE = /(\d{5,12})/;
+
+/** 从她的回答里找出她 @ 的是谁，再在候选里挑对应那条消息的 id。查不到返回 null。 */
+function pickQuoteCandidate(text, list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const seg = AT_SEG_RE.exec(String(text ?? ""));
+  if (!seg) return null; // 没点名要 @ 谁，就没法判断她在答哪条，宁可不引
+  const num = AT_UID_NUM_RE.exec(seg[1]);
+  if (!num) return null; // `[@all]` 之类，不是具体某人
+  const uid = Number(num[1]);
+  // 同一个号可能说了好几句，取最近的那条
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const it = list[i];
+    if (Number(it.sender) === uid && it.messageId) return it;
+  }
+  return null;
 }
 
 /** 这一轮该不该带引用。opts 里要有 messageId（QQ 消息 id）、seq（收到时的序号）、at（收到的时间）。 */
@@ -2094,6 +2342,15 @@ function flushGroupPending(gid) {
     messageId: last.messageId,
     at: last.at,
     asked: last.asked,
+    // 这一轮在答谁，就带谁的画像（2026-10-25 主人改的）：攒的一批里说话的人都算
+    speakers: [...new Set(slot.lines.map((l) => Number(l.sender) || 0).filter(Boolean))],
+    // 攒的是一批，她答的可能是其中任何一句；把每条的 id 都带上，发的时候按她 @ 的人反查（2026-10-24 修）
+    quoteCandidates: slot.lines
+      .filter((l) => l.messageId)
+      .map((l) => ({
+        sender: Number(l.sender) || 0,
+        messageId: String(l.messageId),
+      })),
     text:
       `[刚才半分钟里群里这几句我攒着没答，现在一起答：\n${asked}\n` +
       "[这几句全答完，最多三句，想说的都压进这三句里，别漏事、别删内容]",
@@ -2102,16 +2359,38 @@ function flushGroupPending(gid) {
 
 restoreGroupPending();
 
+/**
+ * 这一轮该挂哪条引用（不挂返回 null）。抽成纯函数好测：
+ *   ①他明说要引用 → 就引他这条（不问候选）
+ *   ②这一轮给了候选（耳朵/攒批）→ 按她回答里 [@号] 反查她到底在答哪条
+ *   ③其余 → 老规矩，引触发这条
+ * 反查不到就不挂引用——宁可不引，也绝不引错（2026-10-24 修）。
+ */
+function resolveQuoteId(kind, id, text, opts = {}) {
+  if (!shouldQuote(kind, id, opts)) return null;
+  const cands = opts.quoteCandidates;
+  if (!opts.asked && Array.isArray(cands) && cands.length) {
+    const hit = pickQuoteCandidate(text, cands);
+    return hit ? String(hit.messageId) : null;
+  }
+  return String(opts.messageId);
+}
+
 async function reply(kind, id, text, opts = {}) {
   text = kitNameHook(text, kind, id); // 名字彩蛋的隐藏记号先摘掉，绝不发到 QQ 上
-  // 远的那句才挂引用（近处不挂，见 shouldQuote）
-  const quoteId = shouldQuote(kind, id, opts) ? String(opts.messageId) : null;
+  // 远的那句才挂引用（近处不挂，见 shouldQuote）；挂哪条见 resolveQuoteId
+  const quoteId = resolveQuoteId(kind, id, text, opts);
   // 先把 [语音]...[/语音] 摘出来：那段不念文字，改合成语音发出去
-  const { says, rest: restRaw } = extractVoiceTags(text);
+  const { says, rest: restRaw, repaired } = extractVoiceTags(text);
+  // 她漏写 [/语音] 时上面会兜回来。记一笔：这不是她写错就算了，
+  // 2026-10-25 那次两条语音全没发出去、标记还被当文字发到 QQ，靠日志才知道。
+  if (repaired) log(`语音标记没闭合：兜回 ${repaired} 段当语音说`, brief(text, 40));
   // 语气标记只该待在 [语音] 里；万一写在正文（模型常这么干），这里也得剥掉再发，
   // 不然 QQ 上会直接看到「[语气:开心]今天真好」（2026-10-24 自检发现）。
-  // 只删标记、不动空白：chunkText 要靠换行分气泡，extractTone 会压掉换行。
-  const rest = restRaw.replace(TONE_RE, "").trim();
+  // 2026-10-25 补：原来这里只跑 TONE_RE，管不了 `[语气:]` 空值和 `[语气:开心 内容` 忘闭合——
+  // 那两种会以文字气泡原样发出去（synthVoice 那侧的清理管不到正文）。现在走同一个 stripToneMarks。
+  // 只删标记、不动空白：chunkText 要靠换行分气泡，extractTone 会压掉换行，所以这里不用 extractTone。
+  const rest = stripToneMarks(restRaw).trim();
   let sent = 0;
   // 文字气泡先切好；群聊再按条数上限并一遍，私聊原样发。语音段不参与合并，并完再垫在后面
   let bubbles = chunkText(rest).flatMap((chunk) => splitBubbles(chunk));
@@ -2299,6 +2578,8 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     let budgetSteps = 0;
     let budgetTokens = 0;
     let budgetKillTimer = null;
+    // 长尾标记（2026-10-25）：越过警戒线只记账不打断，见 onProgressEvent 里的注释
+    let longTailFlag = false;
     const hitBudget = (why) => {
       if (budgetHits) return; // 只报第一次
       budgetHits = why;
@@ -2333,6 +2614,18 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
             hitBudget(
               `token 超上限（${(budgetTokens / 1000000).toFixed(2)}M > ${(CFG.maxTokensPerTurn / 1000000).toFixed(1)}M）`,
             );
+        }
+        // 长尾告警（2026-10-25 加，主人选的 D 项之一）。
+        // 背景实测：7 天 324.65M token，其中 **34 轮 >2M 就吃掉 124.7M（38%）**，
+        // 单轮最高 9.80M / 133 步。而 `maxSteps: 0` 是主人 10-24 明确要的「去掉 40 步上限」，
+        // **这条不许改成硬拦**——所以这里只在越过警戒线时记一笔 + 置个标记，
+        // 让 turns.jsonl 和日志能事后复盘「今天哪几轮特别贵」，不打断她干活。
+        if (!longTailFlag && budgetTokens > CFG.longTailTokens) {
+          longTailFlag = true;
+          log(
+            `[长尾] 这一轮已烧 ${(budgetTokens / 1000000).toFixed(2)}M token / ${budgetSteps} 步` +
+              `（警戒线 ${(CFG.longTailTokens / 1000000).toFixed(1)}M，不拦，只记账）`,
+          );
         }
       }
       if (!progKey) return;
@@ -2438,6 +2731,7 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
           budget: budgetHits || "",
           steps: budgetSteps,
           tokens: budgetTokens,
+          longTail: longTailFlag,
         });
         return;
       }
@@ -2747,6 +3041,7 @@ function writeMemoryLast(key, mem, blocks) {
           blocks: {
             core: mem.base,
             long: mem.long,
+            profile: mem.profile,
             retrieved: mem.retrieved,
             mid: mem.mid,
             short: mem.short,
@@ -2767,9 +3062,25 @@ function writeMemoryLast(key, mem, blocks) {
   }
 }
 
-// 每轮开口带的记性：永久 → 长期 → 旧账检索 → 中期 → 短期 → 最近原话
+// 每轮开口带的记性：永久 → 长期 → 画像 → 旧账检索 → 中期 → 短期 → 最近原话
 // 2026-10-21 起由 home\memory\store.json 驱动（面板可增删查改，改完热生效）。
-function memoryParts(key, query = "") {
+// 画像（2026-10-24 加的）：独立的 home\画像\，一晚只重算一次，所以是稳的那一档。
+// 2026-10-25 主人改的规矩：**这一轮在答谁，就带谁的画像**。speakers 是这一轮说话的人（QQ 列表）。
+function profileBlockFor(key, speakers = null) {
+  try {
+    return profile.blockFor(CFG.home, key, {
+      ownerQq: CFG.allowlist[0],
+      // 主人 + 这一轮说话的几个人，最多 3 个，别把 57 个人全怼进去
+      maxPeople: 3,
+      qqs: speakers,
+    });
+  } catch (e) {
+    log("画像读不出来（不影响回话）：", errMsg(e));
+    return "";
+  }
+}
+
+function memoryParts(key, query = "", speakers = null) {
   ensureBase(key);
   migrateKeyToStore(key);
   // 2026-10-22 主人要的「全解开」：群聊也能想起私聊和别的群的事，别只认本群那几页。
@@ -2808,6 +3119,10 @@ function memoryParts(key, query = "") {
     long: blocks.long
       ? "[长期记忆 · 分数高的旧事，用得上就用，别硬接]\n" + blocks.long
       : "",
+    // 画像（2026-10-24 主人要的）：每晚重算一次，所以跟 base/long 一样稳，
+    // 放在 retrieved（每轮都变）前面，不会白冲前缀缓存。
+    // 2026-10-25：只带「这一轮在答的那几个人」，不再固定带最近说话的人。
+    profile: profileBlockFor(key, speakers),
     retrieved,
     mid: blocks.mid ? "[中期记忆 · 最近几天的要点]\n" + blocks.mid : "",
     short: blocks.short
@@ -3571,9 +3886,19 @@ function gateContent(text) {
     .trim();
 }
 
+// 纯数字/纯重复字符：网络上「2333333」「hhhhh」「啊啊啊啊啊」这类笑声梗，
+// gateContent 去标点后还剩一串数字或同一个字，长度也过得了 6 字门槛，所以原来会漏放进库。
+// 判据三层，都极窄：
+//   ①整串只有数字；②全是同一个字重复 4 次以上；
+//   ③「数字+语气词/笑声字」的混合梗（`2333333哈哈哈哈`）：把数字和语气词全剔掉后什么都不剩。
+// 真·事实不会长这样——哪怕带了号（「QQ 号是 1000000006」）也剔不掉「号是」两个字。
+const GATE_DIGITS_RE = /^[0-9]+$/;
+const GATE_REPEAT_RE = /^(.)\1{3,}$/u;
+
 // 三档启发式：返回 { ok, quality, reason }
 //   长度 < 6 字          → 0.2
 //   纯语气词 / 纯应声     → 0.15
+//   纯数字 / 单字重复     → 0.15
 //   与已有条目判定为同一条 → 0.1
 //   其余                 → 0.6
 function gateMemoryItem(text, existing = []) {
@@ -3583,6 +3908,13 @@ function gateMemoryItem(text, existing = []) {
   // 全是语气词的散字（「嗯嗯啊啊哈」这种）
   if ([...bare].every((c) => GATE_FILLER.has(c)))
     return { ok: false, quality: 0.15, reason: "纯语气词/应声" };
+  // 2026-10-25 补：笑声梗（2333333 / hhhhh / 啊啊啊啊 / 2333333哈哈哈哈）
+  if (
+    GATE_DIGITS_RE.test(bare) ||
+    GATE_REPEAT_RE.test(bare) ||
+    ![...bare].some((c) => !GATE_FILLER.has(c) && !/[0-9]/.test(c))
+  )
+    return { ok: false, quality: 0.15, reason: "纯数字/单字重复（笑声梗）" };
   if (bare.length < GATE_MIN_LEN)
     return { ok: false, quality: 0.2, reason: `太短（${bare.length} 字 < ${GATE_MIN_LEN}）` };
   // 与已有条目撞车：sameness() 是写入时用的那套合并判定，这里直接复用，口径一致
@@ -4454,7 +4786,7 @@ function styleParts(dry = false, key = "") {
     volatile.push(
       group
         ? "[语音：可以在你说的话里挑一句，用 [语音]…[/语音] 包起来变成声音（一次最多一段、一两句）。群里别滥发——只在话里有情绪、或者想认真说一句时才用，别为了好听就每条都说。语音之外照样留文字。]"
-        : "[语音：如果这一句用声音说更有感觉（撒娇、认真、委屈、道晚安这种），就单独写成 [语音]…[/语音]（一次最多两段、每段一两句）；平常闲聊用文字就行，别每条都语音。语音之外还要留一句文字。]",
+        : "[语音：想用声音说的时候就写 [语音]…[/语音]（一次最多两段、每段一两句）。⚠️ 每个 [语音] 后面必须跟着 [/语音] 收尾，漏了这段就发不出声、标记还会被当成字打出去。2026-10-25 换了新音色，主人说好听，让你更爱说话一点——撒娇、笑、晚安、认真解释、念东西给他听都可以，一天三五十条都不算多；但别每条都发，也别把整段话都塞进语音里，留一句文字。语音之外还要有一句文字。]\n\n[语音节奏（2026-10-25 主人说有时语速过快、听着赶）：语音里别一口气把长句说完——超过十来个字就在意思断的地方加逗号或句号停一下，像真的说话那样换气。宁可短一点、断一下，也别连珠炮。]",
     );
     // 语气标记（2026-10-24 主人拍板）：写进 [语音] 段里面，代码会剥掉不发，
     // 只影响合成出来的声音（语速/参考音）。可选，不写就是正常语气。
@@ -4478,7 +4810,9 @@ function styleHeader() {
 const MEMORY_LABEL = "[我记着的事（开口前先认这个；底账里的规矩别忘）：]";
 function buildTurnPrompt(key, text, opts = {}) {
   const mem =
-    isStateless() && opts.withMemory !== false ? memoryParts(key, text) : null;
+    isStateless() && opts.withMemory !== false
+      ? memoryParts(key, text, opts.speakers ?? null)
+      : null;
   // 群提示里给 QQ 号补称呼（2026-10-22 主人定的）：只改拼出来的提示，记忆库原文不动
   const group = isGroupKey(key);
   const fix = (s) => (group ? groupAnonText(s) : s);
@@ -4491,6 +4825,7 @@ function buildTurnPrompt(key, text, opts = {}) {
         MEMORY_LABEL,
         fix(mem.base),
         fix(mem.long),
+        fix(mem.profile),
         fix(mem.retrieved),
         fix(mem.mid),
         fix(mem.short),
@@ -4506,6 +4841,7 @@ function buildTurnPrompt(key, text, opts = {}) {
         MEMORY_LABEL,
         fix(mem.base),
         fix(mem.long),
+        fix(mem.profile),
         fix(mem.retrieved),
         fix(mem.mid),
         fix(mem.short),
@@ -5553,6 +5889,88 @@ async function maybeWriteDiary() {
   log("日记已写:", r.text.slice(0, 80).replace(/\n/g, " "));
 }
 
+// 每晚重算画像（2026-10-24 主人要的）：
+//   节律那一节每次都本地重算（零成本、可无限回溯）；「他是谁 / 好在乎什么 / 最近」夜里问一次模型。
+//   一次问完所有人会到两万多字、容易漏人写串，所以按批（默认 6 个一批）分开问。
+//   节流看索引里最新的 analyzedAt，不用另存状态。
+let profileLocalDay = ""; // 本地统计当天已经算过就不重算（23:30 之后每分钟都会走到这儿）
+let profileFailAt = 0; // 模型归纳失败后的冷却，免得一分钟一次连打半小时
+async function refreshProfiles() {
+  const now = Date.now();
+  const { day, hour, minute } = bjParts(now);
+  if (hour < 23) return;
+  if (hour === 23 && minute < 30) return;
+  if (pauseMode() !== "off") return;
+
+  // 本地统计：改昵称、换群、话变多，下一次就能在页面上看出来。一天算一次就够。
+  let local = { count: 0 };
+  if (profileLocalDay !== day) {
+    try {
+      local = profile.rebuildLocal(CFG.home, { ownerQq: CFG.allowlist[0] });
+      profileLocalDay = day;
+      if (local.renamed?.length) log("画像改名：", local.renamed.join("、"));
+      log(`画像本地统计：${local.count} 份`);
+    } catch (e) {
+      log("画像本地统计失败（不影响）：", errMsg(e));
+    }
+  }
+
+  // 模型归纳：一晚只做一次；失败的话隔半小时再试，别一分钟一次
+  if (now - profileFailAt < 30 * 60 * 1000) return;
+  let idx = { people: {} };
+  try {
+    idx = profile.readIndex();
+  } catch {
+    /* 索引读不出来就当没做过 */
+  }
+  const lastAt = Math.max(
+    0,
+    ...Object.values(idx.people ?? {}).map((p) => Number(p?.analyzedAt) || 0),
+  );
+  const people = profile.candidates(CFG.home, { ownerQq: CFG.allowlist[0] });
+  if (!people.length) return;
+  // 一晚只做一次：按人算，不看全局最新时间。这样中途失败/进程重启，
+  // 下一跳只补还没算的那几个人，不会因为「有人已经算过」就整晚跳过（2026-10-25 修）。
+  const todo = people.filter(
+    (p) => bjDayKey(Number(idx.people?.[p.qq]?.analyzedAt) || 0) !== day,
+  );
+  if (!todo.length) return;
+  if (lastAt && bjDayKey(lastAt) === day) log(`画像：今晚已算过 ${people.length - todo.length} 个，还剩 ${todo.length} 个要补`);
+  const existing = {};
+  for (const p of people) {
+    const d = String(idx.people?.[p.qq]?.digest ?? "").trim();
+    if (d) existing[p.qq] = d;
+  }
+  // 2026-10-25 主人指出的隐患：一晚把三十几个人一起丢给模型、两万多字，容易漏人或者写串。
+  // 改成一批 6 个、一批一批问：每批一千多字，模型看得清，串了也只串本批。
+  const SIZE = Number(CFG.profileBatchSize) || 6;
+  let done = 0;
+  for (let i = 0; i < todo.length; i += SIZE) {
+    const chunk = todo.slice(i, i + SIZE);
+    const prompt = profile.refreshPrompt(chunk, {
+      ownerQq: CFG.allowlist[0],
+      existing,
+    });
+    log(`重算画像（${i + 1}-${i + chunk.length}/${todo.length}）：${prompt.length} 字`);
+    const r = await runQueuedTask(PRIMARY_KEY, "profile", prompt, {
+      withMemory: false,
+    });
+    if (!r.ok) {
+      profileFailAt = Date.now();
+      log("画像重算没成，半小时后再试:", r.error);
+      return;
+    }
+    const list = profile.parseAnalysis(r.text);
+    if (!list.length) {
+      profileFailAt = Date.now();
+      log("画像重算没解析出结果:", String(r.text ?? "").slice(0, 80));
+      return;
+    }
+    done += profile.applyAnalysis(CFG.home, list, { ownerQq: CFG.allowlist[0] });
+  }
+  log(`画像已更新：${done}/${todo.length} 个人（本地统计 ${local.count} 份）`);
+}
+
 // 统一的一轮执行：负责会话续接、失败重试、写回 sessionId。
 // 返回 { ok, text, error }；不发消息——发不发由调用方决定（用户消息要发，内部任务不一定）。
 async function runTurn(key, prompt, opts = {}) {
@@ -5570,6 +5988,7 @@ async function runTurn(key, prompt, opts = {}) {
     withMemory: opts.withMemory,
     withHeader: opts.withHeader,
     vectorBlock,
+    speakers: opts.speakers,
   });
   const sessionId = stateless ? null : (state.sessions[key] ?? null);
   const started = Date.now();
@@ -5670,6 +6089,7 @@ async function runTurn(key, prompt, opts = {}) {
       steps,
       attempts,
       sid: res.sid ?? null,
+      longTail: res.longTail === true,
     };
   return {
     ok: true,
@@ -5681,13 +6101,17 @@ async function runTurn(key, prompt, opts = {}) {
     sid: res.sid ?? null,
     reason: res.reason,
     fellBack,
+    longTail: res.longTail === true,
   };
 }
 
 async function handleOne(key, item) {
   // 内部任务（主动搭话、写日记、压小结、结日子账）：不发消息、不计入"刚有互动"
   if (item.mode === "task") {
-    const r = await runTurn(key, item.prompt, {
+    // 记忆键与排队键分开（2026-10-25 拆 lane）：item.memoryKey 是「读哪份记性」，
+    // key 是「跟谁串行」——内部任务排在自己的 lane 里，不再堵主人私聊。
+    const memKey = item.memoryKey || key;
+    const r = await runTurn(memKey, item.prompt, {
       withMemory: item.withMemory !== false,
       progLabel: `内部任务 ${item.kind}`,
     });
@@ -5695,7 +6119,8 @@ async function handleOne(key, item) {
       `内部任务 ${item.kind}：${r.ok ? "ok" : "失败 " + r.error}（${(r.ms / 1000).toFixed(1)}s）`,
     );
     logTurn({
-      key,
+      key: memKey,
+      lane: key !== memKey ? key : undefined,
       kind: `task:${item.kind}`,
       ok: r.ok,
       ms: r.ms,
@@ -5762,6 +6187,11 @@ async function handleOne(key, item) {
   const r = await runTurn(key, text, {
     withHeader: true,
     permissionMode: strangerInGroup ? "read-only" : undefined,
+    // 画像带谁的：这一轮答谁就带谁（2026-10-25 主人改的）。
+    // 攒批带着整批说话人；单条就是 sender 本人。
+    speakers: Array.isArray(item.speakers) && item.speakers.length
+      ? item.speakers
+      : [Number(sender) || 0].filter(Boolean),
     progLabel:
       kind === "group"
         ? `群聊 ${target}`
@@ -5781,6 +6211,7 @@ async function handleOne(key, item) {
       tokens: r.usage,
       error: r.error,
       budget: r.budget,
+      longTail: r.longTail === true ? true : undefined,
       sid: r.sid,
     });
     // 预算超了（2026-10-24）：这是"活太大"，不是"她坏了"，措辞要分开，
@@ -5794,7 +6225,17 @@ async function handleOne(key, item) {
       }
       return r;
     }
-    await reply(kind, target, r.error);
+    // 普通失败也要分流（2026-10-25 修）。
+    // 原来这里是 `await reply(kind, target, r.error)`，而 r.error 是**内部话术**：
+    //   「我这次没答上来（error, exit 1）」「我这次没答上来（completed）」
+    // 7 天 33 次失败里 30 次都是这个 error, exit 1。108a867 只修了 budget 那条分支，
+    // 这条一直漏着——群里发生时等于对着满群报自己的内部状态，还带 exit 码。
+    // 现在：私聊说一句人话（不提 exit / 错误码），群里只记日志不吱声。
+    if (kind === "private") {
+      await reply(kind, target, "我这一下没接上话，你再说一遍？");
+    } else {
+      log(`群 ${target} 这一轮没答上来，按群里不吱声的规矩跳过（${r.error}）`);
+    }
     return r;
   }
 
@@ -5811,6 +6252,8 @@ async function handleOne(key, item) {
     attempts: r.attempts,
     tokens: r.usage,
     reason: r.reason,
+    // 长尾标记（2026-10-25）：这一轮烧过警戒线，事后 grep turns.jsonl 就能找出贵的轮次
+    longTail: r.longTail === true ? true : undefined,
     sid: r.sid,
   });
   await reply(kind, target, r.text, {
@@ -5819,6 +6262,8 @@ async function handleOne(key, item) {
     at: item.at,
     asked: item.asked,
     burst: item.burst, // 私聊一拨里不止一条才挂引用（见 shouldQuote / enqueuePrivateBurst）
+    // 攒批/耳朵这类"她可能答的不是最后那条"的场合，带上候选让她答的那句被引对（2026-10-24）
+    quoteCandidates: item.quoteCandidates,
   });
   // ⚠️ 2026-10-23 修（观澜自检翻出的第 6 条）：原来这里写 `appendArchive(key,"me",r.text)`，
   // 用的是**没摘隐藏标记的原始文本**——`[氛围:+2]` / `[演化:character|…]` 会原样进 archive，
@@ -5836,13 +6281,33 @@ async function handleOne(key, item) {
 }
 
 // 把一个内部任务排进指定会话的队列，等它跑完拿结果（与用户消息严格串行，不会抢同一个 session）
+//
+// 2026-10-25 拆 lane（主人选的 D 项之一）：
+// 原来内部任务（日记/问候/画像/结账/抽记忆）一律用 PRIMARY_KEY 排队，而 PRIMARY_KEY 就是
+// 主人私聊那条队列——于是「她正在写晚安复盘」时，主人发一句话得排队等着。
+// 实测 24 小时里内部任务 33 次、p50 23 秒、>60 秒 4 次、累计 486 秒，最长一条 237 秒（greet-night 30 步）。
+//
+// 拆法：**排队用一个独立的 lane 键**（memoryKey + ":task"），**记忆仍用原来的 key**。
+// 两件事必须分开看——key 在 handleOne 里有两个用途：
+//   ① enqueue 的队列键：决定和谁串行；
+//   ② runTurn 的记忆键：决定读哪一份底账/日子账/向量召回。
+// 只把①挪走、②保持不动，就能「不挡私聊」且「该读的记忆一条不少」。
+// 用 `:task` 后缀而不是另起一个固定键，是为了让不同私人会话各有各的 task lane，
+// 群里/私聊的内部任务也不互相挤。
+const TASK_LANE_SUFFIX = ":task";
+function taskLaneKey(key) {
+  return String(key) + TASK_LANE_SUFFIX;
+}
+
 function runQueuedTask(key, kind, prompt, opts = {}) {
   return new Promise((resolve) => {
-    enqueue(key, {
+    enqueue(taskLaneKey(key), {
       mode: "task",
       kind,
       prompt,
       withMemory: opts.withMemory,
+      // 记忆键与排队键分开：handleOne 里按 item.memoryKey 决定读哪份记性
+      memoryKey: key,
       __resolve: resolve,
     });
   });
@@ -5982,11 +6447,73 @@ function segLabel(seg) {
       return "[视频]";
     case "forward":
       return "[合并转发]";
+    case "json":
+    case "xml":
+      // 卡片要用 data 才能摘标题，segLabel 只拿到 seg；具体内容交给 cardLabel()
+      return "[卡片]";
     case "file":
       return `[文件：${safeBaseName(seg?.data?.name ?? seg?.data?.file) || "文件"}]`;
     default:
       return seg?.type ? `[${seg.type}]` : "";
   }
+}
+
+// 分享卡片 / 小程序 / 音乐卡（json 段）里能拿到的可读信息（2026-10-25 加）。
+// 为什么要有：原来 buildIncoming 里 `case "json": break;` —— 卡片进来一个字都没有，
+// 她自己看到的就是「对方发了个空消息」。而这恰恰是最容易带信息的一类消息：
+// 一条新闻分享、一首歌、一个小程序，标题和来源基本就是对方想说的那件事。
+// 结构：NapCat 给的 data.data 是一段 JSON 字符串，里面有 meta.news / meta.music /
+// meta.detail 等分支，标题位置各不相同，所以按优先级挨个探，探不到就退回「卡片」。
+function cardLabel(data) {
+  const d = data && typeof data === "object" ? data : {};
+  let obj = null;
+  const raw = d.data ?? d.content ?? d.json;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      obj = null;
+    }
+  } else if (raw && typeof raw === "object") {
+    obj = raw;
+  }
+  const pick = (o, ...paths) => {
+    for (const pth of paths) {
+      let cur = o;
+      for (const k of pth.split(".")) {
+        cur = cur?.[k];
+        if (cur == null) break;
+      }
+      if (typeof cur === "string" && cur.trim()) return cur.trim().slice(0, 80);
+    }
+    return "";
+  };
+  const title = obj
+    ? pick(
+        obj,
+        "meta.news.title",
+        "meta.music.title",
+        "meta.detail.title",
+        "meta.summary.title",
+        "meta.detail.desc",
+        "meta.news.desc",
+        "prompt",
+        "title",
+      )
+    : "";
+  const src = obj
+    ? pick(
+        obj,
+        "meta.news.tag",
+        "meta.news.source",
+        "meta.music.tag",
+        "meta.detail.source",
+        "meta.news.preview",
+      )
+    : "";
+  const url = obj ? pick(obj, "meta.news.jumpUrl", "meta.detail.qqdocurl", "url") : "";
+  if (!title && !src) return "[卡片]";
+  return `[卡片${src ? "·" + src : ""}：${title || "(没有标题)"}${url ? " " + url : ""}]`;
 }
 
 // 群里没叫我时，只把"说了什么"记进上下文：文字照收，图/语音只留占位，
@@ -6030,7 +6557,8 @@ async function buildAmbientText(msg, opts = {}) {
         break;
       }
       case "reply":
-      case "json":
+        // ⚠️ 2026-10-25：这里原来还有 `case "json":` 一起 break —— 那是个**影子分支**，
+        // 会先把卡片吞掉，导致后面新加的卡片摘标题分支永远走不到。已删。
         break;
       case "mface":
       case "record":
@@ -6063,8 +6591,19 @@ async function buildAmbientText(msg, opts = {}) {
         );
         break;
       }
+      // 2026-10-25：跟 buildIncoming 一起修。原来群里视频进来是 `[video]`、
+      // 卡片进来是空字符串（`case "json": break;`），她在群里等于没看见这条消息。
+      case "json": {
+        parts.push(cardLabel(d));
+        break;
+      }
+      case "xml":
+      case "video": {
+        parts.push(segLabel(seg));
+        break;
+      }
       default:
-        if (seg?.type) parts.push(`[${seg.type}]`);
+        if (seg?.type) parts.push(segLabel(seg) || `[${seg.type}]`);
     }
   }
   return parts.join(" ").trim();
@@ -6502,91 +7041,85 @@ async function saveIncomingRecord(d, msg) {
   return null;
 }
 
-// 本地 whisper 转写。用 16k 单声道 wav 喂它；temp 指到已验过的 _e2e\tmp（spawn 会继承我们的环境）
+// 本地转写（2026-10-25 从 whisper.cpp 换成 funasr，主人拍板 B 项）
+// ---------------------------------------------------------------------------
+// 为什么换：原来那套有三条链同时断，导致「收到的语音一律是 [语音] 占位」——
+//   ① CFG.voiceWhisper 写死空串，config.json 里连字段都没有 → 第一行 return null
+//   ② 本机根本没有 whisper 二进制（where whisper 为空）
+//   ③ 还要 home/tools/zh-simp.mjs 转简体，那个文件也不存在
+// 现在走 home/voice/transcribe.py：本机已有 funasr 1.2.6 + paraformer-large（848MB 模型，
+// 随 CosyVoice3 放在 asr/models 下）。实测 4/4 句转写正确、自带简体与标点、约 11.3 秒/句
+// （其中约 9 秒是模型加载；一天几十条语音这个开销可以接受，而且结果按文件名缓存）。
+// 不联网、不花钱、不吃显存（CPU 推理）。
+//
+// 模型目录优先级：config.bot.voiceAsrModels → 环境变量 WW_ASR_MODELS → transcribe.py 内置默认。
+// 找不到模型或没配 python 时**只记一条日志**，不影响整轮回话（语音降级成占位）。
 async function transcribeAudio(src) {
-  if (!CFG.ffmpeg || !CFG.voiceWhisper) return null; // 没配 ffmpeg/whisper 就别折腾，收语音只留占位
+  if (!CFG.voiceAsrPython) {
+    log("收语音：没配 bot.voiceAsrPython，转不了（降级成占位）");
+    return null;
+  }
   const work = path.join(CFG.home, "tools", "_e2e");
   fs.mkdirSync(work, { recursive: true });
+  // 转写结果直接写进 in/ 缓存目录（recordToText 会读同一个位置，省一次复制）
+  const inDir = path.join(CFG.home, "media", "voice", "in");
+  try {
+    fs.mkdirSync(inDir, { recursive: true });
+  } catch {
+    /* 建不了就算了，只是没有缓存 */
+  }
   const stem = path.basename(src).replace(/\.[^.]+$/, "");
-  const wav = path.join(work, `rec-${stem}.wav`);
-  const outBase = path.join(work, `rec-${stem}`);
+  const outTxt = path.join(inDir, `${stem}.zh.txt`);
   const env = {
     ...process.env,
     TEMP: path.join(work, "tmp"),
     TMP: path.join(work, "tmp"),
+    // 别让 Python 把中文按 GBK 吐出来（本机默认 cp936，会把结果写成乱码）
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUTF8: "1",
   };
   fs.mkdirSync(env.TEMP, { recursive: true });
-  const conv = await runProc(
-    CFG.ffmpeg,
-    [
-      "-y",
-      "-i",
-      src,
-      "-vn",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-c:a",
-      "pcm_s16le",
-      wav,
-    ],
-    { timeoutMs: 120000, env },
-  );
-  if (!conv.ok || !fs.existsSync(wav)) {
-    log("收语音：转 wav 失败", (conv.err || "").slice(0, 160));
-    return null;
-  }
-  const tr = await runProc(
-    CFG.voiceWhisper,
-    [
-      "-m",
-      CFG.voiceWhisperModel,
-      "-f",
-      wav,
-      "-l",
-      "zh",
-      "-otxt",
-      "-of",
-      outBase,
-      "-t",
-      "6",
-    ],
-    { timeoutMs: 300000, env },
-  );
-  const txtPath = `${outBase}.txt`;
-  if (!fs.existsSync(txtPath)) {
-    log("收语音：转写没出结果", (tr.err || tr.out || "").slice(0, 160));
-    return null;
-  }
-  let text = fs.readFileSync(txtPath, "utf8").replace(/\s+/g, "").trim();
-  // whisper 吐的是繁体：用装修队那份 zh-simp.mjs（同一张 OpenCC 映射表，别另造轮子）转简体
-  try {
-    const simpScript = path.join(CFG.home, "tools", "zh-simp.mjs");
-    if (text && fs.existsSync(simpScript)) {
-      const simpOut = `${outBase}.zh.txt`;
-      const sr = await runProc(
-        process.execPath,
-        [simpScript, txtPath, simpOut],
-        { timeoutMs: 60000, env },
-      );
-      if (sr.ok && fs.existsSync(simpOut)) {
-        text = fs.readFileSync(simpOut, "utf8").replace(/\s+/g, "").trim();
-        fs.unlinkSync(simpOut);
-      } else {
-        log("收语音：转简体失败，先用繁体", (sr.err || "").slice(0, 120));
-      }
-    }
-  } catch (e) {
-    log("收语音：转简体异常", errMsg(e));
-  }
-  for (const junk of [wav, txtPath, `${outBase}.srt`, `${outBase}.vtt`]) {
+
+  const args = [CFG.voiceAsrScript, "--audio", src];
+  if (CFG.voiceAsrModels) args.push("--models", CFG.voiceAsrModels);
+  if (fs.existsSync(inDir)) args.push("--out", outTxt);
+
+  const tr = await runProc(CFG.voiceAsrPython, args, {
+    timeoutMs: 180000,
+    env,
+  });
+
+  // transcribe.py 一定在 stdout 打一行 JSON（失败时也打），所以先按行找 JSON
+  let parsed = null;
+  for (const line of String(tr.out || "").split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s.startsWith("{")) continue;
     try {
-      if (fs.existsSync(junk)) fs.unlinkSync(junk);
+      const o = JSON.parse(s);
+      if (typeof o?.ok === "boolean") parsed = o;
     } catch {
-      /* ignore */
+      /* 不是 JSON 的行跳过 */
     }
   }
+  if (!parsed) {
+    log("收语音：转写没给出结果", String(tr.err || tr.out || "").slice(0, 200));
+    return null;
+  }
+  if (!parsed.ok) {
+    log("收语音：转写失败", String(parsed.error || "").slice(0, 200));
+    return null;
+  }
+  // 兜一层：即使 --out 写成功也用文件里的（避免 stdout 被别的噪音污染）
+  let text = String(parsed.text ?? "").replace(/\s+/g, " ").trim();
+  try {
+    if (fs.existsSync(outTxt)) {
+      const t = readText(outTxt);
+      if (t) text = t.replace(/\s+/g, " ").trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  log(`收语音：转写 ${parsed.ms}ms → ${text.slice(0, 40) || "(空)"}`);
   return text || null;
 }
 
@@ -6916,8 +7449,8 @@ async function buildIncoming(msg, opts = {}) {
         quoteIdx.add(parts.length - 1);
         break;
       }
-      case "json":
-        break;
+      // ⚠️ 2026-10-25：这里原来也有一道 `case "json": break;` 影子分支，
+      // 位置在真正的卡片分支之前，把卡片吞成空串。已删，交给下面的 cardLabel。
       case "forward": {
         // 合并转发：按 id 把里面每条拉出来读文字（见上面 fetchForwardMessages）
         if (!allowMedia) {
@@ -6938,8 +7471,20 @@ async function buildIncoming(msg, opts = {}) {
         );
         break;
       }
+      // 2026-10-25 修（P2）：原来这里一律 `[${seg.type}]`，于是视频进来是 `[video]`
+      // 这种英文原始段名（archive 里实测 28 条），卡片（json/xml）则一个字段都拿不到。
+      // 现在先走 segLabel 的中文标签，卡片再尽量把标题/来源摘出来。
+      case "video":
+      case "xml": {
+        parts.push(segLabel(seg));
+        break;
+      }
+      case "json": {
+        parts.push(cardLabel(d));
+        break;
+      }
       default:
-        if (seg?.type) parts.push(`[${seg.type}]`);
+        if (seg?.type) parts.push(segLabel(seg) || `[${seg.type}]`);
     }
   }
   // said = 只算他本人打的字，被引用的原文剔掉（2026-10-22 主人要的：
@@ -7024,6 +7569,55 @@ function isAddressed(msg) {
     text.includes(String(CFG.adminQq)) ||
     KIT_NAMES.some((n) => n.trim() && text.includes(n.trim()))
   );
+}
+
+// 群里「用语音叫她」的判定（2026-10-25 补 B 项时发现的漏判）
+// ---------------------------------------------------------------------------
+// 原来 isAddressed() 只读文字段，record 段一律变成 [语音] 三个字。
+// 于是有人在群里发语音说「观澜你看这个」——文字里一个字都没有，她永远当成没叫她，
+// 只静静收进上下文，连转写都不跑。实测 archive 里 group 语音占位 22 条全是这么来的。
+//
+// 口径（和图片下载策略对齐，别给陌生人开后门）：
+//   ① 只有白名单群 + 可信来源（主人 / talkAllow）的语音才转写；
+//   ② 转写的是**短语音**（超过 VOICE_IN_MAX_SECONDS 不转，防止有人发几分钟的录音）；
+//   ③ 转写失败就当没叫她，保持原行为，不额外吵人。
+async function isAddressedByVoice(msg) {
+  if (msg.message_type !== "group") return false;
+  if (!allowed(msg)) return false; // 群本身不在白名单：什么都不做
+  if (!mediaTrusted(msg)) return false; // 陌生人：不下载、不转写（2026-10-16 那批群图的教训）
+  const segs = Array.isArray(msg.message) ? msg.message : [];
+  if (!segs.some((s) => s?.type === "record")) return false;
+  let hit = false;
+  for (const seg of segs) {
+    if (seg?.type !== "record") continue;
+    const d = seg?.data ?? {};
+    // 拿不到时长就不当短语音处理：宁可漏判，也别为了转写去下几百兆
+    const sec = Number(d?.duration ?? d?.seconds ?? 0);
+    if (sec > VOICE_IN_MAX_SECONDS) {
+      log(`群里语音 ${sec}s 超过 ${VOICE_IN_MAX_SECONDS}s 上限，不转写`);
+      continue;
+    }
+    let rec = null;
+    try {
+      rec = await saveIncomingRecord(d, msg);
+    } catch (e) {
+      log("群里语音：取音频失败", errMsg(e));
+      continue;
+    }
+    if (!rec) continue;
+    const heard = await recordToText(rec);
+    if (!heard) continue;
+    log(`群里语音转写（${msg.user_id}）：${heard.slice(0, 60)}`);
+    const t = String(heard);
+    if (
+      t.includes(String(CFG.adminQq)) ||
+      KIT_NAMES.some((n) => n.trim() && t.includes(n.trim()))
+    ) {
+      hit = true;
+    }
+    // 转写结果挂回消息上，下面 buildIncoming 会复用（recordToText 有按文件名缓存，不会二次跑模型）
+  }
+  return hit;
 }
 
 // 夜里只认「点名式」的招呼：@、QQ 回复、戳一戳。名字/号码随嘴带过的一律不算。
@@ -7225,11 +7819,14 @@ async function handleIncoming(msg) {
   // 群里的主人没叫我：话照收进上下文，但不回、不叫模型（2026-10-17 18:14 主人拍板）。
   // 只收文字和占位，图/语音不下载不转写；别人说的话仍然不接。
   // 小夜窗里口径更紧：只认 @ / QQ 回复 / 戳一戳，光叫名字不算（2026-10-24 主人要的）。
+  // 2026-10-25：群里发语音叫她名也算叫她（先转写再判；只对主人/talkAllow，陌生人不动）。
   const nightQuietGroup =
     msg.message_type === "group" && inNightQuiet();
   const addressedGroup =
     msg.message_type === "group" &&
-    (nightQuietGroup ? isAddressedAtNight(msg) : isAddressed(msg));
+    (nightQuietGroup
+      ? isAddressedAtNight(msg)
+      : isAddressed(msg) || (await isAddressedByVoice(msg)));
   if (msg.message_type === "group" && !addressedGroup) {
     const spoken = await ambientText(msg, { media: mayDownloadMedia(msg) });
     if (!spoken) {
@@ -7444,6 +8041,13 @@ if (process.argv.includes("--selftest")) {
   log(`自测结果 ok=${res.ok} ms=${res.ms} sid=${res.sid ?? "-"}`);
   console.log("--- 鲸鱼回复 ---");
   console.log(res.ok ? res.text : `[失败] ${res.error}`);
+  // 2026-10-25 补：失败时必须把 stderr 打出来。
+  // 原来只打 res.error（一句「我这次没答上来（error, exit 1）」），真出问题时
+  // 光看这句根本不知道 DSH 那边报了什么，等于自测本身抓不到线索。
+  if (!res.ok && res.stderr) {
+    console.log("--- DSH stderr（截断 2000 字）---");
+    console.log(String(res.stderr).slice(0, 2000));
+  }
   process.exit(res.ok ? 0 : 1);
 }
 
@@ -7595,9 +8199,9 @@ if (process.argv.includes("--tone-test")) {
     const r = extractTone(raw);
     const leaked = /\[语气/.test(r.text);
     if (leaked) bad++;
-    const ref = toneRefAudio(r.tone);
+    const ref = toneRefAudio(r.tone); // 2026-10-25 起只作对照展示，合成不再用它
     console.log(
-      `${leaked ? "错 " : "对 "} ${label}\n    原文：${raw}\n    正文：${r.text}\n    语气：${r.tone || "(无)"}  语速：${r.speed}  参考音：${ref ? path.basename(ref.wav) : "(无，只调语速)"}`,
+      `${leaked ? "错 " : "对 "} ${label}\n    原文：${raw}\n    正文：${r.text}\n    语气：${r.tone || "(无)"}  语速：${r.speed}  旧参考音：${ref ? path.basename(ref.wav) : "(无)"}（现在统一走 instruct2 情绪指令）`,
     );
   }
   // 语音段抽取：带语气的 [语音] 段，says 里**保留**语气标记（synthVoice 要靠它），
@@ -7618,6 +8222,55 @@ if (process.argv.includes("--tone-test")) {
   if (!okBack) bad++;
   console.log(
     `${okBack ? "对 " : "错 "} 再剥一次 → 正文「${back.text}」语气「${back.tone}」`,
+  );
+  // 漏写闭合标记（2026-10-25 真事故：两段都漏，语音一条没发、标记原样发到 QQ）
+  const unclosed = "听着挺顺的\n\n[语音]喂喂，听得见吗\n\n[语音]都快三点了\n\n行吧";
+  const uc = extractVoiceTags(unclosed);
+  const ucOk =
+    uc.says.length === 2 &&
+    !/\[语音\]/.test(uc.rest) &&
+    !/\[\/语音\]/.test(uc.rest) &&
+    uc.rest.includes("听着挺顺的") &&
+    uc.rest.includes("行吧");
+  if (!ucOk) bad++;
+  console.log(
+    `${ucOk ? "对 " : "错 "} 两段都漏闭合 → says=${JSON.stringify(uc.says)} rest=「${uc.rest}」`,
+  );
+  // 超额第三段：前两段进语音，第三段退回文字，内容不能丢
+  const over = "[语音]一[/语音]\n\n[语音]二[/语音]\n\n[语音]三";
+  const ov = extractVoiceTags(over);
+  const ovOk = ov.says.length === 2 && ov.rest.includes("三");
+  if (!ovOk) bad++;
+  console.log(
+    `${ovOk ? "对 " : "错 "} 超额第三段退回文字 → says=${JSON.stringify(ov.says)} rest=「${ov.rest}」`,
+  );
+  // 落单的 [/语音] 必须被清掉
+  const lone = "前面[/语音]后面";
+  const ln = extractVoiceTags(lone);
+  const lnOk = ln.says.length === 0 && ln.rest === "前面后面";
+  if (!lnOk) bad++;
+  console.log(`${lnOk ? "对 " : "错 "} 落单收尾标记被清掉 → rest=「${ln.rest}」`);
+  // 同一行写了两段 [语音]、还都漏闭合（2026-10-25 02:37 主人的真事：
+  // 「…念给你  [语音][语气:开心]…  [语音][语气:软]…」被粘成一条，第二条语音没发出来）
+  const sameLine =
+    "听着挺顺的，我先说两句你听听像不像我  [语音][语气:开心]喂喂，听得见吗，我是观澜  [语音][语气:软]都快三点了，你还蹲在这儿给我换声音，笨蛋";
+  const sl = extractVoiceTags(sameLine);
+  const slOk =
+    sl.says.length === 2 &&
+    sl.says[1].includes("都快三点了") &&
+    !sl.says[0].includes("都快三点了") &&
+    sl.rest === "听着挺顺的，我先说两句你听听像不像我";
+  if (!slOk) bad++;
+  console.log(
+    `${slOk ? "对 " : "错 "} 同一行两段漏闭合 → says=${JSON.stringify(sl.says)} rest=「${sl.rest}」`,
+  );
+  // 漏闭合时后面还有正文（同一行接着说话），正文要留住、不能当语音念
+  const inlineTail = "[语音]晚安啦\n明天见";
+  const it = extractVoiceTags(inlineTail);
+  const itOk = it.says.length === 1 && it.says[0] === "晚安啦" && it.rest === "明天见";
+  if (!itOk) bad++;
+  console.log(
+    `${itOk ? "对 " : "错 "} 漏闭合后同一行还有正文 → says=${JSON.stringify(it.says)} rest=「${it.rest}」`,
   );
   console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
   process.exit(bad ? 1 : 0);
@@ -7742,18 +8395,87 @@ if (process.argv.includes("--mem-extract")) {
   process.exit(0);
 }
 
+// ---------- 画像预演（只本地统计、不花模型钱）：看会写出哪些人的页、节律长什么样 ----------
+// 用法：node bot\whale-bot.mjs --profile-dry
+if (process.argv.includes("--profile-dry")) {
+  const r = profile.rebuildLocal(CFG.home, { ownerQq: CFG.allowlist[0] });
+  console.log(`画像目录：${r.dir}`);
+  console.log(`这次刷新：${r.count} 份${r.renamed.length ? `（改名 ${r.renamed.length} 个）` : ""}`);
+  for (const f of r.made) console.log(`  · ${f}`);
+  const ppl = profile.candidates(CFG.home, { ownerQq: CFG.allowlist[0] });
+  // 分批问，别一次两万多字（主人 2026-10-25 指出的隐患）
+  const SZ = Number(CFG.profileBatchSize) || 6;
+  const sizes = [];
+  for (let i = 0; i < ppl.length; i += SZ) {
+    sizes.push(
+      profile.refreshPrompt(ppl.slice(i, i + SZ), {
+        ownerQq: CFG.allowlist[0],
+      }).length,
+    );
+  }
+  console.log(
+    `\n每晚要问模型的人：${ppl.length} 个，分 ${sizes.length} 批（每批 ${SZ} 个），各批字符数 ${sizes.join(" / ") || 0}`,
+  );
+  console.log("\n—— 私聊会看到的画像 ——");
+  console.log(profileBlockFor(PRIMARY_KEY) || "(空，第一次要等夜里重算)");
+  process.exit(0);
+}
+
+// ---------- 画像真跑一次（花模型钱）：连夜等不及时手动补一份 ----------
+// 用法：node bot\whale-bot.mjs --profile-test
+if (process.argv.includes("--profile-test")) {
+  profile.rebuildLocal(CFG.home, { ownerQq: CFG.allowlist[0] });
+  const ppl = profile.candidates(CFG.home, { ownerQq: CFG.allowlist[0] });
+  const SIZE = Number(CFG.profileBatchSize) || 6;
+  console.log(`候选 ${ppl.length} 个人，按每批 ${SIZE} 个问模型…`);
+  let done = 0;
+  for (let i = 0; i < ppl.length; i += SIZE) {
+    const chunk = ppl.slice(i, i + SIZE);
+    const prompt = profile.refreshPrompt(chunk, { ownerQq: CFG.allowlist[0] });
+    const r = await runQueuedTask(PRIMARY_KEY, "profile", prompt, {
+      withMemory: false,
+    });
+    if (!r.ok) {
+      console.log(`第 ${i + 1} 批没跑成：`, r.error);
+      process.exit(1);
+    }
+    const list = profile.parseAnalysis(r.text);
+    const n = profile.applyAnalysis(CFG.home, list, {
+      ownerQq: CFG.allowlist[0],
+    });
+    done += n;
+    console.log(
+      `  批 ${i / SIZE + 1}：${chunk.length} 人进、${list.length} 人解析出、写回 ${n} 份（${prompt.length} 字）`,
+    );
+  }
+  console.log(`\n共写回 ${done} 份`);
+  console.log("\n—— 私聊会看到的画像 ——");
+  console.log(profileBlockFor(PRIMARY_KEY) || "(空)");
+  process.exit(0);
+}
+
 // ---------- 提示预览（只拼、不发、不花模型钱）：看下一轮开口的完整顺序 ----------
 if (process.argv.includes("--prompt-preview")) {
   const i = process.argv.indexOf("--prompt-preview");
   const t = process.argv[i + 1] || "(预览：这句话不会发出去)";
   // 第二个参数可选：private:... 或 group:...，用来分别看两套提示头
   const key = process.argv[i + 2] || PRIMARY_KEY;
+  // 第三个参数可选：这一轮是谁在说话（QQ 号，逗号分隔），用来看「带谁的画像」
+  const spk = (process.argv[i + 3] || "")
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter(Boolean);
   // 看群提示时先把名单补齐，不然预览里那些号还是光秃秃的（跟开机一个口径，2026-10-22）
   if (isGroupKey(key)) backfillGroupNicksFromArchive();
   // 预演也把向量记忆算进去，不然看不出实际塞了啥
   const vec = await vectorBlockFor(key, t);
   console.log(
-    buildTurnPrompt(key, t, { withHeader: true, dry: true, vectorBlock: vec }),
+    buildTurnPrompt(key, t, {
+      withHeader: true,
+      dry: true,
+      vectorBlock: vec,
+      speakers: spk.length ? spk : null,
+    }),
   );
   process.exit(0);
 }
@@ -8225,6 +8947,66 @@ if (process.argv.includes("--quote-test")) {
     console.log(`${wantsQuote(t) ? "要引用 " : "不要引用"} 问句：${t}`);
   for (const t of notAsks)
     console.log(`${wantsQuote(t) ? "要引用 " : "不要引用"} 非问句：${t}`);
+  // ---- 候选反查（2026-10-24 修引用错位）：她答哪句就引哪句，查不到不引 ----
+  console.log("---- pickQuoteCandidate ----");
+  const cands = [
+    { sender: 111111111, messageId: "msg-old" },
+    { sender: 222222222, messageId: "msg-daLin" },
+    { sender: 333333333, messageId: "msg-laoHuang" },
+    { sender: 222222222, messageId: "msg-lin-second" },
+  ];
+  const qcases = [
+    ["@ 林(说过两次，取最近那条)", "[@222222222] 差一个字，是肥鱼，不是傻鱼", "msg-lin-second"],
+    ["@ 〔群友己〕", "[@333333333] 你那个编曲先放着", "msg-laoHuang"],
+    ["@ 昵称带号（同样认得）", "[@〔群友己〕(333333333)] 先说正事", "msg-laoHuang"],
+    ["没 @ 任何人（不挂引用）", "差一个字，是肥鱼，不是傻鱼", null],
+    ["@ 了不在候选里的人（不挂）", "[@999999999] 你是谁", null],
+    ["@all 不算具体某人（不挂）", "[@all] 都来看", null],
+    ["@ 了人但候选是空", "[@222222222] 喂", null],
+  ];
+  for (const [label, text, want] of qcases) {
+    const list = label.includes("候选是空") ? [] : cands;
+    const hit = pickQuoteCandidate(text, list);
+    const got = hit ? hit.messageId : null;
+    console.log(
+      `${got === want ? "✓" : "✗"} ${label} → ${got ?? "(不引用)"}${got === want ? "" : `（期望 ${want ?? "(不引用)"}）`}`,
+    );
+  }
+  // ---- 端到端：这一轮到底挂哪条引用 ----
+  console.log("---- resolveQuoteId ----");
+  convSeq.set("group:1", 10);
+  const rcases = [
+    // 群聊隔三条 → 该挂引用；候选在，她 @ 了〔群友己〕 → 引〔群友己〕那条，不是触发的那条
+    ["群里她答的不是触发那条", "group", 1,
+      { seq: 6, at: now, messageId: "msg-trigger", quoteCandidates: cands },
+      "[@333333333] 编曲的事先放放", "msg-laoHuang"],
+    // 候选在但她没 @ 人 → 不挂（宁可空着也不乱引）
+    ["候选在但没 @ 人", "group", 1,
+      { seq: 6, at: now, messageId: "msg-trigger", quoteCandidates: cands },
+      "哈哈这个我懂", null],
+    // 没有候选（普通那条路）→ 老规矩引触发的
+    ["普通路老规矩", "group", 1,
+      { seq: 6, at: now, messageId: "msg-trigger" },
+      "嗯我记下了", "msg-trigger"],
+    // 他明说要引用 → 就引他这条，哪怕候选里有别人
+    ["他点名要引用", "group", 1,
+      { seq: 6, at: now, messageId: "msg-trigger", asked: true, quoteCandidates: cands },
+      "[@333333333] 你说的我引一下", "msg-trigger"],
+    // 距离太近 → 压根不挂，候选再全也不挂
+    ["挨着说（距离不够）不挂", "group", 1,
+      { seq: 10, at: now, messageId: "msg-trigger", quoteCandidates: cands },
+      "[@333333333] 编曲", null],
+    // 私聊一拨 → 挂
+    ["私聊一拨", "private", uid,
+      { seq: 10, at: now, messageId: "p1", burst: true },
+      "在呢", "p1"],
+  ];
+  for (const [label, kind, id, opts, text, want] of rcases) {
+    const got = resolveQuoteId(kind, id, text, opts);
+    console.log(
+      `${got === want ? "✓" : "✗"} ${label} → ${got ?? "(不引用)"}${got === want ? "" : `（期望 ${want ?? "(不引用)"}）`}`,
+    );
+  }
   process.exit(0);
 }
 
@@ -8339,6 +9121,122 @@ if (process.argv.includes("--boot-notice-selftest")) {
   process.exit(0);
 }
 
+// ---------- 语音链路自检：真走 synthVoice()，验证引擎/语气/落盘/峰值（2026-10-25） ----------
+// 用法：node bot/whale-bot.mjs --voice-test ["自定义台词"]
+// 不连 QQ、不写档案、不发消息，只合成一个 mp3 打到临时目录然后删掉。
+if (process.argv.includes("--voice-test")) {
+  const idx = process.argv.indexOf("--voice-test");
+  const custom = process.argv[idx + 1];
+  const cases = custom
+    ? [["自定义", custom]]
+    : [
+        ["没语气", "爸爸，你今天过得怎么样呀？"],
+        ["开心", "[语气:开心]爸爸你终于来啦，我等你好久好久了！"],
+        ["撒娇", "[语气:撒娇]再陪我一会儿嘛，就一小会儿。"],
+        ["委屈", "[语气:委屈]我明明已经很努力了。"],
+        ["困", "[语气:困]好困啊，我先睡了。"],
+        ["温柔", "[语气:温柔]别着急，慢慢来。"],
+      ];
+  let bad = 0;
+  // 自检不该吃掉今天的语音额度：跑之前记下计数，跑完原样写回
+  const before = readJson(VOICE_STATE_PATH, {});
+  for (const [label, raw] of cases) {
+    const t0 = Date.now();
+    const out = await synthVoice(raw);
+    const ms = Date.now() - t0;
+    if (!out || !fs.existsSync(out)) {
+      bad++;
+      console.log(`错  ${label}：没合成出来（${ms} ms）`);
+      continue;
+    }
+    const size = fs.statSync(out).size;
+    const dur = await probeDuration(out);
+    const toned = extractTone(raw);
+    console.log(
+      `对  ${label}　${(size / 1024).toFixed(0)}KB / ${dur ? dur.toFixed(2) : "?"}s / ${ms} ms` +
+        ` 语气=${toned.tone || "(无)"} speed=${toned.speed} 文件=${path.basename(out)}`,
+    );
+    try {
+      fs.rmSync(out, { force: true });
+    } catch {
+      /* 删不掉就留着，不影响判断 */
+    }
+  }
+  console.log(`\n${bad ? `有 ${bad} 条没合成出来` : "全部合成成功"}`);
+  // 额度原样还原（自检不是真发语音）
+  try {
+    writeJson(VOICE_STATE_PATH, before);
+  } catch {
+    /* 写不回去也不影响 */
+  }
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 语音输入（转写）自检：2026-10-25 从 whisper 换 funasr 的验收 ----------
+// 用法：node bot/whale-bot.mjs --asr-test [音频文件…]
+// 不连 QQ、不花钱；默认拿 home\media\voice 下最近的几条自己发的语音当样本，
+// 真跑 transcribeAudio()，比对结果里是否含原本念的那句话（拿 last.txt 当期望值）。
+if (process.argv.includes("--asr-test")) {
+  const idx = process.argv.indexOf("--asr-test");
+  const rest = process.argv.slice(idx + 1).filter((x) => !x.startsWith("--"));
+  console.log("=== 转写链路 ===");
+  console.log(`  解释器：${CFG.voiceAsrPython || "(未配，转不了)"}`);
+  console.log(`  脚本  ：${CFG.voiceAsrScript || "(缺失)"}`);
+  console.log(`  模型  ：${CFG.voiceAsrModels || "(用脚本内置默认)"}`);
+  const pyOk = CFG.voiceAsrPython && fs.existsSync(CFG.voiceAsrPython);
+  const scOk = CFG.voiceAsrScript && fs.existsSync(CFG.voiceAsrScript);
+  if (!pyOk || !scOk) {
+    console.log("\n链路没接通：解释器或脚本缺失，见上面两行。");
+    process.exit(1);
+  }
+  // 样本：给了文件就用给的；否则拿 voice 目录里最新的几条
+  let files = rest.filter((f) => fs.existsSync(f));
+  if (!files.length) {
+    try {
+      const dir = path.join(CFG.home, "media", "voice");
+      files = fs
+        .readdirSync(dir)
+        .filter((f) => /\.(mp3|wav|m4a|amr|silk)$/i.test(f))
+        .map((f) => path.join(dir, f))
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+        .slice(0, 3);
+    } catch {
+      /* 目录都没有就没样本 */
+    }
+  }
+  if (!files.length) {
+    console.log("\n没有可用的音频样本：给几个文件路径，或者先让她发一条语音。");
+    process.exit(1);
+  }
+  console.log(`\n=== 拿 ${files.length} 条真音频跑 transcribeAudio() ===`);
+  let bad = 0;
+  for (const f of files) {
+    const t0 = Date.now();
+    const text = await transcribeAudio(f);
+    const ms = Date.now() - t0;
+    // 缓存命中会快很多：把「这次到底跑了模型没有」也报出来，方便判断缓存有没有生效
+    const cache = path.join(
+      CFG.home,
+      "media",
+      "voice",
+      "in",
+      `${path.basename(f).replace(/\.[^.]+$/, "")}.zh.txt`,
+    );
+    const cached = fs.existsSync(cache) && ms < 3000;
+    if (!text) {
+      bad++;
+      console.log(`错  ${path.basename(f)}：一个字都没转出来（${ms} ms）`);
+      continue;
+    }
+    console.log(
+      `对  ${path.basename(f)}　${ms} ms${cached ? "（走缓存）" : "（真跑模型）"}` +
+        `　→「${text}」`,
+    );
+  }
+  console.log(`\n${bad ? `有 ${bad} 条没转出来` : "全部转出文字"}`);
+  process.exit(bad ? 1 : 0);
+}
+
 // ---------- 启动 ----------
 log("===== 小鲸鱼机器人启动 =====");
 // 先把自己的出生时刻落盘，再起心跳：下一次启动靠这个文件认出「我是重启回来的」（2026-10-22）
@@ -8421,6 +9319,9 @@ setInterval(guarded("问候", maybeTimeGreeting), CFG.housekeepingTickMs);
 // 梦境引擎（2026-10-24）：每分钟看一眼，内部只认 3-6 点 + 一天一次 + 素材够 3 条，
 // 平时就是一次 readJson，几乎零开销。
 setInterval(guarded("做梦", maybeDream), CFG.housekeepingTickMs);
+// 用户画像（2026-10-24 主人要的）：同样一分钟一眼，内部只认 23:30 之后 + 一天一次；
+// 本地统计每次都跑（几十毫秒），模型归纳一晚只问一次。
+setInterval(guarded("画像", refreshProfiles), CFG.housekeepingTickMs);
 setInterval(() => {
   maybeOwnThing().catch((e) =>
     log("自己找事巡检异常:", errMsg(e)),
@@ -8441,6 +9342,19 @@ setInterval(() => {
 
 // 记忆淡忘（2026-10-21）：每小时最多一次，分数掉出层就自动往下沉，跌破 12 冷藏
 setInterval(() => maybeMemoryDecay(), 10 * 60 * 1000);
+
+// 老图清理（2026-10-25 主人选的 D 项）：
+// 原来 pruneMedia() 只在**启动时**跑一次（下面那行直接调用）。所以「一直不重启」就等于
+// 一直不清 —— 实测 home\media 已经 717MB / 1043 张 in- 图，光 10-24 一天就进了 340 张 247MB。
+// 挂到每小时的班车上（跟淡忘同频，内部只 readdir + stat，开销可忽略）；
+// 启动那一次保留，开机就能先清一遍。
+setInterval(() => {
+  try {
+    pruneMedia();
+  } catch (e) {
+    log("老图清理异常:", errMsg(e));
+  }
+}, 60 * 60 * 1000);
 
 // 换日结账：启动后先补一次（电脑关着的那几天开机补），以后每 10 分钟看一眼
 // 也要挡重入：开机补账撞上十分钟巡检时，两轮会同时遍历所有会话（rollDay 内部虽有
