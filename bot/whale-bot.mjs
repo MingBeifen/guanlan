@@ -89,6 +89,8 @@ const CFG = {
   root: KIT_ROOT,
   home: KIT_HOME,
   logs: path.join(KIT_ROOT, "logs"),
+  // runtime：进度快照 / pid / 备份记账都放这。2026-10-25 补，之前到处手拼 path.join(CFG.root,"runtime")
+  runtime: path.join(KIT_ROOT, "runtime"),
   dshExe: String(KIT.dsh?.exe ?? ""),
   dshCli: String(KIT.dsh?.cli ?? ""),
   profile: String(KIT.dsh?.profile ?? "echo-kit"),
@@ -4466,6 +4468,107 @@ function maybeMemoryDecay() {
     log("留档轮转失败（不影响）：", errMsg(e));
   }
 }
+// ---------- 自动备份（2026-10-25 主人拍板「挂班车 + 成功报一声」） ----------
+// 为什么走这条路而不是计划任务：
+//   `schtasks /sc onlogon` 和 `Register-ScheduledTask` 都需要管理员令牌，普通账户直接
+//   Access denied（实测）。而她自己开机就是由 WhaleKit-Autostart 拉起来的，
+//   所以把备份挂在自己的班车上，等价于「开机之后自动备份一次」，且不需要任何权限。
+//
+// 设计要点：
+//   ① **一天最多一次**（按北京日期记账），状态写 runtime\last-backup.json；
+//      开机后第一次巡检就补上（今天还没备过）。
+//   ② `备份到GitHub.bat` 是给手点的，里面有两处 pause 和 chcp，不适合后台调，
+//      所以直接调两个 ps1（它们本身没交互）。
+//   ③ 备份要跑代理、要 git push，可能几十秒到几分钟 —— **不能在主进程同步跑**，
+//      会卡住所有回话。用 spawn 起独立进程，stdio 丢弃，只等退出码。
+//   ④ 失败了**不吵人**（只在日志里记），成功了一次才说一句 —— 主人明确要的是
+//      「成功报一声」，不是「每天汇报两次」。
+const BACKUP_STATE_PATH = path.join(CFG.runtime, "last-backup.json");
+try {
+  fs.mkdirSync(CFG.runtime, { recursive: true });
+} catch {
+  /* 建不了就算了，写的时候还会再失败一次并记日志 */
+}
+const BACKUP_TAG = "WhaleKit-Backup";
+
+function readBackupState() {
+  return readJson(BACKUP_STATE_PATH, {}) || {};
+}
+
+/** 今天（北京）还没备份过吗。 */
+function backupDue() {
+  const st = readBackupState();
+  return st.lastDay !== logicalDay();
+}
+
+function runBackupNow() {
+  return new Promise((resolve) => {
+    const root = KIT_ROOT;
+    const doBackup = path.join(root, "bin", "do-backup.ps1");
+    if (!fs.existsSync(doBackup)) {
+      resolve({ ok: false, why: "bin\\do-backup.ps1 不在" });
+      return;
+    }
+    // powershell.exe 而不是 pwsh：本机没有 pwsh 7（实测 command not found）
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", doBackup],
+      { cwd: root, windowsHide: true, stdio: "ignore" },
+    );
+    // 备份含 git push，网络差时可能久；给 20 分钟上限，超时算失败但不杀进程
+    const timer = setTimeout(
+      () => resolve({ ok: false, why: "超过 20 分钟没结束" }),
+      20 * 60 * 1000,
+    );
+    timer.unref?.();
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, why: errMsg(e) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, code, why: code === 0 ? "" : `退出码 ${code}` });
+    });
+  });
+}
+
+let backupRunning = false;
+async function maybeAutoBackup() {
+  if (backupRunning) return;
+  if (!backupDue()) return;
+  backupRunning = true;
+  const day = logicalDay();
+  try {
+    log("自动备份：开始（今天还没备过）");
+    const r = await runBackupNow();
+    if (!r.ok) {
+      // 失败不吵人，但要在日志里留够线索：明天再看今天为什么没备成
+      log(`自动备份：没成（${r.why}），明天巡检再试`);
+      return;
+    }
+    writeJson(BACKUP_STATE_PATH, {
+      lastDay: day,
+      at: Date.now(),
+      ok: true,
+    });
+    log("自动备份：完成");
+    // 「成功报一声」——只在真备成时说，且一天一次
+    try {
+      await reply(
+        "private",
+        CFG.allowlist[0],
+        `今天的备份做好了（代码仓 + 数据仓都推了）${day}。`,
+      );
+    } catch (e) {
+      log("自动备份：完成但没通知成（不影响）：", errMsg(e));
+    }
+  } catch (e) {
+    log("自动备份异常（不影响）：", errMsg(e));
+  } finally {
+    backupRunning = false;
+  }
+}
+
 // ---------- 每周自检（周日晚上问三句；本地拼句子，不花模型钱） ----------
 const PAGE_DIR = path.join(CFG.home, "档案");
 const PAGE_LOG_PATH = path.join(PAGE_DIR, "_翻页记录.json");
@@ -9342,6 +9445,17 @@ setInterval(() => {
 
 // 记忆淡忘（2026-10-21）：每小时最多一次，分数掉出层就自动往下沉，跌破 12 冷藏
 setInterval(() => maybeMemoryDecay(), 10 * 60 * 1000);
+
+// 自动备份（2026-10-25 主人定的「挂班车 + 成功报一声」）：
+// 启动后 3 分钟先看一眼（开机就是新的一天，通常这时候会备一次），之后每 10 分钟巡检一次；
+// 内部按北京日期记账，所以「一天一次」由状态文件保证，跟巡检频率无关。
+// 备份本身 spawn 独立进程，不占她的主线程，不会卡回话。
+setTimeout(() => {
+  maybeAutoBackup().catch((e) => log("自动备份巡检异常:", errMsg(e)));
+}, 3 * 60 * 1000);
+setInterval(() => {
+  maybeAutoBackup().catch((e) => log("自动备份巡检异常:", errMsg(e)));
+}, 10 * 60 * 1000);
 
 // 老图清理（2026-10-25 主人选的 D 项）：
 // 原来 pruneMedia() 只在**启动时**跑一次（下面那行直接调用）。所以「一直不重启」就等于
