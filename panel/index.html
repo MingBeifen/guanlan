@@ -1646,8 +1646,7 @@
                   <label class="fl"
                     >归属
                     <select id="memKey">
-                      <option value="private:1000000001">私聊（主人）</option>
-                      <option value="group:1000000002">群 1000000002</option>
+                      <!-- 选项由 memFillKeys() 按真实会话动态生成，这里只留一个兜底 -->
                       <option value="shared">通用（所有会话）</option>
                     </select>
                   </label>
@@ -2455,9 +2454,11 @@
         $("memEditTitle").textContent = it ? "编辑这一条" : "新建一条记忆";
         $("memId").textContent = it ? it.id : "";
         $("memMsg").textContent = "";
+        // 新建时默认落在「上一次用过的会话」，没有就落到下拉里第一个真实选项——
+        // 不能写死某个号码（那是部署时才有的东西，开源包里没有）
         $("memKey").value = it
           ? it.key
-          : memState.last?.key || "private:1000000001";
+          : memState.last?.key || $("memKey").options[0]?.value || "shared";
         memScoreHint();
         for (const el of document.querySelectorAll("#memList .mrow2"))
           el.classList.toggle("on", Boolean(it) && el.dataset.id === it.id);
