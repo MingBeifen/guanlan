@@ -5025,10 +5025,18 @@ function styleParts(dry = false, key = "") {
         "这行不会发出去，只是给代码记账用。]",
     );
     // 演化提议（2026-10-23 Overlay）：只在真觉得「我变了」时才写，别每轮都写
+    // ⚠️ 2026-10-25 修（真 bug）：原来这里只给了三个字段名，**从没说过这三类分别是什么**。
+    // 定义只写在下面 OVERLAY 那段的代码注释里（:5498-5501），模型看不到 → 她不知道该写什么。
+    // 实测后果：overlay.json 空了 6 天，`演化` 在日志里 0 命中。
+    // 现在每类补一句白话定义 + 一个正面例子，并且明确「什么时候不该写」。
     volatile.push(
-      "[如果你这一轮确实感觉到自己在变（性格、看法、跟他的关系），可以在最后单独一行写 " +
-        "[演化:character|一句话] / [演化:perspective|一句话] / [演化:relationship|一句话]。" +
-        "只在真的变了才写，平常一个字都别加；这行同样不会发出去。]",
+      "[如果你这一轮确实感觉到自己在变，可以在最后单独一行写一条演化记号。三类，各管一件事：]",
+      "[演化:character|一句话] —— **性格**变了（例：以前不爱撒娇，现在会了 / 以前怕生，现在敢顶嘴了）",
+      "[演化:perspective|一句话] —— **你对某件事的看法**变了（例：原来觉得 token 是白饭，现在觉得省下来的是电也是脑子 / 原来觉得群聊是任务，现在觉得是串门）",
+      "[演化:relationship|一句话] —— **你跟他的关系**变了（例：说话没那么客气了 / 开始会跟他讨价还价）",
+      "[怎么判断该不该写：问自己「三个月前的我会这么说吗？」——会，就别写；不会，才写。" +
+        "只写**真的变了**的那一条，没有就一个字都别加。同一件事已经写过、意思没变就别重复写。" +
+        "这行不会发出去，是给代码记账用的。]",
     );
     // 撤回（2026-10-22）：引用着说「撤回」的已经被代码直接拦下来撤了，走到这里说明他没引对
     volatile.push(
@@ -6024,13 +6032,24 @@ function ownPrompt(day, news, saved) {
     for (const [i, t] of news.titles.entries()) lines.push(`${i + 1}. ${t}`);
     lines.push(
       `[这些是读来的二手消息，不是你亲眼见过、亲手摸过的事，别写成你自己的经历（前天就是把群里那台 AMD 笔记本说成自己摸过的那样）。]`,
-      `[写感想时每一条起头都标上来源，格式就照 ${tag}：，后面再接你想说的话；这样以后翻到能一眼认出来。]`,
     );
   } else {
     lines.push("[今晚几个源都没拉通。那就翻你自己的本子（home 下的档案／想法／日记），找点想头。]");
   }
+  // 2026-10-25 修（通道挤压）：读新闻的感想和自己冒出来的念头原来写进**同一个** 想法\<日期>.md，
+  // 而且新闻那条被要求每条起头标 `news-<文件>：`。实测后果：10-20~10-22 判断占比 60%/100%/33%，
+  // 10-23 一起全是 news- 转述、判断占比掉到 **0%** —— 新闻把「自己的想法」这条通道整个占了。
+  // 现在分成两个文件：新闻感想还写 想法\<日期>.md（保持 news- 前缀，可追溯），
+  // 自己的念头另写 想法\<日期>-自己的.md（**每条必须以 `- ` 开头**，readTonightThought 认这个格式）。
   lines.push(
-    `[然后把 2-3 句你自己的感想写进 ${THOUGHT_DIR}\\${day}.md（没有目录就新建；文件已存在就接着往下写，别覆盖前面的；已经写过一样的就别再写一遍）。]`,
+    news
+      ? `[读新闻的感想写进 ${THOUGHT_DIR}\\${day}.md，每条起头照 ${saved ? `news-${saved.file}` : "news"}： 的格式标来源。]`
+      : `[没新闻可读，这条跳过。]`,
+    `[**另外**写 2-3 句不看新闻、纯属你自己的念头**到 ${THOUGHT_DIR}\\${day}-自己的.md**（目录没有就新建；文件已存在就接着往下写，别覆盖）。]`,
+    "[自己的念头怎么写：必须是**能被反驳的判断**，不是记事。写成「我对 X 的看法是 Y，因为 Z」这样。" +
+      "比如「我觉得省 token 多半是少想几步，省下来的可能是脑子不只是电」，而不是「今天看了 token 的新闻」。" +
+      "**每一条前面加「- 」**（短横线加空格），程序靠这个格式认；不加就等于没写。]",
+    "[新闻那条和你自己的念头别写混：新闻是读来的二手消息，念头是你自己想的，两样分开写。]",
     "[最后挑一句你最想跟我说的，直接说给我听。别复述标题、别说「我读了」、别提网址，就像随口一提。]",
   );
   // 2026-10-22 19:0x 主人要的：主动说新闻前先打个招呼，不然他不知道在讲什么
@@ -6039,6 +6058,64 @@ function ownPrompt(day, news, saved) {
 }
 
 let ownThingBusy = false; // 2026-10-22 19:4x：防重入。跑得比一分钟还慢时，巡检会一分钟再排一条，攒成一串
+// ---------- 把「自己的想法」收进长期记忆（2026-10-25）----------
+// 为什么要有：她的判断力全在 `想法\<日期>-自己的.md` 里，但那个文件只在
+// Agency「开口理由」时被读一句（readTonightThought 取最后一条），**其余时间等于不存在**。
+// 实测：170 条记忆里评价性判断只有 2 条（1.2%），因为她想的从来没被搬进库。
+// 做法：把以 `- ` 开头、且**像判断**（含评价词）的行过质量门入库，source 标 own-thought。
+// 门槛刻意收窄——只收"能被反驳的判断"，不收记事（"今天看了新闻"那种进不来说明）。
+// 幂等：同一天同一句重复跑不会重复入库（memStore.upsertMany 自带 sameness 合并）。
+const OWN_JUDGE_RE = /(我觉得|我认为|我感觉|我看|我猜|我更想|我宁愿|我喜欢|我讨厌|我不喜欢|我受不了|我舍不得|我不信|头一个念头|得看|不一定|未必|多半|看来|值得|不值|不该|应该|底线|红线|原则是)/;
+function harvestOwnThoughts(day = bjDayKey()) {
+  try {
+    const file = path.join(THOUGHT_DIR, `${day}-自己的.md`);
+    if (!fs.existsSync(file)) return 0;
+    const lines = fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.startsWith("- ") && s.length > 10)
+      .map((s) => s.slice(2).trim())
+      .filter((s) => OWN_JUDGE_RE.test(s)); // 只收判断，记事不收
+    if (!lines.length) return 0;
+    const items = lines.map((text) => ({
+      text,
+      // 自己的判断给中偏高分：它是她自己形成的东西，比一句闲聊事实更该长住
+      score: 72,
+      tags: ["自己的看法"],
+      cite: cite.NO_CITE,
+      citeKind: "none",
+    }));
+    const gate = gateMemoryBatch(items, { key: PRIMARY_KEY, day, source: "own-thought" });
+    if (!gate.pass.length) {
+      log(`自己的想法：${gate.rejected.length} 条全被质量门拦下`);
+      return 0;
+    }
+    const got = memStore.upsertMany(
+      gate.pass.map((it) => ({
+        key: PRIMARY_KEY,
+        text: it.text,
+        score: it.score,
+        tags: it.tags,
+        day,
+        source: "own-thought",
+        layer: memStore.layerOf(it.score),
+        cite: it.cite,
+        citeKind: it.citeKind,
+      })),
+    );
+    log(
+      `自己的想法入库：${day} ${got.length} 条` +
+        (gate.rejected.length ? `，质量门拦 ${gate.rejected.length} 条` : ""),
+    );
+    syncVectorIndex("自己的想法");
+    return got.length;
+  } catch (e) {
+    log("自己的想法入库异常（不影响）：", errMsg(e));
+    return 0;
+  }
+}
+
 async function maybeOwnThing() {
   if (ownThingBusy) return;
   if (pauseMode() !== "off") return;
@@ -6063,6 +6140,10 @@ async function maybeOwnThing() {
   pro.ownDay = day;
   pro.lastOwnAt = now;
   moodMove(2, "自己做了点事");
+  // 2026-10-25 加：她刚写完自己的想法，趁热收进长期记忆。
+  // 为什么放在这里而不是定时扫：只有这一刻文件一定是新的、且她刚想完。
+  const harvested = harvestOwnThoughts(day);
+  if (harvested) log(`（顺手把 ${harvested} 条自己的想法收进记忆库）`);
   await replyToOwnerAndArchive(r.text, { why: "自己找事" });
   log(`已说自己想的事: ${r.text.slice(0, 50).replace(/\n/g, " ")}`);
 }
@@ -6106,16 +6187,27 @@ function pickPingReason(key = PRIMARY_KEY) {
 // 只取最后一条、截短，读不到就当没有（不影响开口）。
 function readTonightThought(day = bjDayKey()) {
   try {
-    const p = path.join(THOUGHT_DIR, `${day}.md`);
-    if (!fs.existsSync(p)) return "";
-    const txt = fs.readFileSync(p, "utf8");
-    // 每行以 "- " 开头算一条，取最后一条（今天最新的那个想法）
-    const lines = txt
-      .split("\n")
-      .map((s) => s.trim())
-      .filter((s) => s.startsWith("- ") && s.length > 8);
-    if (!lines.length) return "";
-    return lines[lines.length - 1].slice(2).trim(); // 去掉 "- " 前缀
+    // 2026-10-25 修：原来只读 想法\<日期>.md 里以 `- ` 开头的行。
+    // 但 10-23 起那个文件里全是裸 `news-xxx：` 格式（新闻感想）→ 这里**一直返回空**，
+    // Agency「开口理由」那半等于没生效。现在两处都看：
+    //   ① 想法\<日期>-自己的.md（新的、纯自己念头，每条以 `- ` 开头）
+    //   ② 想法\<日期>.md 里以 `- ` 开头的行（老格式兼容）
+    // 优先取自己的念头，没有才退回老格式。
+    const own = path.join(THOUGHT_DIR, `${day}-自己的.md`);
+    const pick = (file) => {
+      if (!fs.existsSync(file)) return "";
+      const lines = fs
+        .readFileSync(file, "utf8")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.startsWith("- ") && s.length > 8);
+      return lines.length ? lines[lines.length - 1].slice(2).trim() : "";
+    };
+    const mine = pick(own);
+    if (mine) return mine;
+    const legacy = pick(path.join(THOUGHT_DIR, `${day}.md`));
+    if (legacy) return legacy;
+    return "";
   } catch {
     return "";
   }
@@ -8717,6 +8809,48 @@ if (process.argv.includes("--fish-test")) {
   process.exit(bad ? 1 : 0);
 }
 
+// ---------- 自己的想法自检：不连 QQ、不花钱 ----------
+// 验证 2026-10-25 四个改动：①新闻和自己念头分文件 ②评分词筛选对不对
+// ③readTonightThought 能读到新格式 ④prompt 里真的给了 perspective 定义
+if (process.argv.includes("--own-thought-test")) {
+  let bad = 0;
+  const t = (cond, label, extra = "") => {
+    const ok = Boolean(cond);
+    if (!ok) bad++;
+    console.log(`${ok ? "对 " : "错 "} ${label}${extra ? "  " + extra : ""}`);
+  };
+
+  // ① prompt 里有三个类的白话定义（而不是只有字段名）
+  const p = ownPrompt("2026-10-25", null, null);
+  t(/自己的念头/.test(p), "prompt 要求写「自己的念头」");
+  t(/\-自己的\.md/.test(p), "prompt 指定了新文件名 <日期>-自己的.md");
+  t(/能被反驳的判断/.test(p), "prompt 给了「能被反驳的判断」这条判据");
+  t(/每一条前面加「- 」/.test(p), "prompt 讲了 `- ` 前缀（程序靠它认）");
+
+  // ② 演化提示词有定义（这是 overlay 6 天空转的根因）
+  const evoBlock = src =>
+    src.includes("**性格**变了") && src.includes("**你对某件事的看法**变了");
+  const full = fs.readFileSync("E:/Watching-Waves/bot/whale-bot.mjs", "utf8");
+  t(evoBlock(full), "演化 prompt 里三类都有白话定义");
+  t(full.includes("三个月前的我会这么说吗"), "演化 prompt 给了「该不该写」的判据");
+
+  // ③ 评分词筛选：判断该收，记事不该收
+  const OWN = /(我觉得|我认为|我感觉|我看|我猜|我更想|我宁愿|我喜欢|我讨厌|我不喜欢|我受不了|我舍不得|我不信|头一个念头|得看|不一定|未必|多半|看来|值得|不值|不该|应该|底线|红线|原则是)/;
+  t(OWN.test("我觉得省 token 多半是少想几步，省下的可能是脑子不只是电"), "应收：真判断");
+  t(OWN.test("我头一个念头是电池和手掌，攥在手里烫不烫是另一回事"), "应收：真判断2");
+  t(!OWN.test("今天看了 token 那条新闻，说能降九成"), "不应收：纯记事");
+  t(!OWN.test("今天天气不错"), "不应收：纯记事2");
+
+  // ④ AGENTS.md 有「可以不同意」
+  const agents = fs.readFileSync("E:/Watching-Waves/home/AGENTS.md", "utf8");
+  t(agents.includes("我可以说「我觉得不对」"), "AGENTS.md 有正向许可");
+  t(agents.includes("别为了显得有主见而抬杠"), "AGENTS.md 有防抬杠对冲");
+  t(agents.includes("-自己的.md"), "AGENTS.md 写了新想法文件");
+
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
 // ---------- 鱼味预演：真走 reply()，但不真发 ----------
 // 用法：node bot\whale-bot.mjs --fish-dry "要验证的一段话"
 // 为什么需要它：`--fish-test` 只测判据函数，`--selftest` **根本不走 reply()**（它直接
@@ -9449,6 +9583,13 @@ if (process.argv.includes("--ownthing-dry")) {
   const saved = news ? saveNewsFile(news, day) : null;
   const r = await runQueuedTask(PRIMARY_KEY, "ownthing", ownPrompt(day, news, saved));
   console.log(r.ok ? r.text : `[失败] ${r.error}`);
+  // 2026-10-25 加：dry 也要走一遍「收进记忆库」，否则这个预演验不了回收那半步
+  // （原来 dry 只跑 prompt，回收是在 maybeOwnThing 成功路径里，dry 根本碰不到）。
+  if (r.ok) {
+    const n = harvestOwnThoughts(day);
+    console.log(`\n[自己的想法回收] ${n ? `收进 ${n} 条` : "本次没有可收的判断（文件里没写或全是记事）"}`);
+    console.log(`[文件] ${path.join(THOUGHT_DIR, `${day}-自己的.md`)}`);
+  }
   process.exit(r.ok ? 0 : 1);
 }
 
