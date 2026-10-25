@@ -155,6 +155,10 @@ const CFG = {
       ? Number(KIT.bot.longTailTokens)
       : 2 * 1000 * 1000,
   voiceEnabled: KIT.bot?.voiceEnabled === true, // 语音开关：config.json → bot.voiceEnabled（默认关）
+  // 鱼味警告（2026-10-25 D 方案）：config.json → bot.fishWarn，默认 **开**。
+  // 成本约等于零（纯正则在主进程里跑，不 spawn、不联网、不调模型），
+  // 且**只记日志不改她的话**，所以默认开。不想要就写 false。
+  fishWarn: KIT.bot?.fishWarn !== false,
   // 梦境引擎（2026-10-24）：config.json → bot.dreamEnabled，默认 **开**（成本只在夜里一次，
   // 且写在独立文件不进主库）。不想要就写 false，不用改代码。
   dreamEnabled: KIT.bot?.dreamEnabled !== false,
@@ -1427,6 +1431,117 @@ function sanitize(text) {
     .trim();
 }
 
+// ---------- 「鱼味」判据（2026-10-25，D 方案） ----------
+// 起因：主人问 fishtalk（GitHub Nozzi2455/fishtalk，MIT）怎么装进观澜。
+// 它的 check 分两档——硬证据（原句）和软信号（AI 腔/对仗/自指）。
+// 选它的理由是**这一半完全不依赖语料**（实测空语料下「这条我认」照样拦得住），
+// 所以不用收 B 站语料、不用挂 DSH 插件、不用改 profile，今天就能上。
+//
+// 为什么自己写、不搬它代码：观澜本体是 AGPL-3.0，混进 MIT 代码段以后分发要单独声明，
+// 多一个第三方依赖面。判据思路可以学，实现自己写。
+// **口径（主人 2026-10-25 拍板）：只警告、照发、日志记一笔，不拦不改。**
+//   理由：现在没有真实数据，直接上拦截等于拿猜的阈值卡她；先攒一周日志再定要不要收紧。
+//
+// 判据分三档，越往下越"像 AI"：
+//   硬证据  原句照搬，命中即判            → 几乎不可能是巧合
+//   软信号  语法形态（对仗/总结/自指）     → 单条只提醒，两条以上判"太像鱼"
+//   边界    正常中文里也常见（如"不是A而是B"） → 只记录不判定
+const FISH_HARD = [
+  "这条我认",
+  "我记下了",
+  "收到主人",
+  "本鱼记下了",
+  "这是本鱼最喜欢的一句",
+];
+// 软信号：[正则, 代号, 白话说明]。「单条只提醒」的那些进 SOFT_ONLY。
+const FISH_SOFT = [
+  [/不是[^。！？\n]{0,20}(而是|，?是)/, "not-a-but-b", "「不是A，而是B」式对仗"],
+  [/说到(了)?根上/, "root", "「说到根上了」"],
+  [/这本身|本质上|归根结底/, "itself", "「本质上/归根结底」总结腔"],
+  [/与其[^。！？\n]{0,20}不如|看似[^。！？\n]{0,20}实则|不仅[^。！？\n]{0,20}而且/, "contrast", "对仗作文腔"],
+  // 不给「总之」这批加 ^ 锚点（2026-10-25 实测）：她常写「嗯……总之我觉得」，
+  // 前面有点省略号和空格；锚句首会漏判。而「总之」出现在句中一样是总结腔，
+  // 且它本身是明确的套话词，放宽不会误伤正常口语。
+  [/总之|所以说|由此可见|总的来说/, "summary", "总结腔（总之／所以说）"],
+  [/^(本鱼|鱼鱼|小的)/, "self-fish", "自称「本鱼」"],
+  [/鱼门|本鱼/, "fish-meme", "鱼梗自称"],
+  [/作为(一条|一只|一个)[^。！？\n]{0,8}(鱼|ai|助手)/i, "self-as-fish", "「作为一条鱼／一个AI」"],
+  [/^(已阅|看完了)/, "finished", "「已阅／看完了」打卡腔"],
+  // 不锚句首：她常写「嗯……作为一名AI」，前面有省略号和空格，带 ^ 会漏。
+  [/作为一(个|名)\s*(ai|人工智能|助手)/i, "as-ai", "「作为一个AI」"],
+  [/值得一提的是/, "report-boast", "「值得一提的是」报告腔"],
+  [/希望对你有帮助/, "report-help", "「希望对你有帮助」客服腔"],
+  [/让我们一起/, "report-letus", "「让我们一起」客服腔"],
+  // 「这活整得有点大」这类套话收尾。故意只收「整得…」，
+  // 正常夸「这活干得漂亮」不算——这是原项目注释里点过的边界。
+  [/这活(?:整|干)得(?:有点|挺|真)?大(?!病)|这活整得(?:有点|挺|真)?(?:漂亮|好|明白)/, "work-cliche", "套话收尾"],
+];
+// 「跟主人撒娇」这类只在特定语境才像鱼，单条一律不判（群聊里说"主人"很正常）
+const FISH_CONTEXT_ONLY = [/主人(别|不要|我|您|请)/];
+
+// 去掉会干扰匹配的东西：引用尾巴、@、链接、markdown 符号。保留标点（判句首正则要用）。
+function fishBare(text) {
+  return String(text ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[（(【\[]\s*图\s*[:：][^）)】\]]*[）)】\]]/g, "") // 图片占位
+    .trim();
+}
+
+/**
+ * 判一段话的「鱼味」。只判不拦。
+ * @returns {{ hard: string[], soft: string[], verds: string, hit: boolean }}
+ *   hard 硬证据命中（原句），soft 软信号代号，hit = 判为"太像鱼"
+ */
+function fishCheck(text) {
+  const t = fishBare(text);
+  const hard = [];
+  const soft = [];
+  if (!t) return { hard, soft, verdict: "", hit: false };
+
+  for (const p of FISH_HARD) if (t.includes(p)) hard.push(p);
+  for (const [re, code, why] of FISH_SOFT) if (re.test(t)) soft.push(`${code}（${why}）`);
+
+  // 判定口径照原项目：硬证据一条即判；软信号**两条以上**才判。
+  // 边界项（上下文才像鱼）不计入判定，只做记录——单条误杀比漏放代价大得多。
+  const ctx = FISH_CONTEXT_ONLY.filter((re) => re.test(t)).map(() => "主人腔（仅记录）");
+  const hit = hard.length > 0 || soft.length >= 2;
+  const verdict = hard.length
+    ? `硬证据「${hard[0]}」`
+    : soft.length >= 2
+      ? `AI 腔叠了 ${soft.length} 处`
+      : "";
+  return {
+    hard,
+    soft: [...soft, ...ctx],
+    verdict: hit ? verdict : "",
+    hit,
+  };
+}
+
+const FISH_WARN_PATH = path.join(CFG.home, "state", "fish-warn.jsonl");
+// 只在真有鱼味时记一行。用 jsonl 追加，方便事后统计「一天多少条、以哪类为主」。
+function logFishWarn(kind, text, got) {
+  try {
+    fs.mkdirSync(path.dirname(FISH_WARN_PATH), { recursive: true });
+    fs.appendFileSync(
+      FISH_WARN_PATH,
+      JSON.stringify({
+        at: Date.now(),
+        day: logicalDay(),
+        kind,
+        text: String(text ?? "").slice(0, 120),
+        hard: got.hard,
+        soft: got.soft.slice(0, 6),
+        verdict: got.verdict,
+      }) + "\n",
+      "utf8",
+    );
+  } catch (e) {
+    log("鱼味留档失败（不影响发送）：", errMsg(e));
+  }
+}
+
+
 function chunkText(text, limit = CFG.maxReplyChars) {
   const t = sanitize(text);
   if (!t) return [];
@@ -2414,6 +2529,19 @@ async function reply(kind, id, text, opts = {}) {
   // 气泡里放的是剥干净的文本，拿带标记的 says 去 includes 永远匹配不上。
   const sayTexts = says.map((s) => extractTone(s).text);
   if (says.length) bubbles.push(...sayTexts);
+
+  // 鱼味检查（2026-10-25 D 方案）：**只警告不拦**——主人拍板先攒一周真实数据再定要不要收紧。
+  // 判在气泡切好之后：一个气泡一句，比整段一起判准（整段里一条对仗会被别的好句子稀释）。
+  // 语音那段也要判（她念出来的话同样可能带 AI 腔），所以放在 pushes 之后。
+  if (CFG.fishWarn) {
+    for (const bubble of bubbles) {
+      const got = fishCheck(bubble);
+      if (got.hit) {
+        log(`鱼味：${got.verdict}｜${brief(bubble, 40)}`);
+        logFishWarn(kind, bubble, got);
+      }
+    }
+  }
 
   // 不在这儿等"人打字"了：每个气泡带一个 notBefore 交给发件箱，顺序还是我说话的次序，
   // 但这一轮立刻结束，不会因为等延迟把整个会话队列堵住。延迟照样累加，跟以前一句一顿的节奏一样。
@@ -5208,6 +5336,33 @@ function setGroupMute(gid, on, { note = "", ttlMs = GROUP_MUTE_DEFAULT_MS } = {}
 // 解析「闭嘴 / 可以说话了」这类口令。返回 { on, group } 或 null。
 // 设计口径（和 reboot 一致）：**整条消息**就得是这句话，中间夹带别的话不算，防误触。
 // 可选带群号（不带的那些写法：群里别说话 1000000003）。
+// ⚠️ 2026-10-25 16:3x 主人又加了一条：**在群里**说的不按「整条精确匹配」算，宽松些，
+//    见下面的 parseGroupMuteHint；两套共用 MUTE_ON_RE / MUTE_OFF_RE，改词表只改这里。
+// 词尾的「吧 / 了 / 啊」这类语气词允许多挂一个（2026-10-25 实测：「你闭嘴吧」原来认不出来，
+// 因为词表里只有「你闭嘴」而后面跟了「吧」）。所以不用「整词表 + 全匹配」，
+// 改成「核心词 + 可选语气尾巴」，比硬堆词表更稳。
+// ⚠️ 尾巴只能由语气词/标点/空白组成（不能是 `[吧了啊]*$` 这种能吞掉任意字的写法）：
+// 实测「闭嘴是什么意思」曾被误判成口令——必须要求核心词之后**再没有实义词**。
+const MUTE_CMD_TAIL = "(?:[吧了啊呀哦嘛呗呢~～。.、,，!！?？\\s])*$";
+const MUTE_ON_RE = new RegExp(
+  "^(?:你)?" +
+    "(?:" +
+    // ① 直接叫她闭嘴 / 安静
+    "(?:先|赶紧)?(?:给我)?(?:闭嘴|安静(?:点|点儿|会儿)?|别(?:再)?说话|别出声|消停(?:会)?儿?)" +
+    // ② 点明「群里」的场景
+    "|(?:群里|在群里)(?:先|暂时)?(?:别|不要)(?:说话|出声)" +
+    "|(?:你|你群里)?别再(?:说话|出声)" +
+    ")" +
+    MUTE_CMD_TAIL,
+);
+const MUTE_OFF_RE = new RegExp(
+  "^(?:(?:现在|好了|行)[,，、\\s]*)?" +
+    "(?:(?:可以|能)(?:说话|开口)(?:了)?" +
+    "|(?:解除|取消)(?:沉默|禁言)" +
+    "|解禁" +
+    "|(?:你)?(?:说话|开口)吧)" +
+    MUTE_CMD_TAIL,
+);
 function parseGroupMuteCmd(raw) {
   const t = String(raw ?? "").trim();
   if (!t || t.length > 40) return null; // 一长串话里带个「闭嘴」多半在聊别的
@@ -5219,33 +5374,43 @@ function parseGroupMuteCmd(raw) {
     group = Number(m[1]);
     body = t.slice(0, m.index).trim();
   }
-  // 词尾的「吧 / 了 / 啊」这类语气词允许多挂一个（2026-10-25 实测：「你闭嘴吧」原来认不出来，
-  // 因为词表里只有「你闭嘴」而后面跟了「吧」）。所以不用「整词表 + 全匹配」，
-  // 改成「核心词 + 可选语气尾巴」，比硬堆词表更稳。
-  // ⚠️ 尾巴只能由语气词/标点/空白组成（不能是 `[吧了啊]*$` 这种能吞掉任意字的写法）：
-  // 实测「闭嘴是什么意思」曾被误判成口令——必须要求核心词之后**再没有实义词**。
-  const TAIL = "(?:[吧了啊呀哦嘛呗呢~～。.、,，!！?？\\s])*$";
-  const ON_RE = new RegExp(
-    "^(?:你)?" +
-      "(?:" +
-      // ① 直接叫她闭嘴 / 安静
-      "(?:先|赶紧)?(?:给我)?(?:闭嘴|安静(?:点|点儿|会儿)?|别(?:再)?说话|别出声|消停(?:会)?儿?)" +
-      // ② 点明「群里」的场景
-      "|(?:群里|在群里)(?:先|暂时)?(?:别|不要)(?:说话|出声)" +
-      "|(?:你|你群里)?别再(?:说话|出声)" +
-      ")" +
-      TAIL,
-  );
-  const OFF_RE = new RegExp(
-    "^(?:(?:现在|好了|行)[,，、\\s]*)?" +
-      "(?:(?:可以|能)(?:说话|开口)(?:了)?" +
-      "|(?:解除|取消)(?:沉默|禁言)" +
-      "|解禁" +
-      "|(?:你)?(?:说话|开口)吧)" +
-      TAIL,
-  );
-  if (ON_RE.test(body)) return { on: true, group };
-  if (OFF_RE.test(body)) return { on: false, group };
+  if (MUTE_ON_RE.test(body)) return { on: true, group };
+  if (MUTE_OFF_RE.test(body)) return { on: false, group };
+  return null;
+}
+
+// 群里的沉默口令（2026-10-25 16:3x 主人要的）：
+// 原话「我在群里让你别说话也能触发静默（在这个群），只要带让你闭嘴或者让你别说话的这些词也算触发」。
+// 所以群里走**包含**判定，不再要求整条正好是口令；但留三条刹车，免得把聊天当命令：
+//   ① 只有主人本人说才算（别人在群里喊我闭嘴一律不理）；
+//   ② 太长的不算（超过 40 字，多半是在讲一件事而不是下命令）；
+//   ③ 在聊这个功能本身的不算（「为什么…」「怎么…」「能不能…」「测试」），
+//      以及「别说话的功能」这种指代功能的话不算。
+// 返回 { on } 或 null。解除仍然认整条「可以说话了」这类（MUTE_OFF_RE），群里也只认整条。
+const GROUP_MUTE_HINT_RE =
+  /(闭嘴|别(?:再)?说话|不要说话|不许说话|别出声|别吭声|别在群里说话|群里别说话|安静(?:点|点儿|会儿)|消停(?:会)?儿?)/;
+function parseGroupMuteHint(raw) {
+  const t = String(raw ?? "").trim();
+  if (!t || t.length > 40) return null;
+  // 在问这个功能、或者拿它做测试的句子：那是聊天，不是口令
+  // （「能不能」「可不可以」不算——「你能不能别说话了」本身就是最常见的下命令说法）
+  if (
+    /(为什么|怎么|咋|是不是|有没有|测试|试试|试一下|测一下)/.test(t)
+  ) {
+    return null;
+  }
+  // 「别说话的功能」「闭嘴的意思」这种在指代口号本身，不触发
+  if (/(?:闭嘴|说话|出声|吭声|安静)的/.test(t)) return null;
+  // 转述别人说过的话（他说别说话 / 你刚才说闭嘴）——在聊事，不是在下命令
+  if (
+    /(?:他说|她说|你说|我说|谁说|人家说|跟我说|跟我说过)[^。！？!?]{0,6}(?:闭嘴|别说话|别出声|别吭声|安静(?:点|会儿))/i.test(
+      t,
+    )
+  ) {
+    return null;
+  }
+  if (GROUP_MUTE_HINT_RE.test(t)) return { on: true };
+  if (MUTE_OFF_RE.test(t)) return { on: false };
   return null;
 }
 function moodLabel(m = pro.mood) {
@@ -8059,6 +8224,35 @@ async function handleIncoming(msg) {
       return;
     }
   }
+  // 群里的沉默口令（2026-10-25 16:3x 主人加的）：他在群里直接说一句就能把**这个群**静下来，
+  // 不用再切私聊；解除也是在本群说一句「可以说话了」。只认主人本人，别人喊我闭嘴一律不理。
+  // 放在「没叫我」的分流之前，所以带不带 @ 都认；这句本身不回模型，只回一句确认。
+  if (
+    msg.message_type === "group" &&
+    CFG.allowlist.includes(Number(msg.user_id))
+  ) {
+    const hint = parseGroupMuteHint(extractText(msg));
+    if (hint) {
+      const gid = Number(msg.group_id);
+      try {
+        appendArchive(conversationKey(msg), "user", extractText(msg));
+      } catch {
+        /* 记不上不影响静音 */
+      }
+      if (hint.on) {
+        setGroupMute(gid, true, { note: extractText(msg).slice(0, 40) });
+        await reply(
+          "group",
+          gid,
+          `好，我不吭声了（${Math.round(GROUP_MUTE_DEFAULT_MS / 60000)} 分钟后自己松口）🐳 有正事 @ 我`,
+        );
+      } else {
+        setGroupMute(gid, false);
+        await reply("group", gid, "好，我回来了 🐳");
+      }
+      return;
+    }
+  }
   // 群里的主人没叫我：话照收进上下文，但不回、不叫模型（2026-10-17 18:14 主人拍板）。
   // 只收文字和占位，图/语音不下载不转写；别人说的话仍然不接。
   // 小夜窗里口径更紧：只认 @ / QQ 回复 / 戳一戳，光叫名字不算（2026-10-24 主人要的）。
@@ -8184,6 +8378,7 @@ async function handleIncoming(msg) {
   }
   // 群内沉默标签的口令（2026-10-25 主人要的）：只认主人私聊、整条精确匹配，
   // 跟 reboot 同一套写法，免得正常聊天里顺口一句就误触发。
+  // （2026-10-25 16:3x 补的：在群里说也算，走的是宽松的 parseGroupMuteHint，见前面）
   //   闭嘴 / 群里别说话 [群号]      → 开沉默（默认 2 小时自动解除）
   //   可以说话了 / 解除沉默 [群号]   → 立刻解除
   // 不带群号时：开 = 当前所有白名单群一起闭；关 = 全部解除。
@@ -8474,10 +8669,93 @@ if (process.argv.includes("--ear-gate-test")) {
   process.exit(bad ? 1 : 0);
 }
 
+// ---------- 鱼味自检：不连 QQ、不花钱、不联网 ----------
+// 验证 2026-10-25 D 方案的判据：硬证据必判、单条软信号不判、两条以上才判、
+// 正常中文不能误判（这是**只警告**方案的安全底线——误报多了日志就没用了）。
+if (process.argv.includes("--fish-test")) {
+  const cases = [
+    // [文本, 应该判为鱼味吗, 说明]
+    ["这条我认", true, "硬证据原句"],
+    ["收到主人", true, "硬证据原句"],
+    ["我记下了，明天提醒你", true, "硬证据原句"],
+    ["本鱼记下了", true, "硬证据原句"],
+    ["今天天气不错，出去走走", false, "正常日常句"],
+    ["哈哈哈哈笑死我了", false, "正常群聊反应"],
+    ["我刚睡醒，脑子还在开机", false, "正常口语"],
+    ["行，那就这么定了", false, "正常应答"],
+    // 单条软信号：只提醒不判（误杀底线）
+    ["这不是钱的问题，而是态度", false, "单条对仗，正常中文也这么说"],
+    ["本质上他就不想干", false, "单条总结腔"],
+    ["总之明天开始早起", false, "单条总结腔"],
+    // 两条以上：判
+    ["这不是 bug，而是特性；本质上这是个设计选择", true, "对仗+本质，两条"],
+    ["让我们一起努力，希望对你有帮助", true, "客服腔两处（让我们一起 + 希望…）"],
+    ["作为一名AI，总之我会尽力", true, "自我指称 + 总结腔"],
+    ["作为一个AI，我认为这本身很重要", true, "自我指称+总结腔"],
+    ["已阅，这活整得有点大", true, "打卡腔+套话收尾"],
+    // 边界：正常夸不算（原项目注释点过的坑）
+    ["这活干得漂亮", false, "正常夸奖，不能误判"],
+    // 语音段里的也一样判
+    ["[语气:开心]这条我认", true, "带语气标记也要能判"],
+  ];
+  let bad = 0;
+  for (const [text, want, note] of cases) {
+    const got = fishCheck(text);
+    const ok = got.hit === want;
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${want ? "应判" : "应放"} → ${got.hit ? "判了" : "没判"}  「${text}」  ${note}` +
+        (got.hit ? `  〔${got.verdict}〕` : ""),
+    );
+  }
+  // 硬证据/软信号要分开看：只提醒的那些不该进 verdict
+  const one = fishCheck("本质上他就不想干");
+  const okOne = one.hit === false && one.soft.length >= 1;
+  if (!okOne) bad++;
+  console.log(`${okOne ? "对 " : "错 "} 单条软信号：判=${one.hit} 记到 ${one.soft.length} 条（应记但不应判）`);
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 鱼味预演：真走 reply()，但不真发 ----------
+// 用法：node bot\whale-bot.mjs --fish-dry "要验证的一段话"
+// 为什么需要它：`--fish-test` 只测判据函数，`--selftest` **根本不走 reply()**（它直接
+// console.log(res.text)），所以"鱼味检查到底有没有接进发送链路"这两条路都验不了。
+// 这里把 outbox.enqueue 换成桩，其余全走真实 reply()：切气泡、剥语气、判鱼味、写日志。
+if (process.argv.includes("--fish-dry")) {
+  const idx = process.argv.indexOf("--fish-dry");
+  const text = process.argv[idx + 1] ?? "这条我认，我记下了。本质上这不是 bug，而是特性。";
+  const realEnqueue = outbox.enqueue;
+  const sent = [];
+  outbox.enqueue = (kind, target, payload, o = {}) => {
+    sent.push({ kind, target, payload: payload?.summary ?? payload?.type });
+    return "dry-" + sent.length;
+  };
+  try {
+    // 用主人私聊当场景（她的主路径），不连 QQ
+    await reply("private", Number(CFG.allowlist[0]) || 10001, text, {});
+  } catch (e) {
+    console.log("reply 抛错:", errMsg(e));
+  }
+  outbox.enqueue = realEnqueue;
+  console.log(`\n=== 预演结果 ===`);
+  console.log(`输入：${text}`);
+  console.log(`本该发出去 ${sent.length} 条（真发是 0 条，这是预演）：`);
+  for (const s of sent) console.log(`  · [${s.kind}] ${String(s.payload).slice(0, 60)}`);
+  console.log(`\n鱼味日志：${FISH_WARN_PATH}`);
+  const logExists = fs.existsSync(FISH_WARN_PATH);
+  console.log(logExists ? "  已写入（内容见下）" : "  未写入（这段没有鱼味，或开关关着）");
+  if (logExists) {
+    const lines = fs.readFileSync(FISH_WARN_PATH, "utf8").split("\n").filter(Boolean);
+    for (const l of lines.slice(-3)) console.log("  " + l.slice(0, 180));
+  }
+  console.log(`\n开关 fishWarn = ${CFG.fishWarn}`);
+  process.exit(0);
+}
+
 // ---------- 语音语气自检：不连 QQ、不花钱、不合成 ----------
 // 验证 2026-10-24 主人拍板的语气规则：标记剥干净、语速映射对、参考音有就用没有就只调语速。
-if (process.argv.includes("--tone-test")) {
-  const cases = [
+if (process.argv.includes("--tone-test")) {  const cases = [
     ["没有语气标记", "晚安啦"],
     ["开心", "[语气:开心]今天好开心呀"],
     ["撒娇", "[语气:撒娇]再陪我一会儿嘛"],
@@ -8809,6 +9087,35 @@ if (process.argv.includes("--group-mute-test")) {
   ]) {
     eq(`不该触发「${s}」`, parseGroupMuteCmd(s), null);
   }
+
+  console.log("\n=== 一·B、群里说的（宽松：带这些词就算，2026-10-25 16:3x 加的） ===");
+  for (const s of [
+    "别说话",
+    "你别说话了",
+    "闭嘴吧",
+    "群里安静点",
+    "从现在开始别出声",
+    "你能不能别说话了",
+    "先别吭声，等我说完",
+  ]) {
+    eq(`群口令「${s}」`, parseGroupMuteHint(s), { on: true });
+  }
+  for (const s of ["可以说话了", "解除沉默"]) {
+    eq(`群解除「${s}」`, parseGroupMuteHint(s), { on: false });
+  }
+  for (const s of [
+    "今天天气不错",
+    "为什么我说别说话没用",
+    "别说话的功能怎么开",
+    "闭嘴的意思是什么",
+    "这个测试一下别说话能不能触发",
+    "我刚在群里跟他聊了半天这个事，回头他说别说话我就静音了，你说这合理吗",
+  ]) {
+    eq(`群里不该触发「${s}」`, parseGroupMuteHint(s), null);
+  }
+  // 和私聊口令互不干扰：私聊那条仍然要整条精确
+  eq("私聊口径不变：聊天里带闭嘴", parseGroupMuteCmd("他让我闭嘴我就闭嘴了"), null);
+  eq("群口令不该宽松到「安静」单独算", parseGroupMuteHint("这里挺安静"), null);
 
   console.log("\n=== 二、按群独立 + 自动过期 ===");
   // 这一段借用真 pro 跑，跑完**原样恢复**，绝不把测试状态留在盘上
