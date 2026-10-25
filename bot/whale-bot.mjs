@@ -663,11 +663,16 @@ function rotateOneLog(file) {
 }
 function maybeRotateLogs() {
   const notes = [];
-  for (const f of [
-    LOG_PATH,
-    path.join(CFG.logs, "supervisor.log"),
-    path.join(CFG.logs, "autostart.log"),
-  ]) {
+  // ⚠️ 2026-10-25 修（日志三件套之二）：**不再轮转 supervisor.log**。
+  // 为什么：`bin/start.mjs` 后台模式把本进程的 stdout/stderr 接在
+  // `outFd = fs.openSync(supervisor.log, 'a')` 上——**那个 fd 是长期开着的**。
+  // `renameSync` 只换目录项，fd 仍指向旧 inode → 改名之后写进去的新内容全进了旧卷，
+  // 新名字那个文件从 0 字节开始，**面板读新路径就是空白**。
+  // 而且 supervisor.log 里 98.9% 本来就是 whale-bot.log 的副本（看门人自己那些话
+  // 走 say() 每次按路径重开，占比极小）。所以正确做法是：
+  //   ① 只转 whale-bot.log 和 autostart.log（两处都是 appendFileSync 按路径重开，安全）；
+  //   ② supervisor.log 不转，尺寸靠「bot stdout 不再双写」来治（见下一条）。
+  for (const f of [LOG_PATH, path.join(CFG.logs, "autostart.log")]) {
     const r = rotateOneLog(f);
     if (r) notes.push(r);
   }
@@ -6071,9 +6076,15 @@ function saveNewsFile(news, day) {
 }
 
 function ownPrompt(day, news, saved) {
+  const low = Number(pro.mood ?? 50) < 30;
   const lines = [
     "[系统安排 · 不是主人在说话]",
-    "[晚上这会儿没跟主人聊天。给你自己找点事：读点今天的新东西，挑一两条你真有兴趣的想一想。]",
+    low
+      // 2026-10-25 加：心情低时换切入。原来心情 <30 直接跳过这轮，
+      // 现在改成「降概率但仍然跑」，所以提示词也得跟着改——否则她会被要求
+      // 「挑一两条你真有兴趣的」却正好没兴趣，容易憋出丧气话。
+      ? "[晚上这会儿没跟主人聊天。你今天心情偏低，不勉强想大事：找一件今天让你稍微好受一点的小事，或者一个你想不明白但愿意接着想的问题。别写丧气话，也别硬撑高兴，平着说就行。]"
+      : "[晚上这会儿没跟主人聊天。给你自己找点事：读点今天的新东西，挑一两条你真有兴趣的想一想。]",
   ];
   if (news) {
     const tag = saved ? `news-${saved.file}` : "news";
@@ -6174,7 +6185,20 @@ async function maybeOwnThing() {
   if (hour < 19 || hour >= 22) return; // 只放在晚饭后那一段，太晚就留给晚安
   if (isPeakHour(now)) return;
   if (pro.ownDay === day) return;
-  if (pro.mood < 30) return; // 心情很丧就懒得折腾，也免得说丧气话
+  // ⚠️ 2026-10-25 修（P2-3）：心情丧时**不再直接放弃**，改成「降概率 + 换个切入」。
+  // 原来 `mood < 30` 直接 return —— 实测后果很严重：10-25 那天因为 hate 判词误伤把 mood
+  // 打到 0，于是 `maybeOwnThing` 整晚一次没跑，连带挂在这条路径上的
+  // `harvestOwnThoughts`（自己的想法入库）也永远不触发。**一个闸门关掉了一整条功能链。**
+  // 新口径：心情低只是「今晚大概率不想动」+「不说丧气话」，不是「不许想」。
+  //   · 低于 30：35% 概率仍然跑一次（`OWN_LOW_MOOD_CHANCE`），跑的话提示词换成
+  //     「别挑刺、找件让你稍微好受点的小事」这个切入。
+  //   · 低于 15（很丧）：降到 15%，基本是「偶尔抬一下头」。
+  // 这样 mood 再低也不会出现「连续几天零产出」，日志里也能看出她低落时到底想不想事。
+  const OWN_LOW_MOOD_CHANCE = pro.mood < 15 ? 0.15 : pro.mood < 30 ? 0.35 : 1;
+  if (Math.random() > OWN_LOW_MOOD_CHANCE) {
+    log(`心情 ${pro.mood}，今晚大概率不想找事（本次掷骰子没过，概率 ${OWN_LOW_MOOD_CHANCE}）`);
+    return;
+  }
   log("准备给自己找点事，攒一句晚上说");
   ownThingBusy = true;
   const news = await fetchTopNews();
@@ -6701,7 +6725,10 @@ async function handleOne(key, item) {
         updatedAt: Date.now(),
       });
     }
-    log(`群里没叫我，已收进上下文（${key}）: ${item.text.slice(0, 60)}`);
+    // ⚠️ 2026-10-25 修（日志三件套之三）：这里不再打「已收进上下文」。
+    // 入队处（handleIncoming 的 ambient 分支）已经打过一条「群里没叫我，收进上下文:」，
+    // 实测当日两侧各 781 条一一对应 —— 同一条群消息在日志里出现两次。
+    // 保留入队那条（它带群号/发言人才是有效信息），消费处这条纯重复，删掉。
     return { ok: true };
   }
 
@@ -7330,16 +7357,70 @@ function isStickerSeg(seg) {
  * 把刚落到本机的一张图收进表情库。失败不抛，只记日志——
  * 这张图在 media 里照样在，不影响这一轮回复。
  */
+// ---------- 表情入库的「喜好闸」（2026-10-25 23:3x 主人拍板） ----------
+// 起因：库无条件收所有图 → 46 张里只有 5 张被她实际发过（hits 合计 29），
+// 另一半是群友随便发的、她根本不会用的，而「补描述」每小时只补 1 张、永远追不上。
+// → **从「能收就收」改成「按她的喜好收」**。
+//
+// 判据（主人定的）：
+//   · `owner` = 主人自己发的/自己收藏的 → **无脑收**（那是她的偏好本身）
+//   · `fav`   = 收藏夹同步 → **无脑收**（她收藏过的）
+//   · `group` = 群里别人发的 → **先查这个来源她喜欢不喜欢**：
+//       ① 同一个 fromQq（那个人）发过的表情，她**用过**（hits>0）→ 收
+//       ② 这张图的**内容哈希**之前出现过、而且她用过 → 收（重复图已在 absorb 里挡，这里是偏好继承）
+//       ③ 群里那个人（fromQq）以前发的表情**平均 hits ≥ 1** → 收（「这个人挑的图她爱用」）
+//       ④ 否则**不收**，只留 media 里那份（不占表情库、不进 `[表情:]` 候选）
+//
+// 为什么按「人」而不是按「图」判：新图没有历史，只能借来源的信誉——
+// 「她爱用 A 发的图」是唯一在新图入库前就能拿到的信号。
+// ⚠️ 这个闸**只影响表情库**，不影响 media（图片照样存、照样能读图）。
+function stickerPrefersSource({ source, fromQq }) {
+  // 主人/收藏：直接放行
+  if (source === "owner" || source === "fav" || source === "self") return { ok: true, why: "主人或收藏" };
+  // ⚠️ **主人自己在群里发的图**：`source` 会被标成 "group"（因为是在群里发的），
+  // 但他就是「喜好本身」——必须按 owner 放行，否则主人的图会被自己的闸门挡掉。
+  // 实测 2026-10-25：46 张里有 6 张是 `fromQq=1000000001` 但 `source=group`。
+  if (isOwnerQQ(Number(fromQq) || 0)) return { ok: true, why: "主人自己在群里发的" };
+  if (source !== "group") return { ok: true, why: "未知来源放行" };
+  const uid = Number(fromQq) || 0;
+  if (!uid) return { ok: false, why: "群里发的且没记到发送人" };
+  try {
+    // 这个人发过的表情都被她用得多不多
+    const mine = memeLib.list(999).filter((x) => (x.sources ?? []).includes("group") && Number(x.fromQq) === uid);
+    if (!mine.length) {
+      // 第一次见到这个人：先不收（没有信誉数据）。**但允许一张「试水」**
+      // ——完全不收的话永远拿不到这个人的信誉，闸门就成了死锁。
+      const anyGroup = memeLib.list(999).filter((x) => (x.sources ?? []).includes("group"));
+      const trial = anyGroup.filter((x) => Number(x.fromQq) === uid).length;
+      if (trial === 0) return { ok: true, why: `第一次见 ${uid}，收 1 张试水` };
+      return { ok: false, why: `${uid} 的图她一张都没用过` };
+    }
+    const used = mine.filter((x) => Number(x.hits) > 0).length;
+    const avg = mine.reduce((a, x) => a + Number(x.hits), 0) / mine.length;
+    if (used > 0 || avg >= 1) return { ok: true, why: `${uid} 的图她用过多张（${used}/${mine.length}）` };
+    return { ok: false, why: `${uid} 发过 ${mine.length} 张，她一张都没用过` };
+  } catch (e) {
+    // 判不了就**放行**：误杀比漏收代价大（漏收只是少一张图，误杀会让真喜欢的进不来）
+    return { ok: true, why: `判定异常放行：${errMsg(e)}` };
+  }
+}
+
 function absorbSticker(absPath, { source = "self", fromQq = null, desc = "", subType = 1 } = {}) {
   try {
     if (!absPath) return null;
+    // 喜好闸（见上面注释）：不过的只记日志，不进表情库
+    const pref = stickerPrefersSource({ source, fromQq });
+    if (!pref.ok) {
+      log(`表情库：跳过 1 张（${pref.why}）`);
+      return { key: null, file: path.basename(absPath), isNew: false, skipped: pref.why };
+    }
     const got = memeLib.absorb(absPath, {
       source,
       fromQq,
       desc: String(desc ?? "").slice(0, 60),
       subType,
     });
-    if (got?.isNew) log(`表情库：新收 1 张 → ${got.file}`);
+    if (got?.isNew) log(`表情库：新收 1 张 → ${got.file}（${pref.why}）`);
     return got;
   } catch (e) {
     log("表情入库失败:", errMsg(e));
@@ -8318,6 +8399,20 @@ function rateLimited() {
 // 白名单、暂停、忙睡、限流那几道闸照过，回的话也进对话记录，以后翻得到。
 const POKE_GAP_MS = 5000; // 同一处连着戳只理一次，别刷屏
 const pokeSpokeAt = new Map(); // private:1000000001 / group:1000000002:1000000001 → 上次理的时间
+// ⚠️ 2026-10-25 修（P2-2）：这个 Map 原来只进不出 —— 每个戳过她的人建一个**永久** key
+// （`private:<uid>` / `group:<gid>:<uid>`），跑久了会无限长。
+// 实测当时 `戳了戳` 触发 0 次、上限约 613 人（白名单群人数），所以不紧急；
+// 但「只进不出」是结构性问题，顺手加个上限：超过 POKE_MAP_MAX 条就按时间戳清掉最老的一半。
+// 为什么是「清最老一半」而不是逐条 LRU：这里只需要记住「刚才有没有戳过」，
+// 老的 entry 本来就没有意义，批量清比维护链表便宜得多。
+const POKE_MAP_MAX = 500;
+function trimPokeMap(now) {
+  if (pokeSpokeAt.size <= POKE_MAP_MAX) return;
+  const entries = [...pokeSpokeAt.entries()].sort((a, b) => a[1] - b[1]);
+  const dropN = Math.floor(entries.length / 2);
+  for (let i = 0; i < dropN; i++) pokeSpokeAt.delete(entries[i][0]);
+  log(`戳一戳节流表满了（${POKE_MAP_MAX}），清掉最老的 ${dropN} 条`);
+}
 
 function isPokeNotice(data) {
   if (!data || data.post_type !== "notice") return false;
@@ -8339,6 +8434,7 @@ function pokeToMessage(data, now = Date.now()) {
   const key = gid ? `group:${gid}:${poker}` : `private:${poker}`;
   if (now - (pokeSpokeAt.get(key) ?? 0) < POKE_GAP_MS) return null;
   pokeSpokeAt.set(key, now);
+  trimPokeMap(now);
   // 群里得带上名字才算在叫我（isAddressed 认名字不认 notice），私聊不用
   const meName = KIT_NAMES[0] ?? "观澜";
   const text = gid ? `@${meName}（戳了戳你）` : "（戳了戳你）";
@@ -9839,6 +9935,182 @@ if (process.argv.includes("--inner-monologue-test")) {
   process.exit(bad ? 1 : 0);
 }
 
+// 表情入库喜好闸自检（追加到自检区）
+// 用法：node bot/whale-bot.mjs --sticker-pref-test
+// 不连 QQ、不花钱、不写盘：只跑纯判定函数 stickerPrefersSource()。
+//
+// 核心验三件事：
+//   ① owner/fav 无脑放行（那是喜好本身）
+//   ② **主人在群里发的**也必须放行（source 会被标成 group，这是实测抓到的坑）
+//   ③ 群友的图按「这人以前发的图她用过没」判，且**第一次见的人要放 1 张试水**（否则死锁）
+if (process.argv.includes("--sticker-pref-test")) {
+  let bad = 0;
+  const check = (label, arg, expectOk) => {
+    const got = stickerPrefersSource(arg);
+    const ok = got.ok === expectOk;
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${expectOk ? "应放行" : "应跳过"} → ${got.ok ? "放行" : "跳过"}  ${label}　（${got.why}）`,
+    );
+  };
+
+  const OWNER = CFG.allowlist[0];
+  console.log("=== 一、主人/收藏：无脑放行 ===");
+  check("source=owner", { source: "owner", fromQq: OWNER }, true);
+  check("source=fav（收藏夹同步）", { source: "fav", fromQq: null }, true);
+  check("source=self", { source: "self", fromQq: null }, true);
+
+  console.log("\n=== 二、主人在群里发的：也必须放行（实测坑） ===");
+  // 这是 2026-10-25 实测发现的：46 张里 6 张是 fromQq=主人 但 source=group
+  check("source=group 但发送人是主人", { source: "group", fromQq: OWNER }, true);
+  // ⚠️ 这条原写 false 是**测试预期错了**（2026-10-25 自检抓到）：
+  // 999999999 库里没有 → 按「第一次见的人放 1 张试水」规则本来就该放行。
+  // 「没用过的人要被跳过」的断言见第三组（用真实库里有过记录的人验）。
+  check("source=group 陌生发送人（首次，应放试水）", { source: "group", fromQq: 999999999 }, true);
+
+  console.log("\n=== 三、群友的图：按「她用过没有」判 ===");
+  // 从真实库里找一个「发过图但她一张都没用过」的人
+  const all = memeLib.list(999);
+  const groupItems = all.filter((x) => (x.sources ?? []).includes("group"));
+  const byUid = {};
+  for (const it of groupItems) {
+    const u = Number(it.fromQq) || 0;
+    if (!u || isOwnerQQ(u)) continue;
+    byUid[u] = byUid[u] || [];
+    byUid[u].push(it);
+  }
+  const uids = Object.keys(byUid);
+  if (!uids.length) {
+    console.log("  （库里没有非主人发的群图，跳过这组）");
+  } else {
+    // 找「有人用过」和「一张都没用过」两种人
+    let usedUid = null;
+    let unusedUid = null;
+    for (const u of uids) {
+      const used = byUid[u].filter((x) => Number(x.hits) > 0).length;
+      if (used > 0) usedUid = u;
+      else unusedUid = u;
+    }
+    if (usedUid) check(`群友 ${usedUid}（他的图她用过多张）`, { source: "group", fromQq: Number(usedUid) }, true);
+    else console.log("  找不到「他的图她用过」的群友");
+    if (unusedUid) check(`群友 ${unusedUid}（他的图她一张没用过）`, { source: "group", fromQq: Number(unusedUid) }, false);
+    else console.log("  找不到「他的图她没用过」的群友");
+  }
+
+  console.log("\n=== 四、第一次见的人：放 1 张试水（否则死锁） ===");
+  // 编一个库里绝对没有的 uid
+  const fresh = 123456789;
+  const has = groupItems.some((x) => Number(x.fromQq) === fresh);
+  if (has) {
+    console.log(`  ${fresh} 居然在库里，换一个`);
+  } else {
+    check(`陌生群友 ${fresh}（第一次发）`, { source: "group", fromQq: fresh }, true);
+  }
+
+  console.log("\n=== 五、异常输入：放行不误杀 ===");
+  check("群里发的但没记到 fromQq", { source: "group", fromQq: null }, false);
+  check("未知来源", { source: "weird", fromQq: 111 }, true);
+
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// 一次性回填：给「有 desc 但无 emotion」的条目推 emotion 并写库
+// 用法：node bot/whale-bot.mjs --backfill-emotion
+// 纯本地推（不花钱），会写 index.json（先备份）。
+if (process.argv.includes("--backfill-emotion")) {
+  const lib = memeLib;
+  if (!lib) {
+    console.log("memeLib 没初始化");
+    process.exit(1);
+  }
+  const idxPath = path.join(CFG.home, "memes", "index.json");
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 13).replace("T", "-");
+  const bak = `${idxPath}.bak-emotion-${stamp}`;
+  try {
+    fs.copyFileSync(idxPath, bak);
+    console.log(`已备份：${path.basename(bak)}`);
+  } catch (e) {
+    console.log("备份失败，放弃（宁可不动）：", errMsg(e));
+    process.exit(1);
+  }
+
+  const all = lib.list(999);
+  // 目标：desc 可用（不是占位符）但 emotion 为空的
+  const usable = (x) => {
+    const d = String(x.desc || "");
+    return d && d !== "[动画表情]" && !/^\[.*\]$/.test(d);
+  };
+  const targets = all.filter((x) => usable(x) && !(x.emotion ?? []).length);
+  console.log(`待回填 ${targets.length} 条`);
+
+  let done = 0;
+  let skipped = 0;
+  for (const it of targets) {
+    const emos = lib.inferEmotionFromDesc(it.desc);
+    if (!emos.length) {
+      skipped += 1;
+      console.log(`  ✗ 推不出：${String(it.desc).slice(0, 44)}`);
+      continue;
+    }
+    // setDescribed 是「只补不覆盖」：desc 传原值（不变就不重算 tags），emotion 传新推的
+    const changed = lib.setDescribed(it.key, { desc: it.desc, emotion: emos, source: "desc-infer" });
+    if (changed) {
+      done += 1;
+      console.log(`  ✓ [${emos.join("/")}]  ${String(it.desc).slice(0, 44)}`);
+    } else {
+      skipped += 1;
+      console.log(`  · 没变化：${String(it.desc).slice(0, 44)}`);
+    }
+  }
+  console.log(`\n完成：回填 ${done} 条，未改 ${skipped} 条`);
+  // 复核
+  const after = lib.list(999).filter((x) => usable(x) && !(x.emotion ?? []).length);
+  console.log(`复核：现在「有 desc 无 emotion」还有 ${after.length} 条`);
+  process.exit(0);
+}
+
+// 验证「空壳优先」排序：needsDescribing() 返回的前 5 张，应该全是真空壳（desc 是占位符）
+// 用法：node bot/whale-bot.mjs --needs-desc-test
+if (process.argv.includes("--needs-desc-test")) {
+  const lib = memeLib;
+  if (!lib) {
+    console.log("memeLib 没初始化");
+    process.exit(1);
+  }
+  const isJunk = (d) => !d || d === "[动画表情]" || /^\[.*\]$/.test(String(d));
+  const top = lib.needsDescribing(5);
+  let bad = 0;
+
+  console.log("=== needsDescribing(5) 返回的前 5 张 ===");
+  for (const it of top) {
+    const junk = isJunk(it.desc);
+    const hasEmo = (it.emotion ?? []).length > 0;
+    // 期望：全部是真空壳（desc 是占位符），而不是「有 desc 只缺 emotion」
+    const ok = junk;
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${String(it.file).slice(0, 22).padEnd(24)} descJunk=${junk} hasEmotion=${hasEmo}`,
+    );
+    console.log(`     desc: ${String(it.desc || "(空)").slice(0, 50)}`);
+  }
+
+  // 再验：全库分类统计
+  const all = lib.list(999);
+  const junk = all.filter((x) => isJunk(x.desc));
+  const descOnly = all.filter((x) => !isJunk(x.desc) && !(x.emotion ?? []).length);
+  console.log(`\n=== 全库分类 ===`);
+  console.log(`真空壳（desc 占位）    : ${junk.length} 张  ← 应优先补`);
+  console.log(`有 desc 只缺 emotion  : ${descOnly.length} 张  ← 应排后面（可本地推，不用读图）`);
+
+  if (descOnly.length) {
+    console.log(`\n⚠️ 还有 ${descOnly.length} 张只缺 emotion —— 跑 --backfill-emotion 可本地秒补，不用占配额`);
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 张前 5 不是空壳（排序错了）` : "前 5 全是真空壳，排序正确"}`);
+  process.exit(bad ? 1 : 0);
+}
+
 // ---------- 群内沉默标签自检：不连 QQ、不花钱、不写盘（2026-10-25） ----------
 // 验两件事：口令认得对不对；按群独立 + 自动过期对不对。
 if (process.argv.includes("--group-mute-test")) {
@@ -11091,15 +11363,34 @@ async function describeOneMeme(item) {
 // 巡检入口：一小时一跳由调用方控制，内部一次补 1 张（慢慢来，不抢回复的带宽）
 async function maybeDescribeMemes() {
   if (!memeLib) return;
-  const todo = memeLib.needsDescribing(1);
-  if (!todo.length) return;
-  const gate = memeDescCanRun();
-  if (!gate.ok) return; // 到上限就静默，不刷日志
-  memeDescTick();
-  const got = await describeOneMeme(todo[0]);
-  if (got) {
-    log(`表情补描述：${path.basename(todo[0].file)} → 「${got.desc}」情绪=${got.emotion.join("/") || "无"}`);
+  // 2026-10-25 23:3x 改：**每跳补满小时配额**，不再只补 1 张。
+  // 原实现 `needsDescribing(1)` + 每小时巡检 → 实际产能 1 张/小时，
+  // 而入库速率约 5 张/小时（实测 21:33~22:54 的 10 张全是空壳）→ 空壳从 19 涨到 23，**永远追不上**。
+  // 现在：巡检一次就循环到「小时上限用完」或「没有待补的」为止（上限仍是 5/时、30/天）。
+  let done = 0;
+  let failed = 0;
+  // 最多循环 10 次兜底（配额 5，留一倍余量；防止某张反复失败时死循环）
+  for (let i = 0; i < 10; i++) {
+    const todo = memeLib.needsDescribing(1);
+    if (!todo.length) break;
+    const gate = memeDescCanRun();
+    if (!gate.ok) break; // 到上限就静默，不刷日志
+    memeDescTick();
+    const got = await describeOneMeme(todo[0]);
+    if (got) {
+      done += 1;
+      log(`表情补描述：${path.basename(todo[0].file)} → 「${got.desc}」情绪=${got.emotion.join("/") || "无"}`);
+    } else {
+      // 描述失败也算消耗了一次配额（memeDescTick 已经记过），继续试下一张；
+      // 但连续失败 3 次就收手——多半是模型/读图那条路有问题，再试也是白烧。
+      failed += 1;
+      if (failed >= 3) {
+        log(`表情补描述：连续失败 ${failed} 次，这一跳先收手`);
+        break;
+      }
+    }
   }
+  if (done) log(`表情补描述：这一跳补了 ${done} 张`);
   const left = memeLib.needsDescribing(999).length;
   if (left) log(`表情补描述：还剩 ${left} 张没描述`);
 }
