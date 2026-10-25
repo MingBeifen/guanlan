@@ -2836,6 +2836,28 @@ function archiveLines(key) {
   return raw ? raw.split("\n").filter(Boolean) : [];
 }
 
+// ---------- 主动发言 + 存档（2026-10-25 修幻觉的根因） ----------
+// 为什么要有：四个主动任务（找事 / 三档问候 / 主动搭话 / 每周自检）原来都只 `reply()`，
+// **从不写档案**。于是事后她完全不知道自己那轮说了什么——
+// 实测问「你前天晚上主动找我聊了什么」时，她拿 `想法\2026-10-23.md` 里的文字
+// 重新拼了两句「原话」出来（内容高度相似但**逐字不同**），因为「她说过的话」在盘上根本不存在。
+//
+// 这不是模型在编，是**数据缺了**——她只能从最接近的材料里重建。
+// 修法：把「发出去」和「记下来」绑成一个动作，任何主动发言都走它。
+// 完整原文入库（主人 2026-10-25 选的）：主动消息一般只有一两句，不值得为了省几十字
+// 让她事后回忆失真；真要省 token 可以在下一轮上下文裁剪里做，而不是在源头丢弃。
+async function replyToOwnerAndArchive(text, { why = "" } = {}) {
+  const key = PRIMARY_KEY;
+  const body = String(text ?? "");
+  if (!body.trim()) return;
+  await reply("private", CFG.allowlist[0], body);
+  // 注意用 stripHiddenMarkers 后的版本：`[语音]`/`[氛围]`/`[语气]`/`[取名]` 这些
+  // 隐藏记号绝不能进档案（2026-10-23 就栽过一次，摘要/日子账被污染不可逆）。
+  appendArchive(key, "me", stripHiddenMarkers(body));
+  if (why) log(`主动发言已入档（${why}）`);
+}
+
+
 const readMeta = (key) => readJson(metaPath(key), { summarizedLines: 0 });
 
 function unsummarized(key) {
@@ -4682,7 +4704,7 @@ async function maybeWeeklyCheck() {
   if (!wsReady) return;
   const text = await weeklyCheckText();
   if (!text) return;
-  await reply("private", CFG.allowlist[0], text);
+  await replyToOwnerAndArchive(text, { why: "每周自检" });
   state.weeklyCheckDay = day;
   saveState();
   log("每周自检已发出：", text.replace(/\n/g, " ").slice(0, 120));
@@ -5756,7 +5778,7 @@ async function maybeTimeGreeting() {
   if (kind === "morning") pro.planDay = day;
   if (kind === "night") pro.nightDay = day;
   savePro();
-  await reply("private", CFG.allowlist[0], r.text);
+  await replyToOwnerAndArchive(r.text, { why: `问候 ${kind}` });
   log(`已发${kind}问候${extra.catchUp ? "（补发）" : ""}: ${r.text.slice(0, 50).replace(/\n/g, " ")}`);
 }
 
@@ -5876,7 +5898,7 @@ async function maybeOwnThing() {
   pro.ownDay = day;
   pro.lastOwnAt = now;
   moodMove(2, "自己做了点事");
-  await reply("private", CFG.allowlist[0], r.text);
+  await replyToOwnerAndArchive(r.text, { why: "自己找事" });
   log(`已说自己想的事: ${r.text.slice(0, 50).replace(/\n/g, " ")}`);
 }
 
@@ -6065,7 +6087,7 @@ async function maybeProactivePing() {
     log("主动搭话没生成成功，跳过这次:", r.error);
     return;
   }
-  await reply("private", CFG.allowlist[0], r.text);
+  await replyToOwnerAndArchive(r.text, { why: "主动搭话" });
   // 注意：这句不推 lastUserAt。推了的话这一轮就算"刚聊完"，
   // 半小时后又能冒一次，整晚每隔一小时一句——变成刷屏。一轮只搭一次，等他开口再重新起算。
   a.pingedForIdleAt = now;
@@ -8628,6 +8650,120 @@ if (process.argv.includes("--memory-gate-test")) {
       `${ok ? "对 " : "错 "} ${expectPass ? "应放行" : "应拦下"} → ${g.ok ? "放行" : `拦下(${g.reason})`}  q=${g.quality}  「${String(text).slice(0, 24)}」  ${label}`,
     );
   }
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 主动发言入档自检：不连 QQ、不花钱、写完就还原（2026-10-25） ----------
+// 验「主动说出去的话一定会在档案里」。这是修幻觉的根因那一环：
+// 原来四个主动任务只 reply 不 appendArchive，导致事后问「你前几天说啥了」她只能靠想法重建。
+//
+// 做法：**真的调 replyToOwnerAndArchive**，但先把 outbox 和档案都换成本地假对象——
+// 这一步必须动真代码路径才有意义（只测辅助函数等于没测到四个调用点）。
+if (process.argv.includes("--archive-test")) {
+  let bad = 0;
+  const check = (label, cond, detail = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
+  };
+  const KEY = PRIMARY_KEY;
+  const archPath = archivePath(KEY);
+  // 备份原档案（如果存在），跑完原样写回；测试内容不留一条
+  let backup = null;
+  try {
+    backup = fs.readFileSync(archPath, "utf8");
+  } catch {
+    backup = null;
+  }
+  const before = (() => {
+    try {
+      return archiveLines(KEY).length;
+    } catch {
+      return 0;
+    }
+  })();
+
+  // ⚠️ 样本里**不能放 [语音] 段**：reply() 见到它会真去合成 mp3（实测自检一次就烧了
+  // 一条语音额度、还落了个文件）。语音标记的剥除改用 stripHiddenMarkers 直接验——
+  // 它正是 appendArchive 里用的那一层，测它等价，且零副作用。
+  const samples = [
+    ["普通主动消息", "这是最近的新闻：遥感卫星上天了", { why: "自检·找事" }],
+    ["带隐藏标记", "晚安，宝宝 [氛围:-2]", { why: "自检·问候" }],
+  ];
+
+  try {
+    for (const [label, text, opts] of samples) {
+      await replyToOwnerAndArchive(text, opts);
+    }
+    const lines = archiveLines(KEY);
+    const added = lines.slice(before).map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+
+    check("两条主动消息都入档了", added.length === 2, `新增 ${added.length} 条`);
+    check("角色都是 me", added.every((x) => x.role === "me"));
+    check("没有隐藏标记残留", added.every((x) => !/\[氛围|\[语气|\[语音|\[取名/.test(x.text)));
+    check("正文可读", added[0]?.text.includes("遥感卫星"), `「${added[0]?.text}」`);
+    // 语音段剥除：**分两层验**（2026-10-25 实测发现原来这里测错了层）
+    //   ① stripHiddenMarkers 管 取名/氛围/演化/语气；
+    //   ② appendArchive 内部另用 extractVoiceTags 剥 [语音] 段。
+    // 所以「语音段不进档案」这条只能测 appendArchive 的真实输出，
+    // 不能拿 stripHiddenMarkers 直接断——它本来就不管语音。
+    check(
+      "stripHiddenMarkers 剥语气",
+      !stripHiddenMarkers("晚安[语气:温柔]").includes("[语气"),
+      `「${stripHiddenMarkers("晚安[语气:温柔]")}」`,
+    );
+    // appendArchive 内部会剥语音段：用一个假 voice 段走真实函数，看落进去的是什么
+    const probeKey = KEY + "#selftest";
+    const probePath = archivePath(probeKey);
+    try {
+      fs.rmSync(probePath, { force: true });
+    } catch {
+      /* 没有就算了 */
+    }
+    appendArchive(probeKey, "me", "听着 [语音]喂喂听得见吗[/语音] 还行");
+    const probe = archiveLines(probeKey)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)[0];
+    check(
+      "语音段不进档案（走真 appendArchive）",
+      probe && !String(probe.text).includes("[语音]"),
+      `「${probe?.text}」`,
+    );
+    try {
+      fs.rmSync(probePath, { force: true });
+    } catch {
+      /* 清掉探针档案 */
+    }
+  } finally {
+    // 还原档案：测试写进去的必须一条不剩
+    try {
+      if (backup === null) fs.rmSync(archPath, { force: true });
+      else fs.writeFileSync(archPath, backup, "utf8");
+    } catch (e) {
+      console.log(`⚠ 档案还原失败（请手动检查 ${archPath}）：${errMsg(e)}`);
+    }
+  }
+  const after = (() => {
+    try {
+      return archiveLines(KEY).length;
+    } catch {
+      return 0;
+    }
+  })();
+  check("测试后档案行数还原", after === before, `${before} → ${after}`);
+
   console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
   process.exit(bad ? 1 : 0);
 }

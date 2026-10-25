@@ -57,13 +57,37 @@ function loadMap() {
 const MAP = loadMap();
 
 // 需要扫的文件（只扫代码与模板，不扫 node_modules / .git / 运行数据）
-const SCAN_DIRS = ["bot", "bin", "panel", "home/memory", "home/tools", "home/voice"];
+// ⚠️ 2026-10-25 补：原来这里没有 `home` 根目录本身，导致 `home/AGENTS.md`
+// 这类**散在 home 下的单文件**从来没被扫过——而它里面就写着真实 QQ 号
+// （「只有 QQ 2990025241 这一条号是爸爸」），副本里已经被 git 跟踪。
+// 现在把 home 也纳入，靠 SKIP_DIRS 排掉不该动的大目录。
+const SCAN_DIRS = ["bot", "bin", "panel", "home", "home/memory", "home/tools", "home/voice"];
 const SCAN_EXT = new Set([".mjs", ".js", ".html", ".json", ".py", ".ps1", ".md", ".bat"]);
 const SKIP_FILES = new Set([
   "home/memory/package-lock.json", // npm 锁文件里有大量 hash，改不得
   "home/memory/package.json",
 ]);
-const SKIP_DIRS = new Set(["node_modules", ".git", "vectors", "migrated", "tmp", "__pycache__"]);
+// 目录名黑名单（walk 按单层目录名判，不能写路径）：
+// 2026-10-25 扩了几个——扫 `home` 之后会走进 archive/media 这些运行数据目录，
+// 那些按注释改会出事（档案、图片、截图、状态文件都不是给人看的注释）。
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "vectors",
+  "migrated",
+  "tmp",
+  "__pycache__",
+  "archive",
+  "media",
+  "screens",
+  "backup",
+  "state",
+  "画像",
+  "档案",
+  "日记",
+  "想法",
+  "嗨鲸鲸的窛",
+]);
 
 function walk(dir, out = []) {
   let ents;
@@ -117,6 +141,23 @@ for (const file of files) {
     if (n > 0) {
       hits.push(`${from}×${n}`);
       s = s.split(from).join(to);
+    }
+  }
+
+  // 特殊：**文档（.md）里的主人昵称**也要脱敏（2026-10-25 补的漏）。
+  // 背景：`ownerOnly` 那条只删「词表里的单元素 `"萤"`」，不管散文。
+  // 而 `home/AGENTS.md` 全是散文——「外号叫〔昵称甲〕（萤取的）」「他叫萤」
+  // 这种句子里的主人昵称原样带出去了，脚本却报「干净」（它压根没扫 home 根目录）。
+  // 现在：扫到 home 了，再补这一条按文档处理——**只对 .md 生效**，
+  // 因为代码里的单字「萤」可能是变量名/注释里的普通字，替换会误伤。
+  if (rel.endsWith(".md")) {
+    for (const w of Array.isArray(MAP.ownerOnly) ? MAP.ownerOnly : []) {
+      if (!w) continue;
+      const n = s.split(w).length - 1;
+      if (n > 0) {
+        hits.push(`主人昵称 ${w}×${n}`);
+        s = s.split(w).join("\u3014\u4e3b\u4eba\u3015"); // 〔主人〕
+      }
     }
   }
 
