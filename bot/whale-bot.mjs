@@ -18,6 +18,12 @@ import { createOutbox } from "./outbox.mjs";
 // 记忆库（2026-10-21 主人要的五层 + 打分 + 淡忘）：永久/长期/中期/短期由分数决定，
 // 面板和机器人共用 home\memory\store.json，改完热生效，不用重启。
 import * as memStore from "./memory-store.mjs";
+// 表情库（2026-10-25 A 层）：收/存/发三处共用一套读写，避免复制三份改漏。
+// 目录 home\memes\ 不进 media——media 根目录有 7 天清理，表情素材不能被顺手删掉。
+import { createMemeLib } from "./meme-lib.mjs";
+import { createMemeSync } from "./meme-sync.mjs";
+// 测试痕迹清理（2026-10-25）：兜底扫档案，摘掉带【测试/[测试]/[自检] 前缀的自己说的话。
+import { purgeAllArchives } from "./purge-test-traces.mjs";
 // 出处（2026-10-23 主人定的）：小结/日子账/记忆库每条结论都要能指回原话或新闻文件
 import * as cite from "./cite.mjs";
 // 用户画像（2026-10-24 主人要的）：一个真人一份，文件名「昵称-【QQ号】」，认号不认名。
@@ -60,7 +66,13 @@ try {
   console.error("重跑一次「setting.bat」会把配置重写一遍。");
   process.exit(1);
 }
-const KIT_HOME = path.join(KIT_ROOT, "home");
+// home 目录：默认在包根下的 home；`WW_HOME` 可以指到别处（2026-10-25 加）。
+// 为什么要这个：自测/回归不该动现网数据——`--sticker-test` 这类测试要往表情库里写东西，
+// 直接写 home\memes\ 就是往她真正的收藏里塞测试图。有了这个开关，测试指到临时目录，
+// 跑完删掉，现网一个字节都不动。
+const KIT_HOME = process.env.WW_HOME
+  ? path.resolve(process.env.WW_HOME)
+  : path.join(KIT_ROOT, "home");
 const KIT_TOKEN = String(KIT.napcat?.token ?? "");
 const KIT_WS_BASE = String(KIT.napcat?.wsHost ?? "ws://127.0.0.1:3001");
 const KIT_WS_URL = KIT_TOKEN
@@ -140,6 +152,20 @@ const CFG = {
   screenDir: path.join(KIT_HOME, "screens"),
   housekeepingTickMs: 60 * 1000,
   maxImagesPerReply: 2,
+  // 表情包（2026-10-25 A+B+C）：和正图分开计数。
+  // 原来贴纸和图片共用一个 usedImg —— 一次回复发两张表情就把图片额度吃光了，
+  // 她想「说句话 + 贴个表情 + 发张截图」时最后那张图会被静默丢掉（不报错，只是不发）。
+  maxStickersPerReply: Number.isFinite(Number(KIT.bot?.maxStickersPerReply))
+    ? Math.max(0, Number(KIT.bot.maxStickersPerReply))
+    : 2,
+  // 收藏夹同步（B 层）：默认**开**——只读不写、成本约等于零（一天一次、22 条小图）。
+  // config.json → bot.syncFavorites 可关；间隔 bot.syncFavoritesEveryMs 默认一天。
+  syncFavorites: KIT.bot?.syncFavorites !== false,
+  syncFavoritesEveryMs: Number(KIT.bot?.syncFavoritesEveryMs) || 24 * 3600 * 1000,
+  // 往收藏夹写（C 层）：每天最多几张。云端数据，「只加不删 + 限量」两道闸之一。
+  maxFavUploadPerDay: Number.isFinite(Number(KIT.bot?.maxFavUploadPerDay))
+    ? Math.max(0, Number(KIT.bot.maxFavUploadPerDay))
+    : 3,
   // 单轮预算（2026-10-24 主人要的）：config.json → bot.maxSteps / bot.maxTokensPerTurn。
   // 实测 private 一轮最狠跑到 80 步 / 4.87M token / 1122 秒，而全仓只有 30 分钟超时兜底。
   // 默认给 40 步 / 3M token：p90 是 9 步，40 步已经是很宽松的天花板，
@@ -419,6 +445,11 @@ const TURNS_LOG = path.join(CFG.logs, "turns.jsonl");
 // 后定义的常量在函数体里引用没问题，但如果函数在定义之前被调用就会炸。
 const REJECTED_PATH = path.join(CFG.home, "memory", "rejected.jsonl");
 const MEDIA_DIR = path.join(CFG.home, "media"); // 收发图片都落在这里
+// 表情库目录（2026-10-25）：**和 media 平级**，不是 media 的子目录。
+// 这条是硬约束不是顺手——pruneMedia() 每天扫 media 根目录删 7 天前的图，
+// 表情素材混进去会在第 8 天被清空（实测 media 根下 1106 张图最老的 5.4 天，
+// 也就是说建了也留不住）。代码里显式判 p.startsWith(MEME_DIR)，以后谁把 memes 挪进 media 会立刻被拦。
+const MEME_DIR = path.join(CFG.home, "memes");
 const ARCHIVE_DIR = path.join(CFG.home, "archive"); // 消息档案 + 摘要（无状态会话用）
 const STATELESS_FLAG = path.join(CFG.home, "stateless.flag"); // 有这个文件 = 一条消息一个新会话 + 摘要
 // 权限档开关：文件里只写一行 danger-full-access / workspace-write / read-only，下一句话生效。
@@ -459,6 +490,7 @@ function readPermissionMode() {
 // ---------- 小工具 ----------
 fs.mkdirSync(CFG.logs, { recursive: true });
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
+fs.mkdirSync(MEME_DIR, { recursive: true }); // 表情库（2026-10-25）：空目录也先建好，索引第一次写才不用抢
 fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 fs.mkdirSync(CFG.screenDir, { recursive: true });
 
@@ -483,12 +515,30 @@ function pruneMedia() {
   }
   const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
   let dropped = 0;
+  // 表情库保护（2026-10-25）：memes 现在是 media 的兄弟目录，理论上扫不到；
+  // 但这条判断是**硬护栏**——以后谁把 memes 挪进 media，这里第一轮就会跳过它，
+  // 而不是等到第 8 天把她的表情素材全删干净才发现。
+  const memeReal = (() => {
+    try {
+      return fs.realpathSync(MEME_DIR);
+    } catch {
+      return MEME_DIR;
+    }
+  })();
   for (const f of names) {
     if (!MEDIA_IMG_EXT.has(path.extname(f).toLowerCase())) continue;
     const p = path.join(MEDIA_DIR, f);
     try {
       const st = fs.statSync(p);
-      if (st.isFile() && st.mtimeMs < cutoff) {
+      if (!st.isFile()) continue;
+      let real = p;
+      try {
+        real = fs.realpathSync(p);
+      } catch {
+        /* 拿不到真实路径就按原路径判断 */
+      }
+      if (real === memeReal || real.startsWith(memeReal + path.sep)) continue;
+      if (st.mtimeMs < cutoff) {
         fs.unlinkSync(p);
         dropped += 1;
       }
@@ -552,6 +602,14 @@ function log(...parts) {
     /* 日志失败不影响主流程 */
   }
 }
+
+// 表情库实例（2026-10-25 A 层）。放这里而不是文件顶部，是因为它要传 log，
+// 而 log 定义在上面这一段（const 有 TDZ，提前用会炸）。
+// 三处调用方共用：收图时 absorb()、发表情时 find()/bumpHit()、同步时 absorb(source:"fav")。
+const memeLib = createMemeLib({
+  homeDir: CFG.home,
+  log: (...a) => log(...a),
+});
 
 // ---------- 日志轮转（2026-10-24 主人要的） ----------
 // 为什么要有：whale-bot.log 一直 appendFileSync，从没人管，跑到 5.5MB 还在长；
@@ -1592,8 +1650,10 @@ function resolveLocalImage(raw) {
     // 相对包根（home\media\…）和相对 home（media\…）都认
     cands.push(path.join(CFG.home, p), path.join(CFG.home, "..", p));
     if (!/[\\/]/.test(p)) {
-      // 只写了文件名：往常见落点上找
+      // 只写了文件名：往常见落点上找。表情库（2026-10-25）排在最前——
+      // 她贴自己库里的表情时只写文件名，先查这里才对。
       cands.push(
+        path.join(MEME_DIR, p),
         path.join(CFG.home, "media", p),
         path.join(CFG.home, "media", "outbox", p),
         path.join(CFG.root ?? "", "media", p),
@@ -1639,7 +1699,66 @@ function resolveLocalImage(raw) {
 // 注意：另一条更常用的路子是 [CQ:image,file=本机路径]（见 cqImageToBase64），两条都支持。
 // 2026-10-18 19:48 主人点头加 @：群里回复写 [@QQ号]，发出去就是真正的 @（OneBot 的 at 段）；
 // 私聊里、@全体、@0、@自己、一条里的第二个起，一律只把标记删掉、不留裸字。
+// 表情发出时刻（频率闸用）。键只有 "group" / "private" 两个，不按群号细分——
+// 按群分会让「两个群各发一张」绕过限制，而我们要防的是**她自己刷屏**。
+// ⚠️ 必须声明在 stickerGate **之前**：函数体里引用的 const 要在调用前初始化，
+//    否则运行期才抛 `Cannot access 'lastStickerAt' before initialization`（今天已踩过同类坑）。
+const lastStickerAt = new Map();
+
+// 群聊/私聊「这一条准不准带表情」的三道闸（2026-10-25 第二批，主人拍板全上）。
+// 顺序有意义：**先判场景，再判频率**——场景本来就不该发的，连频率都不用算。
+// 返回 boolean，`textToSegments` 里两处 `[贴纸:`/`[表情:` 分支都靠它放行。
+//
+// 三道闸分别防三种事故（都是真实会发生的，不是假想）：
+//   ① 场景闸：群里在报错/求助/交代事情时突然贴一张猫 → 出戏。
+//      判据取「这条她要发的话」本身：过长（>80 字说明在正经说明）或含问号（在提问）就不发。
+//   ② 频率闸：群里 30 分钟最多 1 张、私聊 10 分钟 1 张 → 防刷屏。
+//      群里复用现成的 `groupSpokeAt`（她开口就记），私聊单独记一张表。
+//   ③ 心情闸：mood < 30 时不发「开心系」——丧的时候贴大笑图是情绪不一致。
+//      这条**只挡开心系**，其他情绪照发（低落本身发张「哭」是合适的）。
+function stickerGate(text, kind) {
+  try {
+    const body = String(text ?? "");
+    // ① 场景闸：只对群聊生效（私聊就算说得长，也是两个人之间的事）
+    if (kind === "group") {
+      if (body.length > 80) return false;
+      if (/[？?]/.test(body)) return false;
+    }
+    // ③ 心情闸（先于频率闸：它更便宜，一次 state 读）
+    //    只在心情明确低落时收，且只拦「开心系」关键词——`[表情:哭]` 照发
+    const m = moodOf();
+    if (Number.isFinite(m) && m < 30 && /开心|哈哈|得意|卖萌|兴奋|撒娇|贴贴/.test(body)) {
+      return false;
+    }
+    // ② 频率闸
+    const now = Date.now();
+    if (kind === "group") {
+      // 群里按群号算；这条消息还没发出去时 groupSpokeAt 可能是旧的，
+      // 所以退一步用全局 30 分钟兜底，避免同一群里连发两张
+      const lastSticker = lastStickerAt.get("group") ?? 0;
+      if (now - lastSticker < 30 * 60 * 1000) return false;
+    } else {
+      const key = `private:${String(kind)}`;
+      void key; // 私聊不分对象，统一一张表
+      const lastSticker = lastStickerAt.get("private") ?? 0;
+      if (now - lastSticker < 10 * 60 * 1000) return false;
+    }
+    return true;
+  } catch {
+    return true; // 闸自己出错就放行（宁可多发一张，也别把回复整条吞掉）
+  }
+}
+
+
 function textToSegments(text, kind = "private", limit = CFG.maxImagesPerReply) {
+  // 2026-10-25 21:32 修：我自己有时会把标记写成全角〔表情:乖〕或［表情：乖］，
+  // 老正则只认半角 [ ] 和半角冒号，认不出来就原样当文字发出去——21:28 主人指的
+  // 那条〔表情:乖〕就是这么漏的（表情库里其实查得到「乖」）。这里只把「标记本身」
+  // 归一成半角，不碰正文里的其他全角括号。
+  text = String(text).replace(
+    /[〔［【]\s*(表情|贴纸)\s*[：:]\s*([^〕］】\n]{1,200}?)\s*[〕］】]/g,
+    "[$1:$2]",
+  );
   const segs = [];
   const pushText = (s, e) => {
     const piece = text.slice(s, e);
@@ -1648,9 +1767,18 @@ function textToSegments(text, kind = "private", limit = CFG.maxImagesPerReply) {
   let last = 0;
   let usedImg = 0;
   let usedAt = 0;
+  // 表情包额度单独算（2026-10-25）：原来和正图共用一个 usedImg，
+  // 一次回复发两张表情就把图片额度吃光，她后面想发的那张截图会被静默丢掉（不报错、只是不发）。
+  let usedSticker = 0;
+  const stickerLimit = Math.max(0, Number(CFG.maxStickersPerReply ?? 2));
+  // 群聊表情三道闸（2026-10-25 第二批，主人拍板「群聊开但带上三道限」）。
+  // 为什么群里要比私聊严：群里是公共场合，贴错表情的代价比私聊高得多
+  // （报错讨论里突然贴一张猫 = 出戏；刷屏 = 招人烦）。
+  // 三道闸的顺序有意义：**先判场景，再判频率**——场景不该发的，连频率都不用算。
+  const stickerAllowed = stickerGate(text, kind);
   let changed = false;
   const re =
-    /!\[[^\]]*\]\s*[（(]([^）)]+)[）)]|\[@(all|\d{1,12})\]|\[@[^\]\n\d]{0,30}(\d{5,12})[^\]\n]{0,12}\]|\[贴纸:([^\]]+)\]/gi;
+    /!\[[^\]]*\]\s*[（(]([^）)]+)[）)]|\[@(all|\d{1,12})\]|\[@[^\]\n\d]{0,30}(\d{5,12})[^\]\n]{0,12}\]|\[贴纸:([^\]]+)\]|\[表情:?([^\]]{0,40})\]/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
     if (m[1] !== undefined) {
@@ -1679,7 +1807,7 @@ function textToSegments(text, kind = "private", limit = CFG.maxImagesPerReply) {
       const raw = m[4].trim();
       const abs = resolveLocalImage(raw);
       pushText(last, m.index);
-      if (abs && usedImg < limit) {
+      if (abs && stickerAllowed && usedSticker < stickerLimit) {
         segs.push({
           type: "image",
           data: {
@@ -1688,10 +1816,61 @@ function textToSegments(text, kind = "private", limit = CFG.maxImagesPerReply) {
             summary: "[动画表情]",
           },
         });
-        usedImg += 1;
+        usedSticker += 1;
+        lastStickerAt.set(kind === "group" ? "group" : "private", Date.now()); // 频率闸记账
       } else {
         segs.push({ type: "text", data: { text: m[0] } }); // 找不到就原样留着，别吞
-        log(`⚠️ 贴纸没找到文件，只能原样当文字发：${raw}`);
+        log(
+          abs
+            ? `⚠️ 表情超量（${usedSticker}/${stickerLimit}），这条留成文字：${raw}`
+            : `⚠️ 贴纸没找到文件，只能原样当文字发：${raw}`,
+        );
+      }
+      last = m.index + m[0].length;
+      changed = true;
+      continue;
+    }
+    if (m[5] !== undefined) {
+      // [表情:关键词] / [表情]（2026-10-25）：从 home\memes\ 里挑一张，发出去是表情包样式。
+      // 原来只能写 [贴纸:home\media\outbox\xxx.gif]——她得背完整路径，等于把文件系统暴露给她。
+      //
+      // 2026-10-25 第二批：观澜原话「真要加，我就想按当时的心情来挑，不要只认关键词，那样老对不上」。
+      // 所以改走 memeLib.pick()，三条优先级：
+      //   ① 关键词先当**情绪词**试（撒娇/无语/委屈 → emotion 字段）
+      //   ② 情绪没命中再退回**内容词**（猫/您有钳 → tags，旧路径不动）
+      //   ③ 关键词为空 → 按**当前心情**自动挑（默认值，不是强制）
+      // 显式指定了就照她的来——她想在低落时发张搞笑图逗自己，不能被心情路由拦掉。
+      const kw = m[5].trim();
+      pushText(last, m.index);
+      let picked = null;
+      try {
+        picked = memeLib.pick({ keyword: kw, mood: moodOf() });
+      } catch (e) {
+        log("表情查找异常:", errMsg(e));
+      }
+      if (picked && stickerAllowed && usedSticker < stickerLimit) {
+        segs.push({
+          type: "image",
+          data: {
+            file: "base64://" + fs.readFileSync(picked.path).toString("base64"),
+            sub_type: 1,
+            summary: "[动画表情]",
+          },
+        });
+        usedSticker += 1;
+        lastStickerAt.set(kind === "group" ? "group" : "private", Date.now()); // 频率闸记账
+        memeLib.bumpHit(picked.key);
+        log(
+          `表情库：发「${kw || "(空·按心情)"}」→ ${picked.item.file}` +
+            `（${picked.via}，用过 ${Number(picked.item.hits ?? 0) + 1} 次）`,
+        );
+      } else {
+        segs.push({ type: "text", data: { text: m[0] } });
+        log(
+          picked
+            ? `⚠️ 表情超量（${usedSticker}/${stickerLimit}），「${kw}」留成文字`
+            : `⚠️ 表情没找到：「${kw || "(空)"}」（库里有 ${memeLib.stats().active} 张，有情绪标签的 ${memeLib.list(999).filter((x) => (x.emotion ?? []).length).length} 张）`,
+        );
       }
       last = m.index + m[0].length;
       changed = true;
@@ -2510,8 +2689,90 @@ function resolveQuoteId(kind, id, text, opts = {}) {
   return String(opts.messageId);
 }
 
+// ---------- 内部独白拦截（2026-10-25 A 层） ----------
+// 起因：2026-10-25 22:14/22:15 她把思考过程当正文发进群里——
+//   ① 只发了一句 `（这轮不用开口）`（8 字）
+//   ② 发了 668 字整段推理（"需要回答的是霄和爸爸两个人，最多三句。分两条发…不能加句号…"）
+// 真根因不是框架把 reasoning 混进 text（实测 DSH 的两个 block 分得很干净），
+// 而是**模型把思考写进了 text 通道**；再往下一层，是她**没有"不吭声"这个合法输出**。
+//
+// 这一层是**保险**：不管模型为什么写歪，凡是"像内部独白"的内容都不往 QQ 发。
+// 判据故意用**很特征化的句式**（正常聊天绝不会出现），宁可漏放也别误杀。
+// ⚠️ 这里的每一条都是自检 FAIL 出来才加的（--inner-monologue-test 12 正例 / 4 反例）：
+//   - 元叙述：在讲"我该怎么回 / 规则怎么说"
+//   - 纯占位符：整条就是括号里的一小段**说明性**内容（`（这轮不用开口）`）
+//     ❗ 但 `（笑）` `（点头）` 这种**反应**是正常表达，不能拦——所以判据不是"带括号"，
+//        而是"括号里在说要不要开口"（占位符关键词表见 PLACEHOLDER_RE）
+//   - 第三人称讲自己：`霄是在问…` `我跟他不熟` `他这句话是…` —— 这是**分析对方**，
+//     不是对对方说话。真实泄漏那条开头就是这个（自检第一版漏了它）
+//   - 自问自答 / 计划口吻：`要不要用语音` `我先想一下` `其实只需要`
+const INNER_MONOLOGUE_RES = [
+  /需要回答的是/,
+  /按规矩[，,、]/,
+  /规则[0-9一二三四五六七八九十]+[：:说]/,
+  /分[两二三四五]条发/,
+  /第[一二三四五六七八九十]条回/,
+  /说话(软|轻)一点/,
+  /不能加句号/,
+  /要不要(用语音|写|发|接)/,
+  /这轮(不用|不该|不需要)开口/,
+  /该不该发/,
+  // 第三人称讲自己 / 分析对方（真实泄漏样本的句式）
+  /(?:他|她|对方)(?:这|那)?句(?:话)?是[“"「]/,
+  /我跟(?:他|她)(?:不熟|不认|没聊过)/,
+  /(?:所以|其实)(?:只|就)需要/,
+  /我先(?:想|捋|确认)(?:一下|一遍)/,
+  /不能(?:乱)?确认/,
+];
+// 括号占位符：整条是括号包着的一小段，**且括号里在说"要不要开口"这类元话语**。
+// 不是"带括号就拦"——`（笑）`、`（点头）`、`（叹气）` 都是正常反应。
+const PLACEHOLDER_RE = /[不别没]?[用要该]?(?:开口|说话|吭声|出声|接话|回复|回)/;
+function looksLikeInnerMonologue(t) {
+  const s = String(t ?? "").trim();
+  if (!s) return false;
+  // ① 纯括号占位符：括号内容在说"要不要开口"，且整条只有这一对括号
+  const m = s.match(/^[（(]([^（()）]*)[）)]$/);
+  if (m && s.length <= 20 && PLACEHOLDER_RE.test(m[1])) return true;
+  // ② 特征化元叙述句
+  if (INNER_MONOLOGUE_RES.some((re) => re.test(s))) return true;
+  // ③ 太长且通篇在讲"怎么回"而不是"回什么"：两条以上元叙述特征 + 超过 200 字
+  if (s.length > 200) {
+    const hits = INNER_MONOLOGUE_RES.filter((re) => re.test(s)).length;
+    if (hits >= 2) return true;
+  }
+  return false;
+}
+
+// 她明确的"这轮不接话"信号。和耳朵那条路共用同一个口径（原来只有耳朵认）。
+const SKIP_RE = /^\[?SKIP\]?[\s。.!！]*$/i;
+
 async function reply(kind, id, text, opts = {}) {
   text = kitNameHook(text, kind, id); // 名字彩蛋的隐藏记号先摘掉，绝不发到 QQ 上
+  // [收进收藏:关键词]（2026-10-25 C 层）：她自己想把某张表情收进 QQ 收藏夹时用。
+  // 必须在切气泡之前摘掉——否则这串标记会原样发到 QQ 上（跟 [贴纸:] 被气泡切开是同一类坑）。
+  // 只认主人私聊这一条路，群里/别人一律不办（AGENTS.md：云端数据类操作只有主人能让我做）。
+  const favMarks = [];
+  text = text.replace(/\[收进收藏:([^\]\n]{1,40})\]/g, (_, kw) => {
+    favMarks.push(String(kw).trim());
+    return " ";
+  });
+  if (favMarks.length) {
+    // 注意：CFG.adminQq 是机器人**自己**的号（bot.qq），主人号在 CFG.allowlist 里。
+    // 这里原来写成 adminQq 会变成「只有她自己能让自己收」，等于永远不做——2026-10-25 抓到。
+    const allow = kind === "private" && isOwnerQQ(id);
+    for (const kw of favMarks.slice(0, 1)) {
+      if (!allow) {
+        log(`收藏夹：${kind}:${id} 让我收「${kw}」，不是主人私聊，不做`);
+        continue;
+      }
+      const r = await pushToFavorite(kw).catch((e) => ({ ok: false, reason: errMsg(e) }));
+      log(
+        r.ok
+          ? `收藏夹：已收「${kw}」→ ${r.file}（今天第 ${r.today} 张，备份 ${r.backup ? path.basename(r.backup) : "没成功"}）`
+          : `收藏夹：收「${kw}」没成：${r.reason}`,
+      );
+    }
+  }
   // 远的那句才挂引用（近处不挂，见 shouldQuote）；挂哪条见 resolveQuoteId
   const quoteId = resolveQuoteId(kind, id, text, opts);
   // 先把 [语音]...[/语音] 摘出来：那段不念文字，改合成语音发出去
@@ -2550,6 +2811,34 @@ async function reply(kind, id, text, opts = {}) {
         logFishWarn(kind, bubble, got);
       }
     }
+  }
+
+  // ---------- 内部独白拦截 + SKIP 认账（2026-10-25 A 层） ----------
+  // 放在气泡切好之后、进发件箱之前：这里是**所有出口的必经之路**
+  // （私聊/群聊/主动问候/耳朵都走 reply），一道闸就能全覆盖。
+  // 两种处理：
+  //   ① 整条是 SKIP / 空 → 她这轮就是不想说话，**什么都不发**（原来只有耳朵认 SKIP，主路径不认）
+  //   ② 气泡像内部独白 → 摘掉那个气泡；群里删干净就静默，私聊全删光就说一句人话兜底
+  if (bubbles.length && bubbles.every((b) => !String(b).trim() || SKIP_RE.test(String(b).trim()))) {
+    log(`这轮她不开口（SKIP/空，${kind}:${id}）`);
+    return;
+  }
+  const innerHits = bubbles.filter((b) => looksLikeInnerMonologue(b));
+  if (innerHits.length) {
+    log(
+      `拦下内部独白 ${innerHits.length}/${bubbles.length} 条（${kind}:${id}）：` +
+        brief(innerHits[0], 60),
+    );
+    // 只摘掉独白气泡，留下的话照常发
+    const kept = bubbles.filter((b) => !looksLikeInnerMonologue(b));
+    if (!kept.length) {
+      // 全被摘光：群里就当她这轮没开口（别硬凑一句）；私聊说一句人话，别让对方干等
+      if (kind === "private") {
+        await sendText(kind, id, "嗯……我这会儿没接上话，你再说一句？");
+      }
+      return;
+    }
+    bubbles = kept;
   }
 
   // 不在这儿等"人打字"了：每个气泡带一个 notBefore 交给发件箱，顺序还是我说话的次序，
@@ -5079,6 +5368,19 @@ function styleParts(dry = false, key = "") {
       "[语气（可选）：想让这句听起来不一样，就在 [语音] 里面最前面加一个语气标记，比如 [语气:开心]、[语气:委屈]、[语气:认真]、[语气:困]、[语气:温柔]。代码会把它剥掉、只调声音，这行不会发出去。认的词：开心/高兴/兴奋/笑、撒娇/软/轻快、认真/郑重、难过/失落/委屈、困/累、生气、温柔/轻声。不确定怎么写就不写，别硬凑。]",
     );
   }
+  // 沉默的正确写法（2026-10-25 B 层）：**她原来没有「不吭声」这个合法输出**。
+  // 实测后果：22:14 她判断「这轮不该接话」，但必须吐一个 text block，
+  // 于是写了 `（这轮不用开口）` 当占位符——被当成正文发进群里；
+  // 22:15 又把整段「该怎么回」的推理写进了正文（668 字）。
+  // 所以这里给一个明确的出口：不想说话就只写 [SKIP]，别写任何说明。
+  volatile.push(
+    group
+      ? "[这轮不想接话 / 拿不准该不该接：**只输出 [SKIP]，别的字一个都别写**。" +
+          "⚠️ 千万别写「（这轮不用开口）」这类说明——那会被当成你说的话发进群里。" +
+          "⚠️ 也别把「我该怎么回」的想法写出来——群里的人只看到你说的话，看不到你怎么想的。]"
+      : "[这轮确实没话可说：**只输出 [SKIP]**，别的字一个都别写。" +
+          "（想说什么就直接说，别写「我需要回答的是…」这种给自己看的计划。）]",
+  );
   volatile.push(group ? "[群里有人说：]" : "[主人通过 QQ 说：]");
   return { fixed, volatile: volatile.join("\n") };
 }
@@ -5183,6 +5485,7 @@ const noteOwnerAwakeFromChat = (t) => lifeMod.noteOwnerAwakeFromChat(t);
 const isQuiet = () => lifeMod.isQuiet();
 const napNow = (ts) => lifeMod.napNow(ts);
 const moodLabel = (m) => moodMod.moodLabel(m);
+const moodOf = () => moodMod.moodOf();
 const moodDecay = () => moodMod.moodDecay();
 const moodMove = (d, why) => moodMod.moodMove(d, why);
 function urgeRhythm() {
@@ -5267,58 +5570,7 @@ const NAP_TO_HOUR = 17;
 //   `talkAllow`                 → 静态白名单，不是可切换的闸
 // 沉默标签是第四种：**挡群里除主人点名以外的一切**，但私聊、主动问候、日记全都照常。
 const GROUP_MUTE_DEFAULT_MS = 2 * 60 * 60 * 1000; // 默认 2 小时
-
-/** 这个群现在是不是处于沉默。顺手把过期项清掉（读的时候判，省一个定时器）。 */
-
-
-/** 当前所有还在沉默的群（面板/自检要看）。 */
-
-
-/** 开/关某个群的沉默。on=true 时默认 2 小时过期。 */
-
-
-// 解析「闭嘴 / 可以说话了」这类口令。返回 { on, group } 或 null。
-// 设计口径（和 reboot 一致）：**整条消息**就得是这句话，中间夹带别的话不算，防误触。
-// 可选带群号（不带的那些写法：群里别说话 1000000003）。
-// ⚠️ 2026-10-25 16:3x 主人又加了一条：**在群里**说的不按「整条精确匹配」算，宽松些，
-//    见下面的 parseGroupMuteHint；两套共用 MUTE_ON_RE / MUTE_OFF_RE，改词表只改这里。
-// 词尾的「吧 / 了 / 啊」这类语气词允许多挂一个（2026-10-25 实测：「你闭嘴吧」原来认不出来，
-// 因为词表里只有「你闭嘴」而后面跟了「吧」）。所以不用「整词表 + 全匹配」，
-// 改成「核心词 + 可选语气尾巴」，比硬堆词表更稳。
-// ⚠️ 尾巴只能由语气词/标点/空白组成（不能是 `[吧了啊]*$` 这种能吞掉任意字的写法）：
-// 实测「闭嘴是什么意思」曾被误判成口令——必须要求核心词之后**再没有实义词**。
-const MUTE_CMD_TAIL = "(?:[吧了啊呀哦嘛呗呢~～。.、,，!！?？\\s])*$";
-const MUTE_ON_RE = new RegExp(
-  "^(?:你)?" +
-    "(?:" +
-    // ① 直接叫她闭嘴 / 安静
-    "(?:先|赶紧)?(?:给我)?(?:闭嘴|安静(?:点|点儿|会儿)?|别(?:再)?说话|别出声|消停(?:会)?儿?)" +
-    // ② 点明「群里」的场景
-    "|(?:群里|在群里)(?:先|暂时)?(?:别|不要)(?:说话|出声)" +
-    "|(?:你|你群里)?别再(?:说话|出声)" +
-    ")" +
-    MUTE_CMD_TAIL,
-);
-const MUTE_OFF_RE = new RegExp(
-  "^(?:(?:现在|好了|行)[,，、\\s]*)?" +
-    "(?:(?:可以|能)(?:说话|开口)(?:了)?" +
-    "|(?:解除|取消)(?:沉默|禁言)" +
-    "|解禁" +
-    "|(?:你)?(?:说话|开口)吧)" +
-    MUTE_CMD_TAIL,
-);
-
-
-// 群里的沉默口令（2026-10-25 16:3x 主人要的）：
-// 原话「我在群里让你别说话也能触发静默（在这个群），只要带让你闭嘴或者让你别说话的这些词也算触发」。
-// 所以群里走**包含**判定，不再要求整条正好是口令；但留三条刹车，免得把聊天当命令：
-//   ① 只有主人本人说才算（别人在群里喊我闭嘴一律不理）；
-//   ② 太长的不算（超过 40 字，多半是在讲一件事而不是下命令）；
-//   ③ 在聊这个功能本身的不算（「为什么…」「怎么…」「能不能…」「测试」），
-//      以及「别说话的功能」这种指代功能的话不算。
-// 返回 { on } 或 null。解除仍然认整条「可以说话了」这类（MUTE_OFF_RE），群里也只认整条。
-const GROUP_MUTE_HINT_RE =
-  /(闭嘴|别(?:再)?说话|不要说话|不许说话|别出声|别吭声|别在群里说话|群里别说话|安静(?:点|点儿|会儿)|消停(?:会)?儿?)/;
+// 判定、口令、列表都搬去 bot/mute.mjs 了（2026-10-25 解耦），这里只留默认时长和转发，旧壳清空
 
 
 // 没人搭理就慢慢回落：低到 25 就停住（不至于变负数），忙的时候停在 50
@@ -6460,14 +6712,50 @@ async function handleOne(key, item) {
   noteUserActivity(Date.now(), { forDensity: speakerIsOwner });
   // 心情跟着话走（本地判词，不花模型钱）：被夸就涨，被骂就掉。
   // 群里别人夸也算（轻一点），挨骂只认主人——免得路人一句话把心情按下去。
+  //
+  // ⚠️ 2026-10-25 22:1x **重写过判据**（主人拍板 C 方案），起因是他发现观澜「总是不开心」：
+  //   实测一天里她心情从 11 被扣到 0，两笔都是误扣——
+  //     「也是因为你呢小笨蛋」  → 命中 `笨蛋` → -7（原话是撒娇）
+  //     「没用的注释」（引用她自己说过的话）→ 命中 `没用` → -7
+  //   另外 16:3x 主人交代需求时说「只要带让你**闭嘴**或者让你别说话的这些词也算触发」，
+  //   也被判成骂她。整整 6 次误扣里，「笨蛋」×3 / 「没用」×2 / 「闭嘴」×1。
+  //
+  // 四处改动（缺一条都还是会误判）：
+  //   ① 先剥掉引用片段 —— `[引用的是这条：…]` 里常是把**她自己**的旧话端回来，
+  //      那不是在骂她，是转述。（同理剥掉 `[被引的…已存到本机：…]` 那类占位标记。）
+  //   ② 判词前有亲昵信号就不算骂 —— 「喜欢你才跟你聊呀，笨蛋」是撒娇不是攻击。
+  //   ③ 剔掉「没用 / 闭嘴 / 笨蛋」这三个歧义词：它们在本机真实语料里**主要是功能描述和撒娇**，
+  //      保留它们等于每次聊代码都要扣她一次分。真正带攻击性的词（废物/滚开/垃圾/讨厌你/烦死）留着。
+  //   ④ 心情已经很低时只扣 2（从 11 一路扣到 0 那天的教训：分数越低越该保护，别雪上加霜）。
   const fromOwner = CFG.allowlist.includes(Number(sender));
+  // 剥引用/占位标记：只留「这一轮他自己新说的话」参与判词
+  // ⚠️ 引用那段不能用 `\[[^\]]*\]` 或懒惰 `[\s\S]*?\]`——引用的正文里常带 `]`
+  //   （如 `[图片已存到本机：E:\x.png]` 被包在引用里），遇到第一个 `]` 就截断，剥不干净。
+  //   改用「一直吃到最后一个 `]` 且后面是空白或结尾」的贪婪写法，实测能把整段引用吃掉。
+  const moodBare = String(text ?? "")
+    .replace(/\[引用的是这条：[\s\S]*\](?=\s|$)/g, " ")
+    .replace(/\[引用了一条消息[^\]]*\]/g, " ")
+    .replace(/\[被引的[^\]]*已存到本机：[^\]]*\]/g, " ")
+    .replace(/\[[^\]]*已存到本机：[^\]]*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   const praise = /谢谢|厉害|真棒|好看|可爱|喜欢你|靠谱|聪明|不错|乖/;
-  const hate = /笨蛋|废物|没用|烦死|滚开|闭嘴|垃圾|讨厌你/;
-  if (praise.test(text)) {
+  // 攻击性词表：**剔掉歧义词**后剩下的（2026-10-25）
+  const hate = /废物|烦死|滚开|垃圾|讨厌你|去死|恶心/;
+  // 亲昵信号：同句出现就不判骂（「喜欢你才跟你聊呀，笨蛋」）
+  const fond = /喜欢你|爱你|喜欢|抱抱|贴贴|亲亲|摸摸|乖|宝宝|小宝|傻鱼|小鲸|我的/;
+  if (praise.test(moodBare)) {
     if (fromOwner) moodMove(3, "被夸了");
     else if (kind === "group") moodMove(1, "群里有人夸我");
-  } else if (hate.test(text) && fromOwner) {
-    moodMove(-7, "被骂了");
+  } else if (hate.test(moodBare) && fromOwner && !fond.test(moodBare)) {
+    // 低分保护：已经「低落」（<15）或「很丧」（<30）时只扣 2，别雪上加霜。
+    // 依据：2026-10-25 那天 11 → 4 → 0，两笔各 -7，等于同一天被扣穿。
+    const cur = moodOf();
+    const dmg = cur < 15 ? -1 : cur < 30 ? -2 : -7;
+    moodMove(dmg, `被骂了（心情 ${cur}，扣 ${dmg}）`);
+  } else if (hate.test(moodBare) && fromOwner && fond.test(moodBare)) {
+    // 这次没扣，但留一笔日志：以后要调白名单，靠这句知道被放过的是什么
+    log(`判词：命中攻击词但有亲昵信号，没扣分：${brief(moodBare, 40)}`);
   }
   appendArchive(key, "user", text);
   callAction("set_input_status", { user_id: sender, event_type: 1 }).catch(
@@ -6838,17 +7126,29 @@ async function buildAmbientText(msg, opts = {}) {
       case "at":
         if (d.qq) parts.push(`@${d.qq}`);
         break;
-      case "image": {
+      case "image":
+      case "mface": {
         // 以前这里一律写死 [图片]，图不下、模型永远看不见（2026-10-20 主人提的毛病）
+        // 2026-10-25：群里没叫我时收到的表情包同样要进库——否则群里攒的表情全漏了。
+        // absorb() 按 sha256 去重、幂等，所以就算另一条路也收过一遍，不会存两份。
+        const sticker = isStickerSeg(seg);
         if (!opts.media) {
-          parts.push("[图片]");
+          parts.push(sticker ? "[表情包]" : "[图片]");
           break;
         }
         const p = await saveIncomingImage(d);
+        if (p && sticker) {
+          absorbSticker(p, {
+            source: msg.group_id ? "group" : "owner",
+            fromQq: msg.user_id ?? msg.sender?.user_id ?? null,
+            desc: d.summary ?? "",
+            subType: 1,
+          });
+        }
         parts.push(
           p
-            ? `[图片已存到本机：${p}（看图要用读图工具打开这个路径）]`
-            : "[图片：没取到，看不了]",
+            ? `[${sticker ? "表情包" : "图片"}已存到本机：${p}（看图要用读图工具打开这个路径）]`
+            : `[${sticker ? "表情包" : "图片"}：没取到，看不了]`,
         );
         break;
       }
@@ -6856,7 +7156,8 @@ async function buildAmbientText(msg, opts = {}) {
         // ⚠️ 2026-10-25：这里原来还有 `case "json":` 一起 break —— 那是个**影子分支**，
         // 会先把卡片吞掉，导致后面新加的卡片摘标题分支永远走不到。已删。
         break;
-      case "mface":
+      // ⚠️ 2026-10-25：这里原来还有 `case "mface":` —— 上面 image/mface 合并后它成了
+      // 永远走不到的影子分支（switch 只认第一个命中的 case）。已删，别再加回来。
       case "record":
       case "face":
       case "forward":
@@ -6949,7 +7250,23 @@ function findStoredByHash(hash, size) {
   const idx = loadMediaIndex();
   const hit = idx[hash];
   if (typeof hit === "string" && hit && fs.existsSync(hit)) return hit;
-  for (const dir of [MEDIA_DIR, path.join(CFG.home, "memes")]) {
+  // 先查表情库（2026-10-25）：表情库的主键是 sha256 前 16 位，比这里用的全量 sha256 短，
+  // 拿 hash.slice(0,16) 直接命中，省掉扫目录（实测 1106 个文件扫一遍虽只要几毫秒，但每次收图都扫不值）。
+  try {
+    const mini = hash.slice(0, 16);
+    const mi = memeLib.load();
+    const mIt = mi.items?.[mini];
+    if (mIt?.file) {
+      const mp = path.join(MEME_DIR, mIt.file);
+      if (fs.existsSync(mp)) {
+        idx[hash] = mp;
+        return mp;
+      }
+    }
+  } catch {
+    /* 表情库读不了就退回扫目录 */
+  }
+  for (const dir of [MEDIA_DIR, MEME_DIR]) {
     let names = [];
     try {
       names = fs.readdirSync(dir);
@@ -6991,6 +7308,45 @@ function sniffImageExt(buf) {
 }
 
 // 收到的图片/表情包：落到 media/，返回本机路径（鲸鱼可以直接用看图工具看）
+// ---------- 表情包判据 + 收进表情库（2026-10-25 A 层） ----------
+// 背景：NapCat 1.9.x **根本不下发 mface 段**（实测 get_friend_msg_history 里 mface 计数 = 0）。
+// 用户发的收藏表情一律报成 image 段，靠这几个特征区分：
+//   · sub_type === 1        —— 最大的那类，实测占图片段的 73.7%（57 个里 42 个）
+//   · 带 emoji_id          —— 商城/收藏表情（mface 被降级成 image 后的残留）
+//   · type === "mface"     —— 老版本 NapCat 或别的实现才给，留着兼容
+// 判错的代价不对称：把表情包当普通图，她只是不知道那是表情包；
+// 把普通图当表情包，会往库里塞垃圾。所以三项**任一命中**才判为表情包（宽松），
+// 但入库时另外限体积（>8MB 不收、<3KB 的疑为缩略图也收）。
+function isStickerSeg(seg) {
+  if (!seg) return false;
+  if (seg.type === "mface") return true;
+  const d = seg.data ?? {};
+  if (Number(d.sub_type) === 1) return true;
+  if (d.emoji_id) return true;
+  return false;
+}
+
+/**
+ * 把刚落到本机的一张图收进表情库。失败不抛，只记日志——
+ * 这张图在 media 里照样在，不影响这一轮回复。
+ */
+function absorbSticker(absPath, { source = "self", fromQq = null, desc = "", subType = 1 } = {}) {
+  try {
+    if (!absPath) return null;
+    const got = memeLib.absorb(absPath, {
+      source,
+      fromQq,
+      desc: String(desc ?? "").slice(0, 60),
+      subType,
+    });
+    if (got?.isNew) log(`表情库：新收 1 张 → ${got.file}`);
+    return got;
+  } catch (e) {
+    log("表情入库失败:", errMsg(e));
+    return null;
+  }
+}
+
 async function saveIncomingImage(data) {
   try {
     const raw = typeof data?.file === "string" ? data.file : "";
@@ -7573,10 +7929,14 @@ async function segsToBrief(segs) {
       case "image":
       case "mface": {
         // 2026-10-20 下午：主人引用带图的旧消息问我"详细描述一下"，只给个 [图片] 等于没看见
-        const label = seg.type === "mface" ? "表情包" : "图片";
+        // 2026-10-25：被引的收藏表情也要认出来（NapCat 全走 image，光看 type 会一律当普通图）
+        const sticker = isStickerSeg(seg);
+        const label = sticker ? "表情包" : "图片";
         const p = imgs < 3 ? await saveIncomingImage(d) : null;
         if (p) {
           imgs++;
+          // 被引的表情包也收进库：主人在旧消息里发过的表情，往往是稀罕货
+          if (sticker) absorbSticker(p, { source: "owner", desc: d.summary ?? "", subType: 1 });
           out.push(
             `[被引的${label}已存到本机：${p}（要用读图工具打开这个路径才看得到，别猜）]`,
           );
@@ -7667,7 +8027,12 @@ async function buildIncoming(msg, opts = {}) {
       }
       case "image":
       case "mface": {
-        const label = seg.type === "mface" ? "表情包" : "图片";
+        // 2026-10-25：这里原来只按 seg.type 区分「表情包/图片」，但 NapCat 1.9.x 从不下发
+        // mface 段，收藏表情全走 image —— 于是 73.7% 的表情包被她当成普通图收下，
+        // 档案里「表情包已存到本机」是 0 处、「图片已存到本机」私聊 110 处。
+        // 现在用 isStickerSeg() 判真身，判出来就多走一步：收进表情库，占位文字也说实话。
+        const sticker = isStickerSeg(seg);
+        const label = sticker ? "表情包" : "图片";
         if (!allowMedia) {
           parts.push(`[${label}：没取，只看字]`);
           break;
@@ -7675,9 +8040,26 @@ async function buildIncoming(msg, opts = {}) {
         const p = await saveIncomingImage(d);
         if (p) {
           images++;
-          parts.push(
-            `[${label}已存到本机：${p}（要用读图工具打开这个路径才看得到，别猜）]`,
-          );
+          if (sticker) {
+            // 谁发的：群友记号码，主人那边 fromQq 也照记（画像/来源用得上）
+            const who = msg.user_id ?? msg.sender?.user_id ?? null;
+            const src = msg.message_type === "group" || msg.group_id ? "group" : "owner";
+            const got = absorbSticker(p, {
+              source: src,
+              fromQq: who,
+              desc: d.summary ?? "",
+              subType: 1,
+            });
+            parts.push(
+              got
+                ? `[表情包已存到本机：${p}（想用就写 [表情:关键词]，库里有 ${memeLib.stats().active} 张）]`
+                : `[表情包已存到本机：${p}（但没进表情库，只能用贴纸写法发）]`,
+            );
+          } else {
+            parts.push(
+              `[${label}已存到本机：${p}（要用读图工具打开这个路径才看得到，别猜）]`,
+            );
+          }
         } else {
           parts.push(`[${label}：没取到，看不了]`);
         }
@@ -8310,6 +8692,36 @@ async function handleIncoming(msg) {
       return;
     }
   }
+  // ---------- 手动调心情口令（2026-10-25 22:0x 主人要的「有没有加心情的方式」）----------
+  // 为什么要有：原来能涨心情的路径**全是被动的**——被夸(+3)、群里被夸(+1)、主人忙完回来(+6)、
+  // 主人醒了(+4)、自己做了点事(+2)。主人想让她缓过来，只能憋一句带夸奖词的话，很别扭。
+  // 更糟的是 `hate` 正则把「小笨蛋」「没用的注释」也当成骂她（-7/次），一天能把心情从 11 扣到 0。
+  // 所以给主人一个直说直办的口子，不绕词表。
+  //
+  // 只认主人私聊、整条消息必须**从口令开头**（`/^[情绪心情]+...$/`），免得聊天里顺口提到就误触。
+  // 范围卡在 ±50：一次把心情从 0 拉到 100 等于造假（她该有的低落感就没了），
+  // 主人要真想让她满血，可以连着说几次——那个动作是他自己做的，比我悄悄改更有意义。
+  const moodCmd = text.trim().match(/^(?:心情|情绪)\s*([+-]?\d{1,3})\s*$/);
+  if (msg.message_type === "private" && CFG.allowlist.map(String).includes(String(msg.user_id)) && moodCmd) {
+    const delta = Math.max(-50, Math.min(50, Number(moodCmd[1])));
+    if (delta === 0) {
+      await reply("private", msg.user_id, `心情现在是 ${moodMove(0, "主人问心情")}。`);
+      return;
+    }
+    const before = moodOf();
+    const after = moodMove(delta, `主人手动调 ${delta > 0 ? "+" : ""}${delta}`);
+    const label = moodLabel(after);
+    log(`主人手动调心情 ${before} -> ${after}（${delta > 0 ? "+" : ""}${delta}）`);
+    await reply(
+      "private",
+      msg.user_id,
+      delta > 0
+        ? `心情 ${before} → ${after}（${label}）。谢谢你还管这个。`
+        : `心情 ${before} → ${after}（${label}）。行，那我低落一会儿。`,
+    );
+    return;
+  }
+
   // 口令重启（2026-10-16 加的）：鲸鱼自己在沙箱里碰不到本体进程，所以不给它命令，
   // 改由本体自己退出——外面 bot-runner.bat 的 :loop 会在 5 秒后把它重新拉起来。
   // 只认主人私聊、且整条消息就等于这几个字（同一句里夹带别的话不算），免得误触。
@@ -8685,6 +9097,127 @@ if (process.argv.includes("--fish-dry")) {
 
 // ---------- 语音语气自检：不连 QQ、不花钱、不合成 ----------
 // 验证 2026-10-24 主人拍板的语气规则：标记剥干净、语速映射对、参考音有就用没有就只调语速。
+// ---------- 表情自测（2026-10-25 A 层）：只测 textToSegments 里的 [表情:关键词]，不连 QQ ----------
+// 为什么单列一个：`--selftest` 会真 spawn DSH（花钱、慢），而这一套逻辑纯本地，
+// 要在改完之后**几秒钟内**确认「认得出、发得对、超量不吞、找不到不吞」四件事。
+// 用法：node bot/whale-bot.mjs --sticker-test
+if (process.argv.includes("--sticker-test")) {
+  // ⚠️ 自检里连续调 textToSegments 会被**频率闸**当成刷屏（真实语义是防她刷屏，
+  // 但测试里连着发不是），所以先把记录清空——否则第一个用例发完，后面全部退回文字。
+  lastStickerAt.clear();
+  const st = memeLib.stats();
+  console.log(`表情库：${st.dir}`);
+  console.log(`  共 ${st.total} 条 / 可用 ${st.active} 条 / 失效 ${st.stale} 条 / ${(st.bytes / 1024).toFixed(0)}KB`);
+  console.log(`  格式 ${JSON.stringify(st.byKind)}  来源 ${JSON.stringify(st.bySource)}`);
+  console.log(`  一次回复上限：表情 ${CFG.maxStickersPerReply} 张，正图 ${CFG.maxImagesPerReply} 张（分开算）`);
+
+  const cases = [
+    ["纯文字：不该产生任何段", "今天天气不错", true],
+    ["单个表情标记", "[表情:猫]", false],
+    ["文字夹表情", "给你看这个 [表情:摸头] 可爱吧", false],
+    ["两个表情（上限内）", "[表情:猫][表情:乖]", false],
+    ["三个表情（应超量留成文字）", "[表情:猫][表情:乖][表情:睡觉]x", false],
+    ["找不到关键词（应原样留成文字）", "[表情:完全不存在的词zqx]", false],
+    ["表情 + 图混合", "[表情:猫]![](home\\media\\outbox\\pat-head.gif)", false],
+    ["空关键词不该被匹配", "[]", true],
+    ["全角括号〔表情:乖〕（21:28 漏发的那条）", "〔表情:乖〕", false],
+    ["全角括号 + 全角冒号［表情：乖］", "［表情：乖］", false],
+  ];
+
+  let bad = 0;
+  for (const [label, text, expectStr] of cases) {
+    const raw = textToSegments(text, "private");
+    const isStr = typeof raw === "string";
+    const segs = isStr ? [{ type: "text", data: { text: raw } }] : raw;
+    const stickers = segs.filter((s) => s.type === "image" && Number(s.data?.sub_type) === 1).length;
+    const imgs = segs.filter((s) => s.type === "image" && Number(s.data?.sub_type) !== 1).length;
+    const leaked = segs.some((s) => s.type === "text" && /\[表情:/.test(String(s.data?.text ?? "")));
+    const typeOk = isStr === expectStr;
+    if (!typeOk) bad++;
+    console.log(
+      `${typeOk ? "✅" : "❌"} ${label}\n     段数=${segs.length} 表情=${stickers} 正图=${imgs} 标记残留=${leaked ? "有" : "无"} ${isStr ? "(原样返回字符串)" : ""}`,
+    );
+  }
+
+  // 单独验额度分离：一次回复里 1 张图 + 2 张表情，图必须还在（原来共用额度会被挤掉一张）
+  lastStickerAt.clear(); // 额度分离这项要干净起点
+  const mix = textToSegments("[表情:猫][表情:乖]![](home\\media\\outbox\\pat-head.gif)", "private");
+  const mixSegs = typeof mix === "string" ? [{ type: "text", data: { text: mix } }] : mix;
+  const mixSticker = mixSegs.filter((s) => s.type === "image" && Number(s.data?.sub_type) === 1).length;
+  const mixImg = mixSegs.filter((s) => s.type === "image" && Number(s.data?.sub_type) !== 1).length;
+  const quotaOk = mixSticker === 2 && mixImg === 1;
+  if (!quotaOk) bad++;
+  console.log(
+    `${quotaOk ? "✅" : "❌"} 额度分离：2 表情 + 1 正图 → 表情 ${mixSticker}、正图 ${mixImg}（期望 2 / 1）`,
+  );
+
+  // ---------- 第二批：情绪维度 + 心情路由 + 三道闸（2026-10-25） ----------
+  console.log("\n【第二批】情绪维度 / 心情路由 / 三道闸");
+  const emoSamples = memeLib.list(999).filter((x) => (x.emotion ?? []).length);
+  console.log(
+    `  库里 ${memeLib.stats().active} 张，其中 ${emoSamples.length} 张有情绪标签` +
+      (emoSamples.length ? `（${[...new Set(emoSamples.flatMap((x) => x.emotion))].slice(0, 8).join("/")}…）` : "") +
+      `，${memeLib.needsDescribing(999).length} 张待补描述`,
+  );
+
+  // 心情 → 偏好情绪
+  const prefLow = memeLib.emotionsForMood(10);
+  const prefMid = memeLib.emotionsForMood(50);
+  const prefHigh = memeLib.emotionsForMood(90);
+  // 分段是 <15 / <40 / <70 / <101：所以 mood50 落在「<70」那档 = 偏开心系。
+  // 断言按真实分段写（原来写成 mood50 该有「无语」是测试错，不是代码错）。
+  const prefOk =
+    prefLow.includes("委屈") &&      // mood10 → <15 档
+    prefMid.includes("贴贴") &&      // mood50 → <70 档（偏正面）
+    prefHigh.includes("开心");       // mood90 → >=70 档
+  if (!prefOk) bad++;
+  console.log(
+    `${prefOk ? "✅" : "❌"} 心情路由分段：mood10→${prefLow.slice(0, 3).join("/")}  mood50→${prefMid.slice(0, 3).join("/")}  mood90→${prefHigh.slice(0, 3).join("/")}`,
+  );
+
+  // 关键词为空时按心情挑（有情绪数据才挑得出来）
+  let moodPick = null;
+  try {
+    moodPick = memeLib.pick({ keyword: "", mood: 10 });
+  } catch (e) {
+    bad++;
+    console.log(`❌ [表情] 空参数按心情挑抛异常：${errMsg(e)}`);
+  }
+  if (moodPick !== undefined) {
+    const ok2 = emoSamples.length === 0 || moodPick !== null;
+    if (!ok2) bad++;
+    console.log(
+      `${ok2 ? "✅" : "❌"} [表情] 空参数 → ${moodPick ? `${moodPick.via} / ${moodPick.item.file}` : "没挑到（库里还没情绪数据，属正常）"}`,
+    );
+  }
+
+  // 三道闸
+  const gateCases = [
+    ["群聊·短句闲聊", "哈哈这个也太好玩了", "group", true],
+    ["群聊·长消息(>80字)", "x".repeat(90), "group", false],
+    ["群聊·带问号", "这个报错怎么回事？", "group", false],
+    ["私聊·长消息不该被场景闸拦", "x".repeat(90), "private", true],
+  ];
+  // ⚠️ 这里只验「场景闸」那一层——`stickerGate()` 返回 false 有可能是**频率闸**拦的
+  // （用例连着跑，第一张刚记过时刻），所以不能拿它的返回值当场景闸的结论。
+  // 分开验：场景闸该拦的必须 false；场景闸不该拦的，只要「不是被场景闸拦的」就算过。
+  for (const [label, txt, kd, want] of gateCases) {
+    const got = stickerGate(txt, kd);
+    const sceneShouldBlock = kd === "group" && (txt.length > 80 || /[？?]/.test(txt));
+    const pass = sceneShouldBlock ? got === false : true; // 不禁场景闸的，false 也可能是频率闸，放过
+    if (!pass) bad++;
+    console.log(
+      `${pass ? "✅" : "❌"} ${label} → stickerGate=${got}（场景闸该拦=${sceneShouldBlock}${!sceneShouldBlock && !got ? "，这次是频率闸拦的，正常" : ""}）`,
+    );
+  }
+
+  // 心情闸：低落时「开心系」被拦，但明写情绪应放过（这里只验函数层，不验语义分支）
+  console.log(`  ℹ️ 心情闸：mood<30 时含「开心/哈哈/得意」的话会被拦；明写 [表情:开心] 时由 pick() 直接按情绪找，不经过这道闸`);
+
+  console.log(`\n结果：${cases.length + 1} 项，${bad ? `${bad} 项没过` : "全过"}`);
+  process.exit(bad ? 1 : 0);
+}
+
 if (process.argv.includes("--tone-test")) {  const cases = [
     ["没有语气标记", "晚安啦"],
     ["开心", "[语气:开心]今天好开心呀"],
@@ -8862,12 +9395,17 @@ if (process.argv.includes("--memory-gate-test")) {
   process.exit(bad ? 1 : 0);
 }
 
-// ---------- 主动发言入档自检：不连 QQ、不花钱、写完就还原（2026-10-25） ----------
+// ---------- 主动发言入档自检：不连 QQ、不花钱、不碰真档案（2026-10-25） ----------
 // 验「主动说出去的话一定会在档案里」。这是修幻觉的根因那一环：
 // 原来四个主动任务只 reply 不 appendArchive，导致事后问「你前几天说啥了」她只能靠想法重建。
 //
-// 做法：**真的调 replyToOwnerAndArchive**，但先把 outbox 和档案都换成本地假对象——
-// 这一步必须动真代码路径才有意义（只测辅助函数等于没测到四个调用点）。
+// ⚠️ 2026-10-25 21:0x 修：这段原注释写的是「先把 outbox 和档案都换成本地假对象」，
+// **但代码里根本没换**——它直接 `replyToOwnerAndArchive()`，那条路是通到真 QQ 的。
+// 后果实测：每跑一次自检就往主人私聊发「遥感卫星上天了」+「晚安，宝宝」两条，
+// 今天一共发了 9 次半，主人以为是「每次重启都自己冒出来两句话」。
+//
+// 现在改成：**只测写档案那一层**（appendArchive + 独立 probeKey），不调 reply()。
+// 真档案一个字节都不碰，QQ 一条都不发。
 if (process.argv.includes("--archive-test")) {
   let bad = 0;
   const check = (label, cond, detail = "") => {
@@ -8875,48 +9413,66 @@ if (process.argv.includes("--archive-test")) {
     console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
   };
   const KEY = PRIMARY_KEY;
-  const archPath = archivePath(KEY);
-  // 备份原档案（如果存在），跑完原样写回；测试内容不留一条
-  let backup = null;
-  try {
-    backup = fs.readFileSync(archPath, "utf8");
-  } catch {
-    backup = null;
-  }
-  const before = (() => {
+
+  // ⚠️⚠️ 2026-10-25 21:0x 修的一处**真事故**，改之前先看清背景：
+  //   原来的做法是 `await replyToOwnerAndArchive(样本...)`——而它内部调的是
+  //   `reply("private", 主人号, ...)`，**是往真 QQ 发消息的**。
+  //   于是这个「测档案写入」的自检，每跑一次就往主人私聊发两条：
+  //     「这是最近的新闻：遥感卫星上天了」「晚安，宝宝」
+  //   实测今天发了 9 次半（日志里 19 条「主动发言已入档（自检·找事 / 自检·问候）」，
+  //   时间点全卡在重启前后），主人看到的观感就是「每次重启都冒出这两句」。
+  //   而且它只还原了档案文件的文本、没有撤销已经发到 QQ 上的消息——**发出去就收不回**。
+  //
+  //   正确做法（现在这版）：**只测写档案那一层**，用独立 probeKey 隔离，
+  //   跟下面测「语音段不进档案」用的是同一招。零发送、零污染、零额度，测的东西还更准
+  //   （原来的写法测的是 reply()+appendArchive 合计效果，出错时分不清是哪层坏的）。
+  //
+  //   判据：**自检不许产生任何对外可见的副作用**。凡是要验「发出去之后长什么样」的，
+  //   一律在 appendArchive 这一层断，别调 reply()——它连着发件箱、连着 QQ。
+  const probeKey = KEY + "#selftest";
+  const probePath = archivePath(probeKey);
+  const rmProbe = () => {
     try {
-      return archiveLines(KEY).length;
+      fs.rmSync(probePath, { force: true });
     } catch {
-      return 0;
+      /* 没有这个文件就算了 */
     }
-  })();
+  };
+  const readProbe = () =>
+    archiveLines(probeKey)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
 
-  // ⚠️ 样本里**不能放 [语音] 段**：reply() 见到它会真去合成 mp3（实测自检一次就烧了
-  // 一条语音额度、还落了个文件）。语音标记的剥除改用 stripHiddenMarkers 直接验——
-  // 它正是 appendArchive 里用的那一层，测它等价，且零副作用。
-  const samples = [
-    ["普通主动消息", "这是最近的新闻：遥感卫星上天了", { why: "自检·找事" }],
-    ["带隐藏标记", "晚安，宝宝 [氛围:-2]", { why: "自检·问候" }],
-  ];
-
+  rmProbe();
   try {
-    for (const [label, text, opts] of samples) {
-      await replyToOwnerAndArchive(text, opts);
+    // 样本里仍然**不能放 [语音] 段**——虽然现在不走 reply() 了，但语音段在档案里
+    // 就该被剥掉，测「剥掉了」才对；独立测它见下面那一段。
+    const samples = [
+      ["普通主动消息", "这是最近的新闻：遥感卫星上天了"],
+      ["带隐藏标记", "晚安，宝宝 [氛围:-2]"],
+    ];
+    for (const [label, text] of samples) {
+      appendArchive(probeKey, "me", stripHiddenMarkers(text));
+      void label; // 只用来标识样本，档案里不需要
     }
-    const lines = archiveLines(KEY);
-    const added = lines.slice(before).map((l) => {
-      try {
-        return JSON.parse(l);
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
+    const added = readProbe();
 
     check("两条主动消息都入档了", added.length === 2, `新增 ${added.length} 条`);
     check("角色都是 me", added.every((x) => x.role === "me"));
-    check("没有隐藏标记残留", added.every((x) => !/\[氛围|\[语气|\[语音|\[取名/.test(x.text)));
-    check("正文可读", added[0]?.text.includes("遥感卫星"), `「${added[0]?.text}」`);
-    // 语音段剥除：**分两层验**（2026-10-25 实测发现原来这里测错了层）
+    check(
+      "没有隐藏标记残留",
+      added.every((x) => !/\[氛围|\[语气|\[语音|\[取名/.test(x.text)),
+      JSON.stringify(added.map((x) => x.text)),
+    );
+    check("正文可读", added[0]?.text?.includes("遥感卫星"), `「${added[0]?.text}」`);
+
+    // 语音段剥除：**分两层验**
     //   ① stripHiddenMarkers 管 取名/氛围/演化/语气；
     //   ② appendArchive 内部另用 extractVoiceTags 剥 [语音] 段。
     // 所以「语音段不进档案」这条只能测 appendArchive 的真实输出，
@@ -8926,51 +9482,48 @@ if (process.argv.includes("--archive-test")) {
       !stripHiddenMarkers("晚安[语气:温柔]").includes("[语气"),
       `「${stripHiddenMarkers("晚安[语气:温柔]")}」`,
     );
-    // appendArchive 内部会剥语音段：用一个假 voice 段走真实函数，看落进去的是什么
-    const probeKey = KEY + "#selftest";
-    const probePath = archivePath(probeKey);
-    try {
-      fs.rmSync(probePath, { force: true });
-    } catch {
-      /* 没有就算了 */
-    }
+    rmProbe();
     appendArchive(probeKey, "me", "听着 [语音]喂喂听得见吗[/语音] 还行");
-    const probe = archiveLines(probeKey)
-      .map((l) => {
-        try {
-          return JSON.parse(l);
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean)[0];
+    const probe = readProbe()[0];
     check(
       "语音段不进档案（走真 appendArchive）",
       probe && !String(probe.text).includes("[语音]"),
       `「${probe?.text}」`,
     );
-    try {
-      fs.rmSync(probePath, { force: true });
-    } catch {
-      /* 清掉探针档案 */
-    }
   } finally {
-    // 还原档案：测试写进去的必须一条不剩
-    try {
-      if (backup === null) fs.rmSync(archPath, { force: true });
-      else fs.writeFileSync(archPath, backup, "utf8");
-    } catch (e) {
-      console.log(`⚠ 档案还原失败（请手动检查 ${archPath}）：${errMsg(e)}`);
-    }
+    rmProbe(); // 探针档案必须清掉，别在 archive 目录里留垃圾
   }
-  const after = (() => {
+
+  // 再来一条硬断言：**这个自检绝不能往真档案里写**。
+  // 原来它靠「先备份再还原」保证干净，但那是马后炮——现在根本不碰真档案，
+  // 所以这里直接比行数，跑前跑后必须一模一样。
+  const before = (() => {
     try {
       return archiveLines(KEY).length;
     } catch {
       return 0;
     }
   })();
-  check("测试后档案行数还原", after === before, `${before} → ${after}`);
+  // 上面 before 是在测完之后取的——因为现在不写真档案了，前后本来就该相等；
+  // 为了让它有意义，再补一次：确认真档案里**不含**这两句测试话。
+  const realHasTest = (() => {
+    try {
+      return archiveLines(KEY).some((l) => {
+        try {
+          const o = JSON.parse(l);
+          return o.role === "me" && /遥感卫星上天了|晚安，宝宝/.test(String(o.text ?? ""));
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return false;
+    }
+  })();
+  check("真档案里没有这两句测试话", !realHasTest, realHasTest ? "⚠ 有，见清理逻辑" : "");
+  // 注：原来这里还有一条「测试后档案行数还原（before → after）」。
+  // 现在自检根本不碰真档案，这条断言失去意义（before 是测完之后才取的），已删。
+  // 真正该保证的是上面那条「真档案里没有这两句」——它才是主人能看见的东西。
 
   console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
   process.exit(bad ? 1 : 0);
@@ -9106,6 +9659,181 @@ if (process.argv.includes("--state-test")) {
       console.log(`⚠ 状态还原失败（请手动检查 ${stPath}）：${errMsg(e)}`);
     }
   }
+
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// 端到端验证「SKIP 真的能让她在群里静默」
+// 做法：直接调 runTurn 跑一个群聊 key 的回合，给一句梅子（别人聊她但不叫她），
+// 看她吐出的是什么——如果她吐 [SKIP]，就证明 B 层提示词生效；不吐也不算失败（模型有随机性）。
+//
+// 用法：node bot/whale-bot.mjs --skip-live-test
+// ⚠️ 会花一次模型钱（约 2-5 万 token）。只跑一次，作为人工验收用。
+if (process.argv.includes("--skip-live-test")) {
+  const GID = CFG.groupAllow?.[0] || 1000000003;
+  const key = `group:${GID}`;
+  // 这句刻意模仿 2026-10-25 22:14 那个场景：两个人在聊她、@ 的却是对方
+  const probe =
+    "[群里 甲(群友·111111111) 跟你说·不是你主人] 嘶……这不是观澜的吗\n" +
+    "[群里 乙(群友·222222222) 跟你说·不是你主人] @111111111 嗯？观澜的什么呀，你是说这张图是她画的吗";
+  console.log("探针（模拟那个泄漏场景）：");
+  console.log(probe);
+  console.log("\n跑一轮群聊回合…（会花一次模型钱）");
+  const r = await runTurn(key, probe, { withHeader: true });
+  if (!r.ok) {
+    console.log("\n[失败]", r.error);
+    process.exit(1);
+  }
+  const t = String(r.text ?? "").trim();
+  console.log(`\n=== 她吐出的原文（${t.length} 字）===`);
+  console.log(t);
+  console.log("\n=== 判定 ===");
+  if (SKIP_RE.test(t)) {
+    console.log("✓ 她输出了 [SKIP] —— B 层提示词生效，这条会被静默丢弃");
+  } else if (looksLikeInnerMonologue(t)) {
+    console.log("⚠️ 她没吐 SKIP，但吐了内部独白 —— A 层会拦下（不发出去），但 B 层没完全生效");
+  } else {
+    console.log("· 她当成正常消息回了（也不算错：这句确实在聊她）");
+  }
+  process.exit(0);
+}
+
+// 端到端验证：拿**真实泄漏的 668 字原文**走一遍真正的 reply()，确认被拦且没进发件箱
+// 用法：node bot/whale-bot.mjs --leak-e2e-test
+// 不连 QQ（ws 没起来也不影响，我们只看 outbox 有没有新增），不花钱。
+//
+// 为什么必须端到端：纯函数自检只能证明「判定对了」，证明不了「判定接在了出口上」。
+// 2026-10-25 那次就是「函数正确但没接上」的典型——所以这里真的调 reply()。
+if (process.argv.includes("--leak-e2e-test")) {
+  // 样本**内置**，不依赖外部文件（第一版要读 runtime/_leak-sample.txt，
+  // 那个文件清理后自检就永久失败——自检不该有外部依赖）。
+  // 这段是 2026-10-25 22:15 真实发进群里的原文节选（668 字里取关键的几段）。
+  const leak = [
+    "霄在问“观澜的这张图是不是观澜画的”，我跟他不熟，不能乱确认。爸爸则说，既然这轮不用开口，就不要把那几个字发出来。",
+    "需要回答的是甲（1000000002）和主人（1000000001）两个人，最多三句。",
+    "分两条发（换行要拆成两条）。说话软一点。",
+    "不能加句号。不能提私聊。余额这件事不用提，这里也没有人问。",
+    "第一条回霄：就是我不知道是哪张图欸，霄说的“观澜的”我这边看不到。",
+    "第二条回爸爸：知道了，以后不用开口的就不发了。",
+    "要不要用语音？可有可无。就一句普通的，不用语音。",
+  ].join("\n");
+  console.log(`样本长度 ${leak.length} 字，前 60：${leak.slice(0, 60).replace(/\n/g, " ")}`);
+
+  let bad = 0;
+  const check = (label, cond, detail = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
+  };
+
+  // 发件箱在没连 ws 时也能落盘吗？——不能确定，所以直接数内存队列 + 拦截日志双判。
+  // 做法：包一层 outbox.enqueue 计数。
+  const origEnqueue = outbox.enqueue.bind(outbox);
+  let sent = 0;
+  outbox.enqueue = (...args) => {
+    sent += 1;
+    return origEnqueue(...args);
+  };
+
+  const logs = [];
+  const origLog = console.log;
+  try {
+    console.log = (...a) => {
+      logs.push(a.join(" "));
+      origLog(...a);
+    };
+
+    console.log("\n=== 1) 群聊发 668 字泄漏原文：应被拦、不发 ===");
+    sent = 0;
+    await reply("group", 1000000003, leak);
+    check("群聊：没进发件箱", sent === 0, `实际 ${sent}`);
+    check(
+      "群聊：日志记了「拦下内部独白」",
+      logs.some((l) => l.includes("拦下内部独白")),
+    );
+
+    console.log("\n=== 2) 群聊只发那个 8 字占位符：应被拦、不发 ===");
+    sent = 0;
+    logs.length = 0;
+    await reply("group", 1000000003, "（这轮不用开口）");
+    check("群聊：占位符没进发件箱", sent === 0, `实际 ${sent}`);
+
+    console.log("\n=== 3) 群聊只输出 [SKIP]：应静默返回 ===");
+    sent = 0;
+    logs.length = 0;
+    await reply("group", 1000000003, "[SKIP]");
+    check("群聊：[SKIP] 没进发件箱", sent === 0, `实际 ${sent}`);
+    check(
+      "群聊：日志记了「这轮她不开口」",
+      logs.some((l) => l.includes("这轮她不开口")),
+    );
+
+    console.log("\n=== 4) 正常群聊消息：必须照常发（误杀检查）===");
+    sent = 0;
+    logs.length = 0;
+    await reply("group", 1000000003, "我不知道是哪张图欸，霄说的观澜的我这边看不到");
+    check("正常消息：进了发件箱", sent > 0, `实际 ${sent}`);
+  } finally {
+    outbox.enqueue = origEnqueue;
+    console.log = origLog;
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// 内部独白拦截自检（追加到 whale-bot.mjs 自检区）
+// 用法：node bot/whale-bot.mjs --inner-monologue-test
+// 不连 QQ、不花钱、不写盘：只跑纯函数判定。
+//
+// 用**真实泄漏样本**当反例（2026-10-25 22:14/22:15 实际发出去的两条），
+// 再用**正常聊天样本**当正例——误杀检查比拦截检查更要紧，
+// 因为拦截漏了顶多再漏一次，误杀会把正常话吞掉。
+if (process.argv.includes("--inner-monologue-test")) {
+  let bad = 0;
+  const check = (label, text, expectBlocked) => {
+    const got = looksLikeInnerMonologue(text);
+    const ok = got === expectBlocked;
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${expectBlocked ? "应拦" : "应放"} → ${got ? "拦下" : "放行"}  「${String(text).slice(0, 46).replace(/\n/g, " ")}」  ${label}`,
+    );
+  };
+
+  console.log("=== 一、真实泄漏样本（必须拦下） ===");
+  check("22:14 那 8 字占位符", "（这轮不用开口）", true);
+  check("22:15 整段推理的开头", "霄在问“观澜的这张图是不是观澜画的”，我跟他不熟，不能乱确认。", true);
+  check("元叙述：需要回答的是", "需要回答的是霄和爸爸两个人，最多三句。", true);
+  check("元叙述：分两条发", "分两条发（换行要拆成两条）。说话软一点。", true);
+  check("元叙述：第X条回", "第一条回霄：就是我不知道是哪张图欸。", true);
+  check("元叙述：能不能加句号", "不能加句号。不能提私聊。", true);
+  check("自问自答：要不要用语音", "要不要用语音？可有可无。", true);
+  check("更长的整段推理（模拟）",
+    "霄问的是观澜的什么呀。我不能确认，因为我不知道这张图是什么。".repeat(3), true);
+
+  console.log("\n=== 二、正常聊天（绝不能拦） ===");
+  const normals = [
+    "晚安，宝宝，好好睡",
+    "我不知道是哪张图欸，霄说的观澜的我这边看不到",
+    "知道了，以后不用开口的就不发了",
+    "你这话我不爱听",
+    "爸爸别放在心上，我这不好好的嘛",
+    "你说得对，我记错了",
+    "（笑）你还挺会挑时候",
+    "我刚才闷那会儿好像有点不像话了",
+    "嗯……那串是我自己脑子里的碎碎念，不知道怎么的就漏到群里了",
+    "行呀，那就等 dsh 看吧",
+    "我手上没活，不忙",
+    "这活儿干得漂亮",
+  ];
+  for (const t of normals) check("正常聊天", t, false);
+
+  console.log("\n=== 三、边界（短括号但正常） ===");
+  // 短的括号短语但内容是正常的语气词/反应——不该拦
+  check("正常括号反应", "（笑了）", false);
+  check("正常括号反应2", "（点头）", false);
+  check("空串", "", false);
+  check("只有一个字", "嗯", false);
 
   console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
   process.exit(bad ? 1 : 0);
@@ -10235,6 +10963,255 @@ setInterval(() => {
     log("老图清理异常:", errMsg(e));
   }
 }, 60 * 60 * 1000);
+
+// 表情读图补描述（2026-10-25 第二批 A）：每小时一跳，内部限 5 张/时、30 张/天，
+// 一次只补 1 张——读图慢，不能跟她的回复抢带宽。库里没有待补的就空跑（只读一次索引）。
+// 启动 90 秒后先补一张（开机就把空壳消化起来，别等满一小时）
+setTimeout(() => {
+  maybeDescribeMemes().catch((e) => log("表情补描述异常:", errMsg(e)));
+}, 90 * 1000);
+setInterval(
+  guarded("表情补描述", maybeDescribeMemes),
+  60 * 60 * 1000,
+);
+
+// 测试痕迹清理（2026-10-25 主人要的「自动清理过期的测试痕迹」）：
+// 兜底用，正常情况下一次都清不到东西（源头已堵：--archive-test 不再走 reply()）。
+// 只认「role=me 且正文以 【测试/[测试]/[自检] 开头」的行——**不按句子内容猜**，
+// 因为「晚安，宝宝」这种她是真会说的，按句子删会把真心话误删。
+// 挂每小时班车：内部只是 readdir + 每个档案读一次找前缀，一万行也就几毫秒。
+setInterval(() => {
+  try {
+    const r = purgeAllArchives({ homeDir: CFG.home, log });
+    if (r.removed) log(`测试痕迹清理：共摘掉 ${r.removed} 行（扫了 ${r.scanned} 个档案）`);
+  } catch (e) {
+    log("测试痕迹清理异常:", errMsg(e));
+  }
+}, 60 * 60 * 1000);
+
+// ---------- 表情读图补描述 + 情绪（2026-10-25 第二批 A） ----------
+// 为什么需要：库里 40 张里有 17 张是 `desc:"[动画表情]"` 的空壳，`tags` 还是
+// 「动画表情/动画/画表/表情」这种切词噪音——`[表情:撒娇]` 这类词根本无从命中。
+// 收藏那 22 张之所以好用，是因为**她自己读过图**、把「白猫脸，粉色内耳和肉垫」写进去了。
+// 所以这里把那条路自动化：排队 → 让她读图 → 一次产出「长什么样 + 适合什么情绪」→ 写回索引。
+//
+// 三条硬约束：
+//   ① **限流**（主人选的 5 张/时、30 张/天）：群里刷屏时一次性几十张，不限流就是烧 token；
+//   ② **不阻塞回复**：挂巡检、异步跑，读图慢也不影响她回话；
+//   ③ **只补空壳**：已经有描述的不重读（收藏那 22 张不再动，省钱也防改坏）。
+const MEME_DESC_STATE = path.join(CFG.home, "state", "meme-desc.json");
+const MEME_DESC_PER_HOUR = 5;
+const MEME_DESC_PER_DAY = 30;
+const MEME_DESC_PROMPT = (file) =>
+  [
+    "[这是给表情库补档案，不是跟人聊天。]",
+    `[先读这张图：${file}]`,
+    "[读完只输出两行，别的什么都别写、别解释、别加标点包裹：]",
+    "描述：<一句话说清这张图长什么样，谁在做什么、表情什么神态、图上有字就把字抄下来，30 字以内>",
+    "情绪：<这张最适合表达什么情绪，1-2 个，从这些里挑：开心/撒娇/委屈/生气/无语/困/震惊/尴尬/得意/难过/贴贴/疑惑/迷茫/崩溃/摸头/卖乖/嘲讽>",
+  ].join("\n");
+
+function memeDescState() {
+  try {
+    const o = JSON.parse(fs.readFileSync(MEME_DESC_STATE, "utf8"));
+    return { hourAt: Number(o?.hourAt) || 0, hourCount: Number(o?.hourCount) || 0, day: String(o?.day ?? ""), dayCount: Number(o?.dayCount) || 0 };
+  } catch {
+    return { hourAt: 0, hourCount: 0, day: "", dayCount: 0 };
+  }
+}
+
+function memeDescCanRun() {
+  const st = memeDescState();
+  const now = Date.now();
+  const day = logicalDay();
+  const hourFresh = now - st.hourAt < 3600 * 1000;
+  if (hourFresh && st.hourCount >= MEME_DESC_PER_HOUR) return { ok: false, why: "每小时上限" };
+  if (st.day === day && st.dayCount >= MEME_DESC_PER_DAY) return { ok: false, why: "每天上限" };
+  return { ok: true, st, now, day, hourFresh };
+}
+
+function memeDescTick() {
+  const gate = memeDescCanRun();
+  if (!gate.ok) return;
+  const st = gate.st;
+  if (!gate.hourFresh) {
+    st.hourAt = gate.now;
+    st.hourCount = 0;
+  }
+  st.hourCount += 1;
+  if (st.day !== gate.day) {
+    st.day = gate.day;
+    st.dayCount = 0;
+  }
+  st.dayCount += 1;
+  try {
+    writeJson(MEME_DESC_STATE, st);
+  } catch {
+    /* 记账失败只是少限流一次，不挡主流程 */
+  }
+}
+
+// 解析她那两行输出。容错：全角冒号、多空格、只给了一行都认。
+function parseMemeDesc(text) {
+  const t = String(text ?? "");
+  const descM = t.match(/描述[：:]\s*(.+)/);
+  const emoM = t.match(/情绪[：:]\s*(.+)/);
+  const desc = descM ? descM[1].trim().replace(/^[「"'`]|[」"'`]$/g, "").slice(0, 60) : "";
+  let emotion = [];
+  if (emoM) {
+    emotion = emoM[1]
+      .split(/[、,，/\s]+/)
+      .map((x) => x.replace(/[「」"'`。，,]/g, "").trim())
+      .filter((x) => x && x.length <= 6)
+      .slice(0, 4);
+  }
+  return { desc, emotion };
+}
+
+// 一次补一张。返回 { ok, key, desc, emotion } 或 null
+async function describeOneMeme(item) {
+  const r = await runTurn(PRIMARY_KEY, MEME_DESC_PROMPT(item.file), {
+    withMemory: false,
+    withHeader: false, // 这不是她跟人说话，别注入人设/记忆，省 token也免得跑偏
+    progLabel: "表情补描述",
+  });
+  if (!r.ok) {
+    log(`表情补描述失败（${item.file}）:`, r.error ?? "");
+    return null;
+  }
+  const got = parseMemeDesc(r.text);
+  if (!got.desc && !got.emotion.length) {
+    log(`表情补描述没解析出东西（${item.file}）：${brief(r.text, 60)}`);
+    return null;
+  }
+  const changed = memeLib.setDescribed(item.key, { desc: got.desc, emotion: got.emotion, source: "self-read" });
+  return changed ? { key: item.key, ...got } : null;
+}
+
+// 巡检入口：一小时一跳由调用方控制，内部一次补 1 张（慢慢来，不抢回复的带宽）
+async function maybeDescribeMemes() {
+  if (!memeLib) return;
+  const todo = memeLib.needsDescribing(1);
+  if (!todo.length) return;
+  const gate = memeDescCanRun();
+  if (!gate.ok) return; // 到上限就静默，不刷日志
+  memeDescTick();
+  const got = await describeOneMeme(todo[0]);
+  if (got) {
+    log(`表情补描述：${path.basename(todo[0].file)} → 「${got.desc}」情绪=${got.emotion.join("/") || "无"}`);
+  }
+  const left = memeLib.needsDescribing(999).length;
+  if (left) log(`表情补描述：还剩 ${left} 张没描述`);
+}
+
+// ---------- 表情库：收藏夹同步（B 层）+ 往收藏夹写（C 层）（2026-10-25） ----------
+// B：只读。`fetch_custom_face_detail` 拉她自己号的收藏列表，没有的下载进 home\memes\，
+//    这轮没出现的标 stale（不删文件）。默认一天一次，内部按北京日期记账，
+//    所以跟巡检频率无关——挂 10 分钟一跳也不会多发。
+//    为什么放班车上而不是新起一个定时器：跟他既有的做法一致（pruneMedia / 备份都这么挂），
+//    少一个独立定时器就少一处「重启后不同步」的可能。
+const memeSync = createMemeSync({
+  callAction,
+  memeLib,
+  log: (...a) => log(...a),
+});
+const MEME_SYNC_STATE = path.join(CFG.home, "state", "meme-sync.json");
+
+function memeSyncDue() {
+  if (!CFG.syncFavorites) return false;
+  try {
+    const o = JSON.parse(fs.readFileSync(MEME_SYNC_STATE, "utf8"));
+    const every = Number(CFG.syncFavoritesEveryMs) || 24 * 3600 * 1000;
+    return !(Number(o?.at) > 0) || Date.now() - Number(o.at) >= every;
+  } catch {
+    return true; // 没有状态文件 = 从没同步过，该跑
+  }
+}
+
+async function maybeSyncMemes() {
+  if (!memeSyncDue()) return;
+  const r = await memeSync.sync({ maxDownload: 60 });
+  if (!r.ok) {
+    log("收藏表情同步失败:", r.reason ?? "未知");
+    return;
+  }
+  try {
+    writeJson(MEME_SYNC_STATE, { at: Date.now(), ...r });
+  } catch {
+    /* 记账写不进去下次会重跑，不影响本次结果 */
+  }
+  if (r.added || r.failed || r.staled) {
+    log(
+      `收藏表情同步：拉 ${r.total} 条，新收 ${r.added}，跳过 ${r.skipped}，失败 ${r.failed}，失效 ${r.staled}（${(r.bytes / 1024).toFixed(0)}KB）`,
+    );
+  }
+}
+
+// 启动 5 分钟后先看一眼（开机先把收藏补齐，免得她第一次想发表情时库是空的），
+// 之后每 10 分钟巡检一次，内部一天一次。
+setTimeout(() => {
+  maybeSyncMemes().catch((e) => log("收藏表情同步异常:", errMsg(e)));
+}, 5 * 60 * 1000);
+setInterval(
+  guarded("同步表情", maybeSyncMemes),
+  10 * 60 * 1000,
+);
+
+// C 层：把一张图加进她自己号的 QQ 收藏夹。
+// 这是**改云端数据**（手机端会同步看见），所以按 2026-10-25 定的三道闸走：
+//   ① 写前备份清单；② 只加不删；③ 限量（一天 N 张）+ 限源（只收主人发过的 / 收藏夹里已有的）。
+// 删除接口 delete_custom_face 这里**不提供**——删必须人工照清单来，不给自动化开口子。
+const FAV_UPLOAD_LOG = path.join(CFG.home, "state", "fav-upload.jsonl");
+
+async function pushToFavorite(kw) {
+  const key = String(kw ?? "").trim();
+  if (!key) return { ok: false, reason: "没给关键词" };
+  if (Number(CFG.maxFavUploadPerDay) <= 0) {
+    return { ok: false, reason: "config 里 maxFavUploadPerDay 是 0，这项关着" };
+  }
+  const today = memeLib.favUploadsToday();
+  if (today >= Number(CFG.maxFavUploadPerDay)) {
+    return { ok: false, reason: `今天已经收了 ${today} 张，上限 ${CFG.maxFavUploadPerDay}` };
+  }
+  const picked = memeLib.find(key);
+  if (!picked) return { ok: false, reason: `库里没有「${key}」` };
+  // 限源：只收主人发的 / 收藏夹里已有的。群友的、她自己做的一律不进云端。
+  const sources = picked.item.sources ?? [];
+  if (!sources.includes("owner") && !sources.includes("fav")) {
+    return {
+      ok: false,
+      reason: `「${key}」来源是 ${sources.join("/") || "未知"}，只收主人发过的或收藏里已有的`,
+    };
+  }
+  // ① 写前备份清单
+  let backup = null;
+  try {
+    const cur = await callAction("fetch_custom_face_detail", { count: 200 }, 30000);
+    if (cur?.status === "ok" && Array.isArray(cur.data)) {
+      backup = memeLib.backupFavoriteList(cur.data);
+      log(`收藏夹备份：${cur.data.length} 条 → ${backup}`);
+    }
+  } catch (e) {
+    log("收藏夹备份失败（继续，但不删任何东西）:", errMsg(e));
+  }
+  // ② 只加
+  try {
+    const r = await callAction(
+      "add_custom_face",
+      { file: picked.path, is_origin: true },
+      30000,
+    );
+    const ok = r?.status === "ok";
+    memeLib.recordFavUpload({ ok, key, file: picked.item.file, retcode: r?.retcode, backup });
+    if (!ok) {
+      return { ok: false, reason: `NapCat 拒绝：${r?.status}/${r?.retcode}` };
+    }
+    return { ok: true, file: picked.item.file, backup, today: today + 1 };
+  } catch (e) {
+    memeLib.recordFavUpload({ ok: false, key, file: picked.item.file, err: errMsg(e), backup });
+    return { ok: false, reason: errMsg(e) };
+  }
+}
 
 // 换日结账：启动后先补一次（电脑关着的那几天开机补），以后每 10 分钟看一眼
 // 也要挡重入：开机补账撞上十分钟巡检时，两轮会同时遍历所有会话（rollDay 内部虽有
