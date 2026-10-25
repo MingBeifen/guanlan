@@ -24,6 +24,15 @@ import * as cite from "./cite.mjs";
 // 两层：节律靠本地统计（零成本、可回溯），是谁/在乎什么/最近靠每晚一次模型归纳。
 import * as profile from "./user-profile.mjs";
 import { applyName, takeNameMarkers, ensureFallbackModel, fallbackModel, writeProfile } from "../bin/profile.mjs";
+// 当前状态四域（2026-10-25 解耦）：原来 pro 是这里的模块级可变对象、101 处随手读写，
+// 现在拆成 bot/state.mjs（共享骨架 + 唯一写盘）+ 四个域模块。
+// ⚠️ 拆分三条硬约束：字段名一律不改（面板读 17 个字段）、仍只写 proactive.json 一个文件、
+//    兜底集中在 state.mjs 的 initState() 一处。
+import * as stateMod from "./state.mjs";
+import * as moodMod from "./mood.mjs";
+import * as lifeMod from "./life.mjs";
+import * as greetMod from "./greet.mjs";
+import * as muteMod from "./mute.mjs";
 
 // ---------- 配置 ----------
 // 令牌必须放在 URL 查询串里（2026-10-16 实测）：Node 自带的全局 WebSocket 会**静默忽略**
@@ -5145,87 +5154,79 @@ const THOUGHT_DIR = path.join(CFG.home, "想法");
 // 想法里每条起头标 news-[文件名]，事后一眼分得清哪句是读来的、哪句是自己经历过的。
 const NEWS_DIR = path.join(CFG.home, "news");
 
-function freshPro() {
-  return {
-    busy: false,
-    busySince: null,
-    busyNote: "",
-    asleep: false,
-    sleepSince: null,
-    sleepNote: "",
-    sleepKind: "", // "nap" 午睡 / "night" 过夜：醒了的口径不一样（2026-10-20 主人要的）
-    mood: 62,
-    moodAt: Date.now(),
-    greet: {},
-    pendingGreet: null, // { kind, day }：本该发却撞上忙/睡/谷时的问候，宽限期内补
-    planDay: null,
-    nightDay: null,
-    ownDay: null,
-    lastOwnAt: 0,
-    // 群内沉默标签（2026-10-25 主人要的）：{"群号":{"until":ms,"at":ms,"note":""}}
-    // 只挂「群里的主动与接话」，@ 她 / QQ 回复她 / 戳一戳照常答，私聊一点不受影响。
-    // 用对象而不是数组，是为了顺手存过期时刻和当时那句原因。
-    groupMute: {},
-  };
+
+// 状态改为四域模块托管（2026-10-25）：这里只初始化一次，之后所有读写都走
+// stateMod / moodMod / lifeMod / greetMod / muteMod 的函数。
+// 兜底与清历史键都在 initState() 里（硬约束③：集中一处，不散到四个域模块）。
+const pro = stateMod.initState(PROACTIVE_PATH, log);
+stateMod.getState(); // 保持 pro 这个引用可用（下面还有旧代码读 pro.xxx）
+moodMod.initMood({
+  log,
+  isBusy: lifeMod.isBusy,
+  isAsleep: lifeMod.isAsleep,
+});
+lifeMod.initLife({
+  log,
+  touchMoodAt: moodMod.touchMoodAt,
+  moodMove: moodMod.moodMove,
+});
+greetMod.initGreet({ isQuiet: lifeMod.isQuiet });
+muteMod.initMute({ log });
+// 薄封装：原函数名逐一保留，调用点一个字都不用改
+const savePro = () => stateMod.writeState();
+const isBusy = () => lifeMod.isBusy();
+const setBusy = (on, note) => lifeMod.setBusy(on, note);
+const isAsleep = () => lifeMod.isAsleep();
+const isNap = () => lifeMod.isNap();
+const setAsleep = (on, note, kind) => lifeMod.setAsleep(on, note, kind);
+const noteOwnerAwakeFromChat = (t) => lifeMod.noteOwnerAwakeFromChat(t);
+const isQuiet = () => lifeMod.isQuiet();
+const napNow = (ts) => lifeMod.napNow(ts);
+const moodLabel = (m) => moodMod.moodLabel(m);
+const moodDecay = () => moodMod.moodDecay();
+const moodMove = (d, why) => moodMod.moodMove(d, why);
+function urgeRhythm() {
+  const now = Date.now();
+  const hour = bjParts(now).hour;
+  if (isAsleep()) return URGE_RHYTHM.asleep; // 主人睡了：几乎不推进
+  if (isBusy()) return URGE_RHYTHM.occupied;
+  // 深夜（2-9 点）已经由调用方挡掉了，这里只区分「还在活动」和「低能量」
+  if (hour >= 23 || hour < 7) return URGE_RHYTHM.resting;
+  if (pro.mood >= 60) return URGE_RHYTHM.phoneFocused;
+  if (pro.mood >= 35) return URGE_RHYTHM.available;
+  return URGE_RHYTHM.resting;
 }
-let pro = { ...freshPro(), ...readJson(PROACTIVE_PATH, {}) };
-pro.greet ??= {};
-pro.asleep ??= false;
-pro.sleepKind ??= "";
-pro.pendingGreet ??= null;
-pro.groupMute ??= {};
-// 2026-10-22：以前把「引用原文里的『我要睡了』」当成他说睡，留下的假睡眠状态读进来就作废
-// （sleepNote 存的是那句话本身，开头是引用段的说明这就一条）
-if (pro.asleep && /^\[引用的是这条：/.test(pro.sleepNote ?? "")) {
-  pro.asleep = false;
-  pro.sleepSince = null;
-  pro.sleepNote = "";
-  pro.sleepKind = "";
+const alterAccumulate = (n) => moodMod.alterAccumulate(n);
+const alterLine = () => moodMod.alterLine();
+function takeAlterMarker(text) {
+  const src = String(text ?? "");
+  let got = null;
+  const out = src
+    .replace(ALTER_RE, (_, n) => {
+      const v = Number(n);
+      if (Number.isFinite(v)) got = Math.max(ALTER_MIN, Math.min(ALTER_MAX, Math.round(v)));
+      return "";
+    })
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { text: out, alter: got };
 }
-// 2026-10-22 那套「她自己睡」（犯困说晚安、睡七小时、自己说早安）整块拆掉了，
-// 老状态里带过来的键顺手清掉，别留在盘上、也别让面板翻出来迷惑人（2026-10-23 主人要的）
-for (const k of [
-  "herAsleep",
-  "herDrowsy",
-  "herDrowsyAt",
-  "herDrowsyTold",
-  "heSaidNightAt",
-  "herSleepAt",
-  "herWakeAt",
-  "herWokenAt",
-  "herBedHour",
-  "herSleepDay",
-  "herWakeDay",
-  "herWakePendingDay",
-  "herWakePendingAt",
-  "herSleepNote",
-]) {
-  delete pro[k];
-}
-function savePro() {
-  try {
-    fs.mkdirSync(path.dirname(PROACTIVE_PATH), { recursive: true });
-    writeJson(PROACTIVE_PATH, pro);
-  } catch (e) {
-    log("主动生活状态没存上:", errMsg(e));
-  }
-}
+const greetPlan = (now) => greetMod.greetPlan(now);
+const groupMuted = (gid) => muteMod.groupMuted(gid);
+const groupMuteList = () => muteMod.groupMuteList();
+const setGroupMute = (gid, on, opts) => muteMod.setGroupMute(gid, on, opts);
+const parseGroupMuteCmd = (t) => muteMod.parseGroupMuteCmd(t);
+const parseGroupMuteHint = (t) => muteMod.parseGroupMuteHint(t);
+
 
 // —— 忙闲开关 ——
 // 只认主人私聊、且看开头那几个字，免得正常聊天里顺口一个词就误触发。
 const BUSY_RE =
   /^(我?(现在|这会儿|这边|马上)?(在忙|有事|有点事|忙着)|先不聊|别吵|等忙完|待会儿说|一会儿说|等会说|回头聊)/;
 const IDLE_RE = /(不忙了|忙完了|我回来了|我回啦|闲下来|有空了|搞定了|我好了)/;
-function isBusy() {
-  return Boolean(pro.busy);
-}
-function setBusy(on, note = "") {
-  pro.busy = Boolean(on);
-  pro.busySince = on ? Date.now() : null;
-  pro.busyNote = on ? String(note).slice(0, 60) : "";
-  if (!on) pro.moodAt = Date.now();
-  savePro();
-}
+
+
 
 // —— 睡眠开关（2026-10-20 主人要的）——
 // 他说一句「去睡了 / 晚安」，就当他睡了：主动消息全静音；等他醒了（说「醒了 / 我起来了 / 早」）
@@ -5245,45 +5246,15 @@ const SLEEP_GRACE_MS = 20 * 60 * 1000;
 // 午睡的钟点段：10:00 到 16:59 之间说去睡都算小睡，其余算过夜
 const NAP_FROM_HOUR = 10;
 const NAP_TO_HOUR = 17;
-function napNow(ts = Date.now()) {
-  const { hour } = bjParts(ts);
-  return hour >= NAP_FROM_HOUR && hour < NAP_TO_HOUR;
-}
-function isAsleep() {
-  return Boolean(pro.asleep);
-}
-function isNap() {
-  return Boolean(pro.asleep && pro.sleepKind === "nap");
-}
-function setAsleep(on, note = "", kind = "") {
-  pro.asleep = Boolean(on);
-  pro.sleepSince = on ? Date.now() : null;
-  pro.sleepNote = on ? String(note).slice(0, 60) : "";
-  pro.sleepKind = on ? kind || (napNow() ? "nap" : "night") : "";
-  savePro();
-}
+
+
+
+
 // 2026-10-24：主人在群里开口也算「他醒了」。以前睡/醒只认私聊，12:43 重启后那几分钟他先在群里冒头，
 // 我还当他睡着，群里不接话、主动消息也压着。群里的只用来「醒」，不用来「睡」。
-function noteOwnerAwakeFromChat(t) {
-  if (!pro.asleep) return false;
-  const s = String(t || "").trim();
-  if (!s) return false;
-  if (SLEEP_RE.test(s) && !SLEEP_NOT_GOING_RE.test(s)) return false; // 在群里说要去睡，不算醒
-  const canAutoWake = !isNap();
-  const longEnough = Date.now() - (pro.sleepSince ?? 0) > SLEEP_GRACE_MS;
-  if (!(WAKE_RE.test(s) || (canAutoWake && longEnough))) return false;
-  const wasNap = isNap();
-  setAsleep(false);
-  moodMove(4, "主人醒了");
-  log(
-    `主人在群里开口了：${wasNap ? "午睡" : "过夜"}结束，睡眠状态解除，主动消息恢复`,
-  );
-  return true;
-}
+
 // 忙和睡都是"别主动开口"；他说话照常回
-function isQuiet() {
-  return isBusy() || isAsleep();
-}
+
 
 // ---------- 群内沉默标签（2026-10-25 主人要的） ----------
 // 主人原话：让观澜在群聊中闭嘴，只有他能 @ 她；他说「可以说话了」才解除。
@@ -5298,55 +5269,13 @@ function isQuiet() {
 const GROUP_MUTE_DEFAULT_MS = 2 * 60 * 60 * 1000; // 默认 2 小时
 
 /** 这个群现在是不是处于沉默。顺手把过期项清掉（读的时候判，省一个定时器）。 */
-function groupMuted(gid) {
-  const id = String(Number(gid) || 0);
-  const slot = pro.groupMute?.[id];
-  if (!slot) return false;
-  const until = Number(slot.until) || 0;
-  if (until && Date.now() >= until) {
-    delete pro.groupMute[id];
-    savePro();
-    log(`群 ${id} 的沉默标签到点了，自动解除`);
-    return false;
-  }
-  return true;
-}
+
 
 /** 当前所有还在沉默的群（面板/自检要看）。 */
-function groupMuteList() {
-  const out = [];
-  for (const gid of Object.keys(pro.groupMute || {})) {
-    if (groupMuted(gid)) {
-      const s = pro.groupMute[gid] || {};
-      out.push({
-        group: Number(gid),
-        until: Number(s.until) || 0,
-        at: Number(s.at) || 0,
-        note: String(s.note || ""),
-      });
-    }
-  }
-  return out;
-}
+
 
 /** 开/关某个群的沉默。on=true 时默认 2 小时过期。 */
-function setGroupMute(gid, on, { note = "", ttlMs = GROUP_MUTE_DEFAULT_MS } = {}) {
-  const id = String(Number(gid) || 0);
-  pro.groupMute ??= {};
-  if (on) {
-    const ms = Number(ttlMs) > 0 ? Number(ttlMs) : GROUP_MUTE_DEFAULT_MS;
-    pro.groupMute[id] = {
-      until: Date.now() + ms,
-      at: Date.now(),
-      note: String(note || "").slice(0, 60),
-    };
-    log(`群 ${id} 沉默标签打开（${Math.round(ms / 60000)} 分钟后自动解除）`);
-  } else {
-    delete pro.groupMute[id];
-    log(`群 ${id} 沉默标签解除`);
-  }
-  savePro();
-}
+
 
 // 解析「闭嘴 / 可以说话了」这类口令。返回 { on, group } 或 null。
 // 设计口径（和 reboot 一致）：**整条消息**就得是这句话，中间夹带别的话不算，防误触。
@@ -5378,21 +5307,7 @@ const MUTE_OFF_RE = new RegExp(
     "|(?:你)?(?:说话|开口)吧)" +
     MUTE_CMD_TAIL,
 );
-function parseGroupMuteCmd(raw) {
-  const t = String(raw ?? "").trim();
-  if (!t || t.length > 40) return null; // 一长串话里带个「闭嘴」多半在聊别的
-  // 先摘出末尾的群号（只有 5-12 位纯数字才算）
-  let group = 0;
-  let body = t;
-  const m = t.match(/(\d{5,12})[。.!！\s]*$/);
-  if (m) {
-    group = Number(m[1]);
-    body = t.slice(0, m.index).trim();
-  }
-  if (MUTE_ON_RE.test(body)) return { on: true, group };
-  if (MUTE_OFF_RE.test(body)) return { on: false, group };
-  return null;
-}
+
 
 // 群里的沉默口令（2026-10-25 16:3x 主人要的）：
 // 原话「我在群里让你别说话也能触发静默（在这个群），只要带让你闭嘴或者让你别说话的这些词也算触发」。
@@ -5404,60 +5319,11 @@ function parseGroupMuteCmd(raw) {
 // 返回 { on } 或 null。解除仍然认整条「可以说话了」这类（MUTE_OFF_RE），群里也只认整条。
 const GROUP_MUTE_HINT_RE =
   /(闭嘴|别(?:再)?说话|不要说话|不许说话|别出声|别吭声|别在群里说话|群里别说话|安静(?:点|点儿|会儿)|消停(?:会)?儿?)/;
-function parseGroupMuteHint(raw) {
-  const t = String(raw ?? "").trim();
-  if (!t || t.length > 40) return null;
-  // 在问这个功能、或者拿它做测试的句子：那是聊天，不是口令
-  // （「能不能」「可不可以」不算——「你能不能别说话了」本身就是最常见的下命令说法）
-  if (
-    /(为什么|怎么|咋|是不是|有没有|测试|试试|试一下|测一下)/.test(t)
-  ) {
-    return null;
-  }
-  // 「别说话的功能」「闭嘴的意思」这种在指代口号本身，不触发
-  if (/(?:闭嘴|说话|出声|吭声|安静)的/.test(t)) return null;
-  // 转述别人说过的话（他说别说话 / 你刚才说闭嘴）——在聊事，不是在下命令
-  if (
-    /(?:他说|她说|你说|我说|谁说|人家说|跟我说|跟我说过)[^。！？!?]{0,6}(?:闭嘴|别说话|别出声|别吭声|安静(?:点|会儿))/i.test(
-      t,
-    )
-  ) {
-    return null;
-  }
-  if (GROUP_MUTE_HINT_RE.test(t)) return { on: true };
-  if (MUTE_OFF_RE.test(t)) return { on: false };
-  return null;
-}
-function moodLabel(m = pro.mood) {
-  if (m >= 78) return "心情很好";
-  if (m >= 60) return "心情不错";
-  if (m >= 45) return "还行";
-  if (m >= 30) return "有点闷";
-  if (m >= 15) return "低落";
-  return "很丧";
-}
+
+
 // 没人搭理就慢慢回落：低到 25 就停住（不至于变负数），忙的时候停在 50
-function moodDecay() {
-  const now = Date.now();
-  const hrs = (now - (pro.moodAt ?? now)) / 3600000;
-  if (hrs < 1) return;
-  const floor = isBusy() ? 50 : 25;
-  const drop = Math.min(14, Math.round(hrs * 2));
-  const next = Math.max(floor, Math.round(pro.mood - drop));
-  if (next !== pro.mood) {
-    log(`心情自然回落：${pro.mood} -> ${next}（${hrs.toFixed(1)} 小时没动静）`);
-    pro.mood = next;
-  }
-  pro.moodAt = now;
-  savePro();
-}
-function moodMove(d, why) {
-  const before = pro.mood;
-  pro.mood = Math.max(0, Math.min(100, Math.round(pro.mood + d)));
-  pro.moodAt = Date.now();
-  if (before !== pro.mood) log(`心情 ${before} -> ${pro.mood}（${why}）`);
-  savePro();
-}
+
+
 
 // —— Urge 弹性推进（2026-10-23 对照 HDS-Interlude 加的）——
 // 原来主动搭话是「最后一句 + 30min~2h 均匀随机」，不管你们刚聊得多热闹都一样。
@@ -5485,17 +5351,7 @@ function urgeDensityFactor(msgTimes = [], now = Date.now()) {
 // 「在忙」会被 maybeProactivePing 开头的 isQuiet() 整轮挡掉，
 // 「睡着」压根没有任何地方 return 它。这里补上 asleep 判断，
 // 并且把 isBusy 放到靠后（万一将来调用方不再前置挡，这里也能正确降速）。
-function urgeRhythm() {
-  const now = Date.now();
-  const hour = bjParts(now).hour;
-  if (isAsleep()) return URGE_RHYTHM.asleep; // 主人睡了：几乎不推进
-  if (isBusy()) return URGE_RHYTHM.occupied;
-  // 深夜（2-9 点）已经由调用方挡掉了，这里只区分「还在活动」和「低能量」
-  if (hour >= 23 || hour < 7) return URGE_RHYTHM.resting;
-  if (pro.mood >= 60) return URGE_RHYTHM.phoneFocused;
-  if (pro.mood >= 35) return URGE_RHYTHM.available;
-  return URGE_RHYTHM.resting;
-}
+
 // 把基础间隔按两个因子缩放，得到这一轮实际的「安静多久才考虑冒头」
 function urgeInterval(baseMs, msgTimes = [], now = Date.now()) {
   const d = urgeDensityFactor(msgTimes, now);
@@ -5662,55 +5518,12 @@ const ALTER_DECAY_PER_TURN = 0.15;
 const ALTER_RE = /[\[【［]\s*(?:氛围|alter)\s*[:：]\s*([+-]?\d{1,2}(?:\.\d+)?)\s*[\]】］]/gi;
 
 // 从回复里摘出 [氛围:±n]；alter 为 null 表示这轮模型没写
-function takeAlterMarker(text) {
-  const src = String(text ?? "");
-  let got = null;
-  const out = src
-    .replace(ALTER_RE, (_, n) => {
-      const v = Number(n);
-      if (Number.isFinite(v)) got = Math.max(ALTER_MIN, Math.min(ALTER_MAX, Math.round(v)));
-      return "";
-    })
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return { text: out, alter: got };
-}
+
 
 // 累积 + 自然衰减。正数=趋于严肃/紧张，负数=趋于轻松/活跃（沿用 HDS 定义）。
-function alterAccumulate(delta) {
-  const prev = Number(pro.alterScore) || 0;
-  let next = prev * (1 - ALTER_DECAY_PER_TURN);
-  if (typeof delta === "number") next += delta;
-  next = Math.max(-30, Math.min(30, next));
-  pro.alterScore = next;
-  pro.alterAt = Date.now();
 
-  const crossed = Math.abs(next) >= ALTER_THRESHOLD;
-  const curSign = Math.sign(next);
-  const oldSign = Math.sign(Number(pro.alterNoteSign) || 0);
-  if (crossed && (curSign !== oldSign || !pro.alterNote)) {
-    const heavy = curSign > 0;
-    const intensity =
-      Math.abs(next) >= 20 ? "很明显" : Math.abs(next) >= 12 ? "有点" : "略微";
-    pro.alterNote = heavy
-      ? `聊天气氛${intensity}偏严肃、拘着；你说话会不自觉地更谨慎、更收着一点，别太跳。`
-      : `聊天气氛${intensity}偏轻松、开着玩笑；你说话会不自觉更活泼、更爱逗，别端着。`;
-    pro.alterNoteSign = curSign;
-    log(`氛围偏移累积 ${Math.round(next)}（${heavy ? "偏严肃" : "偏轻松"}），记一句氛围描述`);
-  } else if (Math.abs(next) < ALTER_THRESHOLD * 0.5 && pro.alterNote) {
-    pro.alterNote = "";
-    pro.alterNoteSign = 0;
-    log(`氛围偏移回落到 ${Math.round(next)}，氛围描述清掉`);
-  }
-  savePro();
-}
 // 注入用的那一行（没有氛围就返回空串）
-function alterLine() {
-  const note = String(pro.alterNote || "").trim();
-  if (!note) return "";
-  return `[${note}（这是最近几轮攒下来的氛围，不是他说的，别当事实引用）]`;
-}
+
 
 
 // 她沙箱里 https 不通，所以由机器人进程自己拉，再当纯数据塞进 prompt。
@@ -5891,23 +5704,7 @@ function greetPrompt(kind, day, ann, extra = {}) {
 }
 
 // 纯判断：某个时刻该不该发问候、是不是补发（不发、不写盘，方便预演核对）
-function greetPlan(now = Date.now()) {
-  const { day, hour, minute } = bjParts(now);
-  const active = GREET_KEYS.find((k) => inWindow(GREET_WINDOWS[k], hour, minute));
-  const grace = GREET_KEYS.find((k) => inWindow(GREET_WINDOWS[k], hour, minute, GREET_GRACE_MIN));
-  const quiet = isQuiet(); // 忙 / 睡了
-  const blocking = active ?? grace;
-  const pendingKind =
-    pro.pendingGreet?.day === day &&
-    inWindow(GREET_WINDOWS[pro.pendingGreet.kind], hour, minute, GREET_GRACE_MIN)
-      ? pro.pendingGreet.kind
-      : null;
-  const kind = active ?? pendingKind;
-  // 谷时规矩：工作日 9-12、14-18 不主动开口；但「早安」例外（主人 2026-10-20 要的：
-  // 早上 8-10 与谷时重叠，不放宽的话工作日基本发不出去、也补不了）
-  const peak = isPeakHour(now) && (kind ?? blocking) !== "morning";
-  return { day, hour, minute, active, grace, blocking, quiet, peak, pendingKind, kind, late: Boolean(kind) && !active };
-}
+
 
 async function maybeTimeGreeting() {
   if (pauseMode() !== "off") return;
@@ -5922,19 +5719,15 @@ async function maybeTimeGreeting() {
     pro.greet[blocking] !== day &&
     (pro.pendingGreet?.kind !== blocking || pro.pendingGreet?.day !== day)
   ) {
-    pro.pendingGreet = { kind: blocking, day };
-    savePro();
+    greetMod.setPendingGreet(blocking, day);
     log(`这一档问候先压着（${quiet ? (isBusy() ? "主人在忙" : "主人睡了") : "谷时/撞了别的任务"}）：${blocking}`);
   }
   if (quiet || peak) return;
-  if (pro.pendingGreet && pro.pendingGreet.day !== day) pro.pendingGreet = null;
+  if (pro.pendingGreet && pro.pendingGreet.day !== day) greetMod.clearPendingGreet();
   const kind = plan.kind;
   if (!kind) return;
   if (pro.greet[kind] === day) {
-    if (plan.pendingKind) {
-      pro.pendingGreet = null;
-      savePro();
-    }
+    if (plan.pendingKind) greetMod.clearPendingGreet();
     return;
   }
   const ann = anniversariesToday().join("、");
@@ -5953,11 +5746,8 @@ async function maybeTimeGreeting() {
     log("问候没生成成功，这轮跳过:", r.error);
     return;
   }
-  pro.greet[kind] = day;
-  if (pro.pendingGreet?.kind === kind) pro.pendingGreet = null;
-  if (kind === "morning") pro.planDay = day;
-  if (kind === "night") pro.nightDay = day;
-  savePro();
+  // 记账走 greet 域的唯一入口（2026-10-25 解耦）：它内部就是原来这四行
+  greetMod.markGreetSent(kind, day);
   await replyToOwnerAndArchive(r.text, { why: `问候 ${kind}` });
   log(`已发${kind}问候${extra.catchUp ? "（补发）" : ""}: ${r.text.slice(0, 50).replace(/\n/g, " ")}`);
 }
@@ -6144,8 +5934,7 @@ async function maybeOwnThing() {
     log("自己的事没做成，今晚算了:", r.error);
     return;
   }
-  pro.ownDay = day;
-  pro.lastOwnAt = now;
+  greetMod.markOwnDone(day, now);
   moodMove(2, "自己做了点事");
   // 2026-10-25 加：她刚写完自己的想法，趁热收进长期记忆。
   // 为什么放在这里而不是定时扫：只有这一刻文件一定是新的、且她刚想完。
@@ -9187,6 +8976,141 @@ if (process.argv.includes("--archive-test")) {
   process.exit(bad ? 1 : 0);
 }
 
+// 状态四域自检（2026-10-25 解耦配套）：不连 QQ、不花钱、不写盘
+// 用法：node bot/whale-bot.mjs --state-test
+//
+// 验什么：
+//   ① 四域模块加载正常、能互相调通（跨域读走注入，不是循环 import）；
+//   ② 状态字段 20 个一个不少（面板读的就是这批，少一个就静默失效）；
+//   ③ 读写往返：写进去 → 读出来 → 落盘 → 重新加载还一致；
+//   ④ 各域的关键判定（心情回落/忙睡总闸/问候窗口/沉默过期）行为正确；
+//   ⑤ 跑完把状态原样还原，绝不把测试值留在盘上。
+if (process.argv.includes("--state-test")) {
+  let bad = 0;
+  const eq = (label, got, expect) => {
+    const ok = JSON.stringify(got) === JSON.stringify(expect);
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${label} → ${JSON.stringify(got)}  期望 ${JSON.stringify(expect)}`,
+    );
+  };
+  const ok = (label, cond, detail = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
+  };
+
+  // 用真状态文件跑，但先备份、跑完还原（这是「不写盘」的做法）
+  const stPath = PROACTIVE_PATH;
+  let backup = null;
+  try {
+    backup = fs.readFileSync(stPath, "utf8");
+  } catch {
+    backup = null;
+  }
+  const st = stateMod.getState();
+  const snapshot = JSON.parse(JSON.stringify(st));
+
+  try {
+    console.log("=== 一、字段完整性 ===");
+    const want = [
+      "busy", "busySince", "busyNote",
+      "asleep", "sleepSince", "sleepNote", "sleepKind",
+      "mood", "moodAt",
+      "greet", "pendingGreet", "planDay", "nightDay", "ownDay", "lastOwnAt",
+      "groupMute",
+    ];
+    const missing = want.filter((k) => !(k in st));
+    ok("16 个核心字段都在", missing.length === 0, missing.length ? `缺 ${missing.join(",")}` : "");
+
+    console.log("\n=== 二、跨域读（不能形成循环 import）===");
+    ok("lifeMod.isBusy 可调用", typeof lifeMod.isBusy === "function");
+    ok("moodMod.moodOf 可调用", typeof moodMod.moodOf === "function");
+    lifeMod.setBusy(false);
+    ok("闲下来时心情时刻被刷新（life → mood 的注入生效）", Number(st.moodAt) > 0);
+
+    console.log("\n=== 三、忙睡总闸 ===");
+    lifeMod.setBusy(true, "自检");
+    eq("忙时 isQuiet=true", lifeMod.isQuiet(), true);
+    lifeMod.setBusy(false);
+    eq("不忙时 isQuiet=false", lifeMod.isQuiet(), false);
+    lifeMod.setAsleep(true, "自检睡", "nap");
+    eq("午睡时 isNap=true", lifeMod.isNap(), true);
+    eq("午睡时 isQuiet=true", lifeMod.isQuiet(), true);
+    lifeMod.setAsleep(false);
+    eq("醒后 isAsleep=false", lifeMod.isAsleep(), false);
+
+    console.log("\n=== 四、心情回落（floor 由忙闲决定）===");
+    // 顺序要紧：先 setBusy 再改 moodAt。反过来的话 setBusy(false) 会触发
+    // touchMoodAt() 把时刻刷成「现在」，回落直接 return（3 小时白设了）。
+    // 这不是新 bug——原实现里 setBusy(false) 同样会写 pro.moodAt。
+    lifeMod.setBusy(false);
+    st.mood = 90;
+    st.moodAt = Date.now() - 3 * 3600e3; // 假装 3 小时没动
+    const before1 = moodMod.moodOf();
+    moodMod.moodDecay();
+    const after1 = moodMod.moodOf();
+    ok("不忙时确实回落了", after1 < before1, `${before1} -> ${after1}`);
+    ok("不忙时回落后不低于 25", after1 >= 25, `现在 ${after1}`);
+    st.mood = 30;
+    st.moodAt = Date.now() - 10 * 3600e3;
+    lifeMod.setBusy(true);
+    moodMod.moodDecay();
+    ok("忙时回落后不低于 50", moodMod.moodOf() >= 50, `现在 ${moodMod.moodOf()}`);
+    lifeMod.setBusy(false);
+
+    console.log("\n=== 五、心情加减与边界 ===");
+    st.mood = 95;
+    moodMod.moodMove(10, "自检加分");
+    ok("加分封顶 100", moodMod.moodOf() <= 100, `现在 ${moodMod.moodOf()}`);
+    st.mood = 2;
+    moodMod.moodMove(-10, "自检扣分");
+    ok("扣分不低到负数", moodMod.moodOf() >= 0, `现在 ${moodMod.moodOf()}`);
+
+    console.log("\n=== 六、问候判定（四个钟点）===");
+    const base = Date.parse("2026-10-26T00:00:00+08:00"); // 周一
+    for (const [h, mi, expect] of [
+      [8, 30, "morning"],
+      [12, 0, "noon"],
+      [21, 45, "night"],
+      [4, 0, null],
+    ]) {
+      const p = greetMod.greetPlan(base + h * 3600e3 + mi * 60e3);
+      eq(`greetPlan @ ${h}:${String(mi).padStart(2, "0")}`, p.kind ?? null, expect);
+    }
+
+    console.log("\n=== 七、沉默按群独立 + 自动过期 ===");
+    st.groupMute = {};
+    muteMod.setGroupMute(111111, true, { note: "自检" });
+    eq("开群 A 后 A 沉默", muteMod.groupMuted(111111), true);
+    eq("群 B 不受影响", muteMod.groupMuted(222222), false);
+    st.groupMute["111111"].until = Date.now() - 1000;
+    eq("过期后自动解除", muteMod.groupMuted(111111), false);
+    eq("过期项已剔除", Object.keys(st.groupMute).length, 0);
+
+    console.log("\n=== 八、落盘往返（硬约束②：仍写一个文件）===");
+    st.mood = 77;
+    st.busyNote = "往返测试";
+    stateMod.writeState();
+    const reload = JSON.parse(fs.readFileSync(stPath, "utf8"));
+    eq("落盘后 mood 一致", reload.mood, 77);
+    eq("落盘后 busyNote 一致", reload.busyNote, "往返测试");
+    ok("只有一个状态文件", !fs.existsSync(path.join(CFG.home, "state", "mood.json")));
+  } finally {
+    // 还原本来的状态：测试值一条都不留
+    try {
+      Object.keys(st).forEach((k) => delete st[k]);
+      Object.assign(st, snapshot);
+      stateMod.writeState();
+      if (backup !== null) fs.writeFileSync(stPath, backup, "utf8");
+    } catch (e) {
+      console.log(`⚠ 状态还原失败（请手动检查 ${stPath}）：${errMsg(e)}`);
+    }
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
 // ---------- 群内沉默标签自检：不连 QQ、不花钱、不写盘（2026-10-25） ----------
 // 验两件事：口令认得对不对；按群独立 + 自动过期对不对。
 if (process.argv.includes("--group-mute-test")) {
@@ -9260,7 +9184,7 @@ if (process.argv.includes("--group-mute-test")) {
 
   console.log("\n=== 二、按群独立 + 自动过期 ===");
   // 这一段借用真 pro 跑，跑完**原样恢复**，绝不把测试状态留在盘上
-  const savedMute = JSON.stringify(pro.groupMute || {});
+  const savedMute = JSON.stringify(stateMod.get("groupMute", {}) || {});
   const G1 = Number(CFG.groupAllow?.[0] || 1000000002);
   const G2 = Number(CFG.groupAllow?.[1] || G1 + 1);
   try {
