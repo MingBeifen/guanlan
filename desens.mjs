@@ -58,9 +58,9 @@ const MAP = loadMap();
 
 // 需要扫的文件（只扫代码与模板，不扫 node_modules / .git / 运行数据）
 // ⚠️ 2026-10-25 补：原来这里没有 `home` 根目录本身，导致 `home/AGENTS.md`
-// 这类**散在 home 下的单文件**从来没被扫过——而它里面就写着真实 QQ 号
-// （「只有 QQ 2990025241 这一条号是爸爸」），副本里已经被 git 跟踪。
-// 现在把 home 也纳入，靠 SKIP_DIRS 排掉不该动的大目录。
+// 这类**散在 home 下的单文件**从来没被扫过——而它里面就写着**真实号与主人昵称**，
+// 副本里已经被 git 跟踪。现在把 home 也纳入，靠 SKIP_DIRS 排掉不该动的大目录。
+// （本条注释自己也踩过坑：第一版把真号原文写进注释里，等于在公开仓库里说明要藏什么。）
 const SCAN_DIRS = ["bot", "bin", "panel", "home", "home/memory", "home/tools", "home/voice"];
 const SCAN_EXT = new Set([".mjs", ".js", ".html", ".json", ".py", ".ps1", ".md", ".bat"]);
 const SKIP_FILES = new Set([
@@ -145,11 +145,11 @@ for (const file of files) {
   }
 
   // 特殊：**文档（.md）里的主人昵称**也要脱敏（2026-10-25 补的漏）。
-  // 背景：`ownerOnly` 那条只删「词表里的单元素 `"萤"`」，不管散文。
-  // 而 `home/AGENTS.md` 全是散文——「外号叫〔昵称甲〕（萤取的）」「他叫萤」
+  // 背景：`ownerOnly` 那条只删「词表里的单元素」，不管散文。
+  // 而 `home/AGENTS.md` 全是散文——「外号叫…（某人取的）」「他叫…」
   // 这种句子里的主人昵称原样带出去了，脚本却报「干净」（它压根没扫 home 根目录）。
   // 现在：扫到 home 了，再补这一条按文档处理——**只对 .md 生效**，
-  // 因为代码里的单字「萤」可能是变量名/注释里的普通字，替换会误伤。
+  // 因为代码里的那个单字可能是变量名/注释里的普通字，替换会误伤。
   if (rel.endsWith(".md")) {
     for (const w of Array.isArray(MAP.ownerOnly) ? MAP.ownerOnly : []) {
       if (!w) continue;
