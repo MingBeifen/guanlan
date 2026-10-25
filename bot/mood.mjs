@@ -77,16 +77,32 @@ export function moodDecay() {
 // 越过阈值就注入一句「当前氛围」描述；不越过就只是记账。
 const ALTER_INJECT_THRESHOLD = 8;
 
+// 氛围分的上下限（2026-10-25 主人拍板加的）。
+// 为什么必须夹：这个分是**她自己**在回复末尾写 `[氛围:-n]` 累积出来的，没有上限时形成正反馈——
+// 越丧越写负分，负分越过阈值 8 就每轮被注入一句「当前氛围…」。实测那天累到 **-46.58**，
+// 等于每句话前头都被按一句「今天很糟」，她自己也一直在说「提不起劲」。
+// 夹到 ±20 之后：仍然是「有点偏」（超过阈值 8 还能感知），但不会越积越深到底。
+const ALTER_MIN = -20;
+const ALTER_MAX = 20;
+
 /** 累积一次氛围分。返回累积后的值（调用方要判断是否越阈值）。 */
 export function alterAccumulate(n) {
   const s = raw();
   const before = Number(s.alterScore ?? 0);
   const delta = Number(n) || 0;
-  s.alterScore = before + delta;
+  // 夹在 ±ALTER 之内：**这是硬护栏**，别改成「只夹不报」——日志要能看出撞过边界
+  // ⚠️ 变量名别叫 `raw`：本文件顶部 `import { get, raw, writeState }` 里的 `raw` 是
+  //    state.mjs 的读取函数，同名 const 会在函数作用域里把它遮蔽 → 整个函数 TDZ
+  //    报 `Cannot access 'raw' before initialization`，而且是在**发送消息那一步**炸，
+  //    表现为「控制台看得到她说话、QQ 一条都收不到」（2026-10-25 踩过一次，已改此名）。
+  const sum = before + delta;
+  const next = Math.max(ALTER_MIN, Math.min(ALTER_MAX, sum));
+  s.alterScore = next;
   s.alterAt = Date.now();
   // 同号继续累加、异号减弱；符号记在 alterNoteSign 里给面板显示
   s.alterNoteSign = Math.sign(s.alterScore) || 0;
   writeState();
+  if (next !== sum) logger(`氛围分撞边界：${before} + ${delta} = ${sum} → 夹到 ${next}（范围 ${ALTER_MIN}~${ALTER_MAX}）`);
   return s.alterScore;
 }
 

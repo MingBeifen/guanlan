@@ -1704,54 +1704,48 @@ function resolveLocalImage(raw) {
 // 注意：另一条更常用的路子是 [CQ:image,file=本机路径]（见 cqImageToBase64），两条都支持。
 // 2026-10-18 19:48 主人点头加 @：群里回复写 [@QQ号]，发出去就是真正的 @（OneBot 的 at 段）；
 // 私聊里、@全体、@0、@自己、一条里的第二个起，一律只把标记删掉、不留裸字。
-// 表情发出时刻（频率闸用）。键只有 "group" / "private" 两个，不按群号细分——
-// 按群分会让「两个群各发一张」绕过限制，而我们要防的是**她自己刷屏**。
-// ⚠️ 必须声明在 stickerGate **之前**：函数体里引用的 const 要在调用前初始化，
-//    否则运行期才抛 `Cannot access 'lastStickerAt' before initialization`（今天已踩过同类坑）。
-const lastStickerAt = new Map();
+// 2026-10-26 00:5x 主人说「把这个频率限制给去掉」：原来这里有一张 lastStickerAt，
+// 群聊 30 分钟 1 张、私聊 10 分钟 1 张。表、记账、闸全删了，现在只留场景闸和心情闸。
+// 「一次回复最多贴几张」没动（CFG.maxStickersPerReply），那条防的是同一条里连贴，不是跨条频率。
 
-// 群聊/私聊「这一条准不准带表情」的三道闸（2026-10-25 第二批，主人拍板全上）。
-// 顺序有意义：**先判场景，再判频率**——场景本来就不该发的，连频率都不用算。
+// 群聊/私聊「这一条准不准带表情」的两道闸（2026-10-25 第二批加，2026-10-26 去掉频率闸）。
+// 顺序有意义：**先判场景，再判心情**——场景本来就不该发的，白读一次心情。
 // 返回 boolean，`textToSegments` 里两处 `[贴纸:`/`[表情:` 分支都靠它放行。
 //
-// 三道闸分别防三种事故（都是真实会发生的，不是假想）：
+// 两道闸分别防两种事故（都是真实会发生的，不是假想）：
 //   ① 场景闸：群里在报错/求助/交代事情时突然贴一张猫 → 出戏。
 //      判据取「这条她要发的话」本身：过长（>80 字说明在正经说明）或含问号（在提问）就不发。
-//   ② 频率闸：群里 30 分钟最多 1 张、私聊 10 分钟 1 张 → 防刷屏。
-//      群里复用现成的 `groupSpokeAt`（她开口就记），私聊单独记一张表。
-//   ③ 心情闸：mood < 30 时不发「开心系」——丧的时候贴大笑图是情绪不一致。
+//   ② 心情闸：mood < 30 时不发「开心系」——丧的时候贴大笑图是情绪不一致。
 //      这条**只挡开心系**，其他情绪照发（低落本身发张「哭」是合适的）。
-function stickerGate(text, kind) {
+// 2026-10-26 改：返回 `{ ok, why }` 而不是布尔。
+// 起因是她自己报上来的——`--sticker-test` 有三道闸的用例打勾是假的：
+// 原来测试用 `const pass = sceneShouldBlock ? got === false : true`，不该被场景闸拦的
+// 那两条**恒为 true**，因为布尔返回值分不清「场景闸拦的」和「频率闸拦的」。
+// 只有把「谁拦的」说出来，测试才可能真正判定。
+// 兼容：仍然能被当布尔用（`stickerAllowed` 那边我跟着改了，不留兼容层避免两套语义并存）。
+function stickerGateDetail(text, kind) {
   try {
     const body = String(text ?? "");
     // ① 场景闸：只对群聊生效（私聊就算说得长，也是两个人之间的事）
     if (kind === "group") {
-      if (body.length > 80) return false;
-      if (/[？?]/.test(body)) return false;
+      if (body.length > 80) return { ok: false, why: "scene-long" };
+      if (/[？?]/.test(body)) return { ok: false, why: "scene-question" };
     }
-    // ③ 心情闸（先于频率闸：它更便宜，一次 state 读）
-    //    只在心情明确低落时收，且只拦「开心系」关键词——`[表情:哭]` 照发
+    // ② 心情闸：只在心情明确低落时收，且只拦「开心系」关键词——`[表情:哭]` 照发
     const m = moodOf();
     if (Number.isFinite(m) && m < 30 && /开心|哈哈|得意|卖萌|兴奋|撒娇|贴贴/.test(body)) {
-      return false;
+      return { ok: false, why: "mood" };
     }
-    // ② 频率闸
-    const now = Date.now();
-    if (kind === "group") {
-      // 群里按群号算；这条消息还没发出去时 groupSpokeAt 可能是旧的，
-      // 所以退一步用全局 30 分钟兜底，避免同一群里连发两张
-      const lastSticker = lastStickerAt.get("group") ?? 0;
-      if (now - lastSticker < 30 * 60 * 1000) return false;
-    } else {
-      const key = `private:${String(kind)}`;
-      void key; // 私聊不分对象，统一一张表
-      const lastSticker = lastStickerAt.get("private") ?? 0;
-      if (now - lastSticker < 10 * 60 * 1000) return false;
-    }
-    return true;
+    return { ok: true, why: "" };
   } catch {
-    return true; // 闸自己出错就放行（宁可多发一张，也别把回复整条吞掉）
+    // 闸自己出错就放行（宁可多发一张，也别把回复整条吞掉）
+    return { ok: true, why: "gate-error" };
   }
+}
+
+// 生产代码只关心「能不能发」，保留这个薄包装，调用点不用改语义。
+function stickerGate(text, kind) {
+  return stickerGateDetail(text, kind).ok;
 }
 
 
@@ -1822,13 +1816,13 @@ function textToSegments(text, kind = "private", limit = CFG.maxImagesPerReply) {
           },
         });
         usedSticker += 1;
-        lastStickerAt.set(kind === "group" ? "group" : "private", Date.now()); // 频率闸记账
       } else {
-        segs.push({ type: "text", data: { text: m[0] } }); // 找不到就原样留着，别吞
+        // 2026-10-26：与 `[表情]` 同步——标记不许漏给用户看（原来这里 `text: m[0]` 会把
+        // `[贴纸:路径]` 原样发出去）。这里的标记同样只是给代码的指令。
         log(
           abs
-            ? `⚠️ 表情超量（${usedSticker}/${stickerLimit}），这条留成文字：${raw}`
-            : `⚠️ 贴纸没找到文件，只能原样当文字发：${raw}`,
+            ? `⚠️ 贴纸超量（${usedSticker}/${stickerLimit}）或被闸拦，这条没发、标记已丢掉：${raw}`
+            : `⚠️ 贴纸没找到文件，标记已丢掉：${raw}`,
         );
       }
       last = m.index + m[0].length;
@@ -1863,19 +1857,36 @@ function textToSegments(text, kind = "private", limit = CFG.maxImagesPerReply) {
           },
         });
         usedSticker += 1;
-        lastStickerAt.set(kind === "group" ? "group" : "private", Date.now()); // 频率闸记账
         memeLib.bumpHit(picked.key);
         log(
           `表情库：发「${kw || "(空·按心情)"}」→ ${picked.item.file}` +
             `（${picked.via}，用过 ${Number(picked.item.hits ?? 0) + 1} 次）`,
         );
       } else {
-        segs.push({ type: "text", data: { text: m[0] } });
-        log(
-          picked
-            ? `⚠️ 表情超量（${usedSticker}/${stickerLimit}），「${kw}」留成文字`
-            : `⚠️ 表情没找到：「${kw || "(空)"}」（库里有 ${memeLib.stats().active} 张，有情绪标签的 ${memeLib.list(999).filter((x) => (x.emotion ?? []).length).length} 张）`,
-        );
+        // 2026-10-26 修（三个真问题，都是修好自检后立刻浮现的）：
+        //  ① **标记不能让用户看见**。原来这里 `text: m[0]` 把 `[表情:乖]` 原样塞回文字，
+        //     等于把内部标记发到 QQ 上。日志实测这类「留成文字」发生过 **119 次**。
+        //     改为**丢掉标记**（它本来就是给代码看的指令，不是内容）。
+        //  ② **原因不能报错**。原来只要 `picked` 有值就打「表情超量（0/2）」——
+        //     可 0 张发出去时明明是**闸拦的**，跟超量毫无关系，日志在误导排查方向。
+        //     现在分开报：闸拦 / 超量 / 没找到，三种各一句。
+        //  ③ **原因别写错**。把「为什么没发」分开报清楚，才能看出闸有没有误伤。
+        //     （原来的「频率闸记账」2026-10-26 连表一起删了，这条不再涉及。）
+        const blockedByGate = !stickerAllowed;
+        const overQuota = picked && usedSticker >= stickerLimit;
+        if (picked && overQuota) {
+          log(`⚠️ 表情超量（${usedSticker}/${stickerLimit}），「${kw}」这次没发、标记已丢掉`);
+        } else if (picked && blockedByGate) {
+          log(`⚠️ 表情被闸拦下（${stickerGateDetail(text, kind).why}），「${kw}」没发、标记已丢掉`);
+        } else {
+          log(
+            `⚠️ 表情没找到：「${kw || "(空)"}」（库里有 ${memeLib.stats().active} 张，` +
+              `有情绪标签的 ${memeLib.list(999).filter((x) => (x.emotion ?? []).length).length} 张），标记已丢掉`,
+          );
+        }
+        // 注意：这里**故意不 push 任何文字** —— 标记是给代码的指令，不是要说的话。
+        // 上一版「别吞内容」的顾虑在这里不成立：被吞的只是一个查不到的表情指令，
+        // 没有正文损失；而留着它会直接把 `[表情:xxx]` 暴露给用户。
       }
       last = m.index + m[0].length;
       changed = true;
@@ -9198,9 +9209,8 @@ if (process.argv.includes("--fish-dry")) {
 // 要在改完之后**几秒钟内**确认「认得出、发得对、超量不吞、找不到不吞」四件事。
 // 用法：node bot/whale-bot.mjs --sticker-test
 if (process.argv.includes("--sticker-test")) {
-  // ⚠️ 自检里连续调 textToSegments 会被**频率闸**当成刷屏（真实语义是防她刷屏，
-  // 但测试里连着发不是），所以先把记录清空——否则第一个用例发完，后面全部退回文字。
-  lastStickerAt.clear();
+  // 2026-10-26：频率闸删了，这里原来那条 lastStickerAt.clear() 也一起没了，
+  // 用例之间不会再因为「上一张刚发过」互相污染。
   const st = memeLib.stats();
   console.log(`表情库：${st.dir}`);
   console.log(`  共 ${st.total} 条 / 可用 ${st.active} 条 / 失效 ${st.stale} 条 / ${(st.bytes / 1024).toFixed(0)}KB`);
@@ -9210,10 +9220,13 @@ if (process.argv.includes("--sticker-test")) {
   const cases = [
     ["纯文字：不该产生任何段", "今天天气不错", true],
     ["单个表情标记", "[表情:猫]", false],
-    ["文字夹表情", "给你看这个 [表情:摸头] 可爱吧", false],
+    // 2026-10-26 改：「摸头」在库里**没有任何 tag 含「摸」**（实测 0 条），
+    // 所以这条原来必失败——那不是代码坏，是**用例用了库里没有的词**。
+    // 换成一个库里确定存在的词（「乖」，实测 pick 得到），这条才在验「文字夹表情」本身。
+    ["文字夹表情", "给你看这个 [表情:乖] 可爱吧", false],
     ["两个表情（上限内）", "[表情:猫][表情:乖]", false],
     ["三个表情（应超量留成文字）", "[表情:猫][表情:乖][表情:睡觉]x", false],
-    ["找不到关键词（应原样留成文字）", "[表情:完全不存在的词zqx]", false],
+    ["找不到关键词（标记该丢掉、不许漏给用户）", "[表情:完全不存在的词zqx]", false],
     ["表情 + 图混合", "[表情:猫]![](home\\media\\outbox\\pat-head.gif)", false],
     ["空关键词不该被匹配", "[]", true],
     ["全角括号〔表情:乖〕（21:28 漏发的那条）", "〔表情:乖〕", false],
@@ -9221,22 +9234,36 @@ if (process.argv.includes("--sticker-test")) {
   ];
 
   let bad = 0;
+  // 2026-10-26 修（她自报「这个勾有点虚」）：第一批原来只判 `isStr === expectStr`，
+  // 而 `stickers` / `imgs` / `leaked` 算了却只打印、不参与判分 → 「该出表情却出成文字」
+  // 只要返回类型对照样 ✅。现在三个条件一起判：
+  //   ① 类型要一致  ② 该出表情的必须真出（stickers>0）  ③ 标记绝不许残留成文字
   for (const [label, text, expectStr] of cases) {
     const raw = textToSegments(text, "private");
     const isStr = typeof raw === "string";
     const segs = isStr ? [{ type: "text", data: { text: raw } }] : raw;
     const stickers = segs.filter((s) => s.type === "image" && Number(s.data?.sub_type) === 1).length;
     const imgs = segs.filter((s) => s.type === "image" && Number(s.data?.sub_type) !== 1).length;
-    const leaked = segs.some((s) => s.type === "text" && /\[表情:/.test(String(s.data?.text ?? "")));
+    const leaked = segs.some((s) => s.type === "text" && /\[表情[:：]/.test(String(s.data?.text ?? "")));
     const typeOk = isStr === expectStr;
-    if (!typeOk) bad++;
+    // 该想发表情的用例（expectStr=false 且原文里带可识别的表情标记）：
+    // 要求 stickers>0。找不到关键词的那条（zqx）本来就该退回文字，不算。
+    const wantSticker = !expectStr && /[\[【〔［]\s*表情/.test(text) && !/zqx/.test(text);
+    const stickerOk = wantSticker ? stickers > 0 : true;
+    const leakOk = !leaked; // 任何情况下标记都不许留在文字里
+    const ok = typeOk && stickerOk && leakOk;
+    if (!ok) bad++;
     console.log(
-      `${typeOk ? "✅" : "❌"} ${label}\n     段数=${segs.length} 表情=${stickers} 正图=${imgs} 标记残留=${leaked ? "有" : "无"} ${isStr ? "(原样返回字符串)" : ""}`,
+      `${ok ? "✅" : "❌"} ${label}\n` +
+        `     段数=${segs.length} 表情=${stickers} 正图=${imgs} 标记残留=${leaked ? "有" : "无"}` +
+        (typeOk ? "" : " 〔类型不符〕") +
+        (stickerOk ? "" : " 〔该出表情却没出〕") +
+        (leakOk ? "" : " 〔标记漏进文字〕") +
+        (isStr ? " (原样返回字符串)" : ""),
     );
   }
 
   // 单独验额度分离：一次回复里 1 张图 + 2 张表情，图必须还在（原来共用额度会被挤掉一张）
-  lastStickerAt.clear(); // 额度分离这项要干净起点
   const mix = textToSegments("[表情:猫][表情:乖]![](home\\media\\outbox\\pat-head.gif)", "private");
   const mixSegs = typeof mix === "string" ? [{ type: "text", data: { text: mix } }] : mix;
   const mixSticker = mixSegs.filter((s) => s.type === "image" && Number(s.data?.sub_type) === 1).length;
@@ -9247,8 +9274,8 @@ if (process.argv.includes("--sticker-test")) {
     `${quotaOk ? "✅" : "❌"} 额度分离：2 表情 + 1 正图 → 表情 ${mixSticker}、正图 ${mixImg}（期望 2 / 1）`,
   );
 
-  // ---------- 第二批：情绪维度 + 心情路由 + 三道闸（2026-10-25） ----------
-  console.log("\n【第二批】情绪维度 / 心情路由 / 三道闸");
+  // ---------- 第二批：情绪维度 + 心情路由 + 两道闸（2026-10-25，2026-10-26 去掉频率闸） ----------
+  console.log("\n【第二批】情绪维度 / 心情路由 / 两道闸");
   const emoSamples = memeLib.list(999).filter((x) => (x.emotion ?? []).length);
   console.log(
     `  库里 ${memeLib.stats().active} 张，其中 ${emoSamples.length} 张有情绪标签` +
@@ -9287,23 +9314,30 @@ if (process.argv.includes("--sticker-test")) {
     );
   }
 
-  // 三道闸
+  // 两道闸
+  // 2026-10-26 修（她自报的「假通过」）：原来这里是
+  //   `const pass = sceneShouldBlock ? got === false : true`
+  // → 不该被场景闸拦的那两条 **pass 恒为 true**，无论 stickerGate 返回什么。
+  // 现在改用 `stickerGateDetail()`，能拿到「具体是哪道闸拦的」，判据才立得住：
+  //   · 场景闸该拦的 → why 必须是 scene-*
+  //   · 场景闸不该拦的 → why 不许是 scene-*（是 mood 都算正常，各闸本来就该独立生效）
   const gateCases = [
     ["群聊·短句闲聊", "哈哈这个也太好玩了", "group", true],
     ["群聊·长消息(>80字)", "x".repeat(90), "group", false],
     ["群聊·带问号", "这个报错怎么回事？", "group", false],
     ["私聊·长消息不该被场景闸拦", "x".repeat(90), "private", true],
   ];
-  // ⚠️ 这里只验「场景闸」那一层——`stickerGate()` 返回 false 有可能是**频率闸**拦的
-  // （用例连着跑，第一张刚记过时刻），所以不能拿它的返回值当场景闸的结论。
-  // 分开验：场景闸该拦的必须 false；场景闸不该拦的，只要「不是被场景闸拦的」就算过。
   for (const [label, txt, kd, want] of gateCases) {
-    const got = stickerGate(txt, kd);
+    const got = stickerGateDetail(txt, kd);
     const sceneShouldBlock = kd === "group" && (txt.length > 80 || /[？?]/.test(txt));
-    const pass = sceneShouldBlock ? got === false : true; // 不禁场景闸的，false 也可能是频率闸，放过
+    // 关键判据：场景闸该拦 → 必须真的被场景闸拦；不该拦 → 不许出现 scene-*
+    const pass = sceneShouldBlock
+      ? got.why.startsWith("scene-")
+      : !got.why.startsWith("scene-");
     if (!pass) bad++;
     console.log(
-      `${pass ? "✅" : "❌"} ${label} → stickerGate=${got}（场景闸该拦=${sceneShouldBlock}${!sceneShouldBlock && !got ? "，这次是频率闸拦的，正常" : ""}）`,
+      `${pass ? "✅" : "❌"} ${label} → ok=${got.ok} why=${got.why || "(放行)"}` +
+        `（场景闸该拦=${sceneShouldBlock}${got.why && !got.why.startsWith("scene-") ? `，这次是 ${got.why} 拦的，正常` : ""}）`,
     );
   }
 
@@ -11478,25 +11512,25 @@ async function pushToFavorite(kw) {
   let backup = null;
   try {
     const cur = await callAction("fetch_custom_face_detail", { count: 200 }, 30000);
-    if (cur?.status === "ok" && Array.isArray(cur.data)) {
-      backup = memeLib.backupFavoriteList(cur.data);
-      log(`收藏夹备份：${cur.data.length} 条 → ${backup}`);
+    // callAction 已经把外层壳解开了，cur 就是 data 本体（2026-10-26 修：以前判 cur.status 永远不成立，备份从没生效）
+    const list = Array.isArray(cur) ? cur : Array.isArray(cur?.data) ? cur.data : null;
+    if (list) {
+      backup = memeLib.backupFavoriteList(list);
+      log(`收藏夹备份：${list.length} 条 → ${backup}`);
     }
   } catch (e) {
     log("收藏夹备份失败（继续，但不删任何东西）:", errMsg(e));
   }
   // ② 只加
   try {
-    const r = await callAction(
+    await callAction(
       "add_custom_face",
       { file: picked.path, is_origin: true },
       30000,
     );
-    const ok = r?.status === "ok";
-    memeLib.recordFavUpload({ ok, key, file: picked.item.file, retcode: r?.retcode, backup });
-    if (!ok) {
-      return { ok: false, reason: `NapCat 拒绝：${r?.status}/${r?.retcode}` };
-    }
+    // callAction 只在 status=ok 时才 resolve，走到这行就是加成功了；
+    // 别再看 r.status（这里拿到的是 data 本体，以前那样判会把成功记成失败，见 2026-10-26 的修）
+    memeLib.recordFavUpload({ ok: true, key, file: picked.item.file, retcode: 0, backup });
     return { ok: true, file: picked.item.file, backup, today: today + 1 };
   } catch (e) {
     memeLib.recordFavUpload({ ok: false, key, file: picked.item.file, err: errMsg(e), backup });

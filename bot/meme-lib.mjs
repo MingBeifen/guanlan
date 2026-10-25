@@ -252,6 +252,33 @@ export function createMemeLib({ homeDir, log = () => {} }) {
     [101, ["开心", "得意", "卖萌", "撒娇", "兴奋", "哈哈"]],
   ];
 
+  // ---------- 口语情绪词 → 库里真有的 emotion 词（2026-10-26 加的） ----------
+  // 为什么要有这张表：库里 47 张只有 23 张带 emotion，词也就十来个
+  // （开心/卖萌/卖乖/贴贴/无语/迷茫/疑惑/委屈/难过/困/疲惫/生气/崩溃/嘲讽/得意/害羞/偷瞄/可爱）。
+  // 我说话时的词更散（撒娇、乖、想哭、气死），直查对不上就整张不发——
+  // 00:41 那条 `[表情:撒娇]` 就是这么漏成文字的。
+  // 只做**直查落空后的折返**：原词命中就照原词走，不抢已有路径。
+  const EMOTION_ALIASES = {
+    撒娇: ["卖萌", "卖乖", "贴贴"],
+    卖乖: ["卖萌", "开心"],
+    乖: ["卖乖", "卖萌"],
+    亲亲: ["贴贴"],
+    抱抱: ["贴贴"],
+    摸头: ["贴贴", "开心"],
+    贴贴: ["贴贴"],
+    哭: ["委屈", "难过"],
+    哭哭: ["委屈", "难过"],
+    想哭: ["委屈", "难过"],
+    气死: ["生气", "崩溃"],
+    哈哈: ["开心", "得意"],
+    笑: ["开心", "卖萌"],
+    开心: ["开心", "卖萌"],
+    无语: ["无语", "迷茫"],
+    疑惑: ["疑惑", "迷茫"],
+    困: ["困", "疲惫"],
+    羞: ["害羞", "偷瞄"],
+  };
+
   /** 按心情给一组偏好情绪。mood 缺省时按「还行」处理。 */
   function emotionsForMood(mood) {
     const m = Number(mood);
@@ -322,6 +349,11 @@ export function createMemeLib({ homeDir, log = () => {} }) {
       // ② 退回原来的关键词路（「猫」「您有钳」照旧能用——旧路径不动）
       const byKw = find(kw);
       if (byKw) return { ...byKw, via: "keyword" };
+      // ③ 直查都没中，按**口语折返表**再试一轮（撒娇 → 卖萌/卖乖/贴贴 这类）
+      for (const a of EMOTION_ALIASES[kw] ?? []) {
+        const hit = findByEmotion([a], { excludeKeys: o.excludeKeys }) ?? find(a);
+        if (hit) return { ...hit, via: `alias:${kw}→${a}` };
+      }
       return null; // 都没找到就返回 null，由调用方决定原样留成文字
     }
 
@@ -595,10 +627,18 @@ export function createMemeLib({ homeDir, log = () => {} }) {
     }
   }
 
+  // 本机日期的 YYYY-MM-DD（2026-10-26 修：原来用 toISOString 是 UTC，所谓的「一天」
+  // 早上 8 点就换了一轮，跟这台机器记日子的规矩对不上）
+  function ymdToday() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
   // 每天往收藏夹加了几张（硬上限用）
   function favUploadsToday() {
     const p = path.join(stateDir, "fav-upload.jsonl");
-    const day = new Date().toISOString().slice(0, 10);
+    const day = ymdToday();
     let n = 0;
     try {
       for (const line of fs.readFileSync(p, "utf8").split("\n")) {
@@ -619,7 +659,7 @@ export function createMemeLib({ homeDir, log = () => {} }) {
   function recordFavUpload(o) {
     try {
       fs.mkdirSync(stateDir, { recursive: true });
-      const line = JSON.stringify({ day: new Date().toISOString().slice(0, 10), at: Date.now(), ...o });
+      const line = JSON.stringify({ day: ymdToday(), at: Date.now(), ...o });
       fs.appendFileSync(path.join(stateDir, "fav-upload.jsonl"), line + "\n", "utf8");
     } catch (e) {
       log("收藏夹上传记账失败:", e?.message ?? e);
