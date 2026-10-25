@@ -1680,6 +1680,14 @@
             <div class="kv"><span>氛围偏差</span><b id="alterVal">-</b></div>
             <div class="kv"><span>问候 / 她自己的事</span><b id="greetVal">-</b></div>
           </div>
+          <!-- 群内沉默标签（2026-10-25）：沉默中要一眼看到，否则会以为她「突然不理人」 -->
+          <div class="card" id="muteBox" style="display: none">
+            <div class="card-h">
+              <b>群里沉默中</b
+              ><span class="hint">只挡群里的主动与接话；主人 @ / QQ 回复 / 戳一戳照常，私聊不受影响</span>
+            </div>
+            <div id="muteList" class="chips"></div>
+          </div>
           <div class="grid2">
             <div class="card">
               <div class="card-h">
@@ -2324,6 +2332,23 @@
             if (g.night) bits.push("晚 " + g.night.slice(5));
             if (sl.pendingGreet) bits.push(`待补 ${sl.pendingGreet.kind}`);
             $("greetVal").textContent = bits.length ? bits.join(" · ") : "-";
+          }
+          // 群内沉默标签（2026-10-25）：沉默中要一眼看到，否则会以为她「突然不理人」
+          if ($("muteBox")) {
+            const list = Array.isArray(sl.groupMute) ? sl.groupMute : [];
+            $("muteBox").style.display = list.length ? "" : "none";
+            if (list.length) {
+              $("muteList").innerHTML = list
+                .map((x) => {
+                  const until = x.until ? new Date(x.until) : null;
+                  const p = (n) => String(n).padStart(2, "0");
+                  const when = until
+                    ? `${p(until.getHours())}:${p(until.getMinutes())} 自动解除`
+                    : "手动解除";
+                  return `<span class="chip" title="${esc(x.note || "")}">群 ${x.group}　${when}</span>`;
+                })
+                .join("");
+            }
           }
         } catch {
           $("state").textContent = "连不上面板服务";

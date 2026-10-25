@@ -134,6 +134,26 @@ function sleepState() {
     lastOwnAt: pro.lastOwnAt || null,
     planDay: pro.planDay || '',
     nightDay: pro.nightDay || '',
+    // 群内沉默标签（2026-10-25 主人要的）：只列还没过期的，
+    // 过期项机器人自己会在读的时候清掉，这里不重复写盘。
+    groupMute: (() => {
+      const out = [];
+      const now = Date.now();
+      const map = pro.groupMute;
+      if (!map || typeof map !== 'object') return out;
+      for (const gid of Object.keys(map)) {
+        const s = map[gid] || {};
+        const until = Number(s.until) || 0;
+        if (until && now >= until) continue; // 已过期，不用显示
+        out.push({
+          group: Number(gid),
+          until: until || null,
+          at: Number(s.at) || null,
+          note: String(s.note || ''),
+        });
+      }
+      return out;
+    })(),
   };
 }
 

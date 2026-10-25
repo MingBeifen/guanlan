@@ -1974,6 +1974,14 @@ async function maybeJudgeEars(msg, spoken, seqInfo) {
   if (pauseMode() !== "off") return; // 暂停开关开着就只存不听
   // 小夜窗（2026-10-24 主人要的）：凌晨 1 点到 8 点，群里不主动插话；不是真 @ 我的，连耳朵都不惊动。
   if (inNightQuiet() && !isAddressedAtNight(msg)) return;
+  // 沉默标签（2026-10-25）：这个群在沉默期时，读空气这条线整体关掉；
+  // 但真点名（@ / QQ 回复 / 戳）依然放行——和 handleIncoming 里的口径保持一致。
+  if (
+    groupMuted(gid) &&
+    !(atMeSeg(msg) || isReplyToBot(msg) || Boolean(msg._poke))
+  ) {
+    return;
+  }
   const fromOwner = Number(msg.user_id) === Number(CFG.allowlist[0]);
   const awaitingAnswer = (ear?.awaitingAnswerUntil ?? 0) > Date.now();
   // 主人的话走正常路；除非刚问过他，等他接话
@@ -4989,6 +4997,10 @@ function freshPro() {
     nightDay: null,
     ownDay: null,
     lastOwnAt: 0,
+    // 群内沉默标签（2026-10-25 主人要的）：{"群号":{"until":ms,"at":ms,"note":""}}
+    // 只挂「群里的主动与接话」，@ 她 / QQ 回复她 / 戳一戳照常答，私聊一点不受影响。
+    // 用对象而不是数组，是为了顺手存过期时刻和当时那句原因。
+    groupMute: {},
   };
 }
 let pro = { ...freshPro(), ...readJson(PROACTIVE_PATH, {}) };
@@ -4996,6 +5008,7 @@ pro.greet ??= {};
 pro.asleep ??= false;
 pro.sleepKind ??= "";
 pro.pendingGreet ??= null;
+pro.groupMute ??= {};
 // 2026-10-22：以前把「引用原文里的『我要睡了』」当成他说睡，留下的假睡眠状态读进来就作废
 // （sleepNote 存的是那句话本身，开头是引用段的说明这就一条）
 if (pro.asleep && /^\[引用的是这条：/.test(pro.sleepNote ?? "")) {
@@ -5107,7 +5120,112 @@ function isQuiet() {
   return isBusy() || isAsleep();
 }
 
-// —— 心情值 ——
+// ---------- 群内沉默标签（2026-10-25 主人要的） ----------
+// 主人原话：让观澜在群聊中闭嘴，只有他能 @ 她；他说「可以说话了」才解除。
+// 做成**按群号独立**（`pro.groupMute = { 群号: {until, at, note} }`）+ **自动过期**，
+// 因为只有两个群但以后可能分群管理，而且不做过期他很容易忘了解除、让她一整周在群里装死。
+//
+// 和现有三个开关的区别（别混用）：
+//   `pause.json` 的 `group-mute` → 群里**一律不理，连主人 @ 也挡**（只判 message_type，不看谁说的）
+//   `busy` / `asleep`           → 只挡**主动**开口，不挡回复
+//   `talkAllow`                 → 静态白名单，不是可切换的闸
+// 沉默标签是第四种：**挡群里除主人点名以外的一切**，但私聊、主动问候、日记全都照常。
+const GROUP_MUTE_DEFAULT_MS = 2 * 60 * 60 * 1000; // 默认 2 小时
+
+/** 这个群现在是不是处于沉默。顺手把过期项清掉（读的时候判，省一个定时器）。 */
+function groupMuted(gid) {
+  const id = String(Number(gid) || 0);
+  const slot = pro.groupMute?.[id];
+  if (!slot) return false;
+  const until = Number(slot.until) || 0;
+  if (until && Date.now() >= until) {
+    delete pro.groupMute[id];
+    savePro();
+    log(`群 ${id} 的沉默标签到点了，自动解除`);
+    return false;
+  }
+  return true;
+}
+
+/** 当前所有还在沉默的群（面板/自检要看）。 */
+function groupMuteList() {
+  const out = [];
+  for (const gid of Object.keys(pro.groupMute || {})) {
+    if (groupMuted(gid)) {
+      const s = pro.groupMute[gid] || {};
+      out.push({
+        group: Number(gid),
+        until: Number(s.until) || 0,
+        at: Number(s.at) || 0,
+        note: String(s.note || ""),
+      });
+    }
+  }
+  return out;
+}
+
+/** 开/关某个群的沉默。on=true 时默认 2 小时过期。 */
+function setGroupMute(gid, on, { note = "", ttlMs = GROUP_MUTE_DEFAULT_MS } = {}) {
+  const id = String(Number(gid) || 0);
+  pro.groupMute ??= {};
+  if (on) {
+    const ms = Number(ttlMs) > 0 ? Number(ttlMs) : GROUP_MUTE_DEFAULT_MS;
+    pro.groupMute[id] = {
+      until: Date.now() + ms,
+      at: Date.now(),
+      note: String(note || "").slice(0, 60),
+    };
+    log(`群 ${id} 沉默标签打开（${Math.round(ms / 60000)} 分钟后自动解除）`);
+  } else {
+    delete pro.groupMute[id];
+    log(`群 ${id} 沉默标签解除`);
+  }
+  savePro();
+}
+
+// 解析「闭嘴 / 可以说话了」这类口令。返回 { on, group } 或 null。
+// 设计口径（和 reboot 一致）：**整条消息**就得是这句话，中间夹带别的话不算，防误触。
+// 可选带群号（不带的那些写法：群里别说话 1000000003）。
+function parseGroupMuteCmd(raw) {
+  const t = String(raw ?? "").trim();
+  if (!t || t.length > 40) return null; // 一长串话里带个「闭嘴」多半在聊别的
+  // 先摘出末尾的群号（只有 5-12 位纯数字才算）
+  let group = 0;
+  let body = t;
+  const m = t.match(/(\d{5,12})[。.!！\s]*$/);
+  if (m) {
+    group = Number(m[1]);
+    body = t.slice(0, m.index).trim();
+  }
+  // 词尾的「吧 / 了 / 啊」这类语气词允许多挂一个（2026-10-25 实测：「你闭嘴吧」原来认不出来，
+  // 因为词表里只有「你闭嘴」而后面跟了「吧」）。所以不用「整词表 + 全匹配」，
+  // 改成「核心词 + 可选语气尾巴」，比硬堆词表更稳。
+  // ⚠️ 尾巴只能由语气词/标点/空白组成（不能是 `[吧了啊]*$` 这种能吞掉任意字的写法）：
+  // 实测「闭嘴是什么意思」曾被误判成口令——必须要求核心词之后**再没有实义词**。
+  const TAIL = "(?:[吧了啊呀哦嘛呗呢~～。.、,，!！?？\\s])*$";
+  const ON_RE = new RegExp(
+    "^(?:你)?" +
+      "(?:" +
+      // ① 直接叫她闭嘴 / 安静
+      "(?:先|赶紧)?(?:给我)?(?:闭嘴|安静(?:点|点儿|会儿)?|别(?:再)?说话|别出声|消停(?:会)?儿?)" +
+      // ② 点明「群里」的场景
+      "|(?:群里|在群里)(?:先|暂时)?(?:别|不要)(?:说话|出声)" +
+      "|(?:你|你群里)?别再(?:说话|出声)" +
+      ")" +
+      TAIL,
+  );
+  const OFF_RE = new RegExp(
+    "^(?:(?:现在|好了|行)[,，、\\s]*)?" +
+      "(?:(?:可以|能)(?:说话|开口)(?:了)?" +
+      "|(?:解除|取消)(?:沉默|禁言)" +
+      "|解禁" +
+      "|(?:你)?(?:说话|开口)吧)" +
+      TAIL,
+  );
+  if (ON_RE.test(body)) return { on: true, group };
+  if (OFF_RE.test(body)) return { on: false, group };
+  return null;
+}
 function moodLabel(m = pro.mood) {
   if (m >= 78) return "心情很好";
   if (m >= 60) return "心情不错";
@@ -7925,8 +8043,15 @@ async function handleIncoming(msg) {
   // 2026-10-25：群里发语音叫她名也算叫她（先转写再判；只对主人/talkAllow，陌生人不动）。
   const nightQuietGroup =
     msg.message_type === "group" && inNightQuiet();
+  // 群里沉默标签（2026-10-25）：只挂「主动 + 接话」，主人 @ / 回复 / 戳一戳照常。
+  // 注意这里**不挡 ambient**——沉默期间她照样把那句收进上下文，所以解禁后不会「中间这段我没听见」。
+  const mutedGroup =
+    msg.message_type === "group" &&
+    groupMuted(msg.group_id) &&
+    !(atMeSeg(msg) || isReplyToBot(msg) || Boolean(msg._poke));
   const addressedGroup =
     msg.message_type === "group" &&
+    !mutedGroup &&
     (nightQuietGroup
       ? isAddressedAtNight(msg)
       : isAddressed(msg) || (await isAddressedByVoice(msg)));
@@ -8034,6 +8159,51 @@ async function handleIncoming(msg) {
   ) {
     await reply("private", msg.user_id, progressReply());
     return;
+  }
+  // 群内沉默标签的口令（2026-10-25 主人要的）：只认主人私聊、整条精确匹配，
+  // 跟 reboot 同一套写法，免得正常聊天里顺口一句就误触发。
+  //   闭嘴 / 群里别说话 [群号]      → 开沉默（默认 2 小时自动解除）
+  //   可以说话了 / 解除沉默 [群号]   → 立刻解除
+  // 不带群号时：开 = 当前所有白名单群一起闭；关 = 全部解除。
+  if (msg.message_type === "private" && CFG.allowlist.includes(Number(msg.user_id))) {
+    const muteCmd = parseGroupMuteCmd(text);
+    if (muteCmd) {
+      const groups = muteCmd.group ? [muteCmd.group] : (CFG.groupAllow || []);
+      if (!groups.length) {
+        await reply("private", msg.user_id, "现在没有配置任何群，沉默标签没处挂。");
+        return;
+      }
+      for (const g of groups) setGroupMute(g, muteCmd.on, { note: text.slice(0, 40) });
+      if (muteCmd.on) {
+        const mins = Math.round(GROUP_MUTE_DEFAULT_MS / 60000);
+        await reply(
+          "private",
+          msg.user_id,
+          `${groups.join("、")} 这几个群我先不吭声了（${mins} 分钟后自动松口）。` +
+            `你 @ 我、或者用 QQ 回复我某条，我还是会应；私聊照常。`,
+        );
+      } else {
+        await reply("private", msg.user_id, `好了，${groups.join("、")} 我恢复说话。`);
+      }
+      return;
+    }
+    // 问一句「现在沉默着吗」：直接答状态，不叫模型
+    if (/^(沉默状态|群里沉默了吗|还在闭嘴吗)[？?！!。.\s]*$/.test(text.trim())) {
+      const list = groupMuteList();
+      await reply(
+        "private",
+        msg.user_id,
+        list.length
+          ? list
+              .map(
+                (x) =>
+                  `群 ${x.group} 沉默中，到 ${new Date(x.until).toLocaleString("zh-CN", { hour12: false })} 自动解除`,
+              )
+              .join("\n")
+          : "现在哪个群都没沉默，我照常说话。",
+      );
+      return;
+    }
   }
   // 口令重启（2026-10-16 加的）：鲸鱼自己在沙箱里碰不到本体进程，所以不给它命令，
   // 改由本体自己退出——外面 bot-runner.bat 的 :loop 会在 5 秒后把它重新拉起来。
@@ -8458,6 +8628,87 @@ if (process.argv.includes("--memory-gate-test")) {
       `${ok ? "对 " : "错 "} ${expectPass ? "应放行" : "应拦下"} → ${g.ok ? "放行" : `拦下(${g.reason})`}  q=${g.quality}  「${String(text).slice(0, 24)}」  ${label}`,
     );
   }
+  console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 群内沉默标签自检：不连 QQ、不花钱、不写盘（2026-10-25） ----------
+// 验两件事：口令认得对不对；按群独立 + 自动过期对不对。
+if (process.argv.includes("--group-mute-test")) {
+  let bad = 0;
+  const eq = (label, got, expect) => {
+    const ok = JSON.stringify(got) === JSON.stringify(expect);
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${label} → ${JSON.stringify(got)}  期望 ${JSON.stringify(expect)}`,
+    );
+  };
+
+  console.log("=== 一、口令解析 ===");
+  for (const s of [
+    "闭嘴",
+    "你闭嘴吧",
+    "先闭嘴",
+    "安静",
+    "安静点儿",
+    "群里别说话",
+    "别说话了",
+    "消停会儿",
+  ]) {
+    eq(s, parseGroupMuteCmd(s), { on: true, group: 0 });
+  }
+  eq("闭嘴+群号", parseGroupMuteCmd("闭嘴 1000000002"), {
+    on: true,
+    group: 1000000002,
+  });
+  for (const s of ["可以说话了", "能说话", "说话吧", "解除沉默", "解禁"]) {
+    eq(s, parseGroupMuteCmd(s), { on: false, group: 0 });
+  }
+  for (const s of [
+    "他让我闭嘴我就闭嘴了，你说这算什么",
+    "我该闭嘴吗",
+    "闭嘴是什么意思",
+    "",
+    "今天天气不错",
+  ]) {
+    eq(`不该触发「${s}」`, parseGroupMuteCmd(s), null);
+  }
+
+  console.log("\n=== 二、按群独立 + 自动过期 ===");
+  // 这一段借用真 pro 跑，跑完**原样恢复**，绝不把测试状态留在盘上
+  const savedMute = JSON.stringify(pro.groupMute || {});
+  const G1 = Number(CFG.groupAllow?.[0] || 1000000002);
+  const G2 = Number(CFG.groupAllow?.[1] || G1 + 1);
+  try {
+    pro.groupMute = {};
+    eq("初始：群1不沉默", groupMuted(G1), false);
+    setGroupMute(G1, true, { note: "自检" });
+    eq("开群1后：群1沉默", groupMuted(G1), true);
+    eq("开群1后：群2不受影响", groupMuted(G2), false);
+    eq("列表只有群1", groupMuteList().map((x) => x.group), [G1]);
+    setGroupMute(G2, true, {});
+    eq("两个群都沉默", groupMuteList().length, 2);
+    setGroupMute(G1, false);
+    eq("关群1后：群2仍沉默", groupMuted(G2), true);
+    pro.groupMute[String(G2)].until = Date.now() - 1000;
+    eq("过期后自动解除", groupMuted(G2), false);
+    eq("过期项已剔除", Object.keys(pro.groupMute).length, 0);
+    setGroupMute(G1, true, { ttlMs: 60 * 1000 });
+    const left = Math.round(
+      (pro.groupMute[String(G1)].until - Date.now()) / 1000,
+    );
+    const ttlOk = left > 50 && left <= 61;
+    if (!ttlOk) bad++;
+    console.log(`${ttlOk ? "对 " : "错 "} 自定义 ttl=60s（实剩 ${left}s）`);
+  } finally {
+    try {
+      pro.groupMute = JSON.parse(savedMute);
+      savePro();
+    } catch {
+      /* 恢复失败也不影响判断 */
+    }
+  }
+
   console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
   process.exit(bad ? 1 : 0);
 }
