@@ -26,6 +26,8 @@
     "groupRawTailMsgs": 20,
     "stripTailPeriod": true,
     "fishRewrite": false,
+    "newsEnabled": true,
+    "dailySummarySend": true,
     "summaryEveryMsgs": 30
   },
   "napcat": {
@@ -35,7 +37,8 @@
   "group": {
     "enabled": false,
     "allow": [],
-    "talkAllow": []
+    "talkAllow": [],
+    "blockUsers": []
   },
   "dsh": {
     "exe": "",

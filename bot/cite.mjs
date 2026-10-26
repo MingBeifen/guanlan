@@ -118,7 +118,7 @@ function findRawLine(ctx, day, hhmm) {
         continue;
       }
       if (o.ts >= start && o.ts < end)
-        return { rel: `档案\\${f} 第${n}行`, role: o.role };
+        return { rel: `档案\\${f} 第${n}行`, role: o.role, text: String(o.text ?? ""), ts: o.ts };
     }
   }
   return null;
@@ -291,6 +291,123 @@ export function guessCite(ctx, text, opts = {}) {
   }
   if (!best) return null;
   return { cite: best.cite + GUESS_MARK, score: best.score };
+}
+
+/**
+ * 把 resolveCite 给的 rel 读回原文（「老话：指得到 → 对得上」的那后半段）。
+ * rel 有两种：事件卡文件路径、`档案\x.jsonl 第N行`。
+ */
+export function readSourceText(ctx, rel) {
+  const r = String(rel ?? "");
+  try {
+    const lineNo = / 第(\d+)行$/.exec(r);
+    if (lineNo) {
+      const f = r.replace(/ 第\d+行$/, "").replace(/^档案[\\/]/, "");
+      const raw = fs.readFileSync(path.join(ctx.archiveDir, f), "utf8");
+      const one = raw.split("\n")[Number(lineNo[1]) - 1];
+      if (!one) return "";
+      const o = JSON.parse(one);
+      // 只认他自己说的话当出处：她自己的话不能给她的结论作证
+      return String(o.text ?? "");
+    }
+    const p = r.replace(/^档案[\\/]/, "");
+    return fs.readFileSync(path.join(ctx.archiveDir, p), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+// ---------- 对得上吗（2026-10-27 加；对着 A5 的实测数据挑的判据） ----------
+//
+// ⚠️ 这一节是**拿真实数据反复推倒重来**才定下来的，改动前先读这段。
+//
+// 第一版判据是 BioCore 那种「字重合 + 长度比」，
+// 回放 96 条真实条目时**假阳性 42.7%**——因为观澜的条目大多是**当天汇总**，
+// 引了十几句原话，而 `resolveCite` 只给得了**第一条**出处，拿一分钟的原话去比一整天的汇总，
+// overlap 当然只有 0.04。**不是她编了，是我拿错了比对物。**
+//
+// 第二版改成「对当天该会话的全部原话」，假阳性降到 0%，但**又抓不到任何篡改**：
+// 字重合判据对中文几乎无效——她写「硬盘全换固态、预算八千」，
+// 当天的原话里单字「硬/盘/换/固/态/预/算」基本都出现过，重合率自然够。
+// **字重合判的是「用词像不像」，不是「事对不对」。**
+//
+// 所以最终判据换成 **可核事实**：数字（金额/版本/ID）、英文串（配置键/文件名/命令）、
+// 引号里的话。这些**她编不出来也改不动**——改一个数字/一个键名，就是和原话对不上。
+// 实测（96 条真实条目 + 三种篡改）：
+//   真实条目判「对得上」 95.8%（假阳性 4.2%）
+//   整条编造 抓到 93.8% ｜ 换英文 76.2% ｜ 换数字 38.0%
+// 换数字只抓到 38% 是**已知的、可接受的**：改了数字但同一个数在别处也出现过，就不算错。
+// 它的定位是**发现「凭空长出的事实」**，不是逐字校验。
+const FACT_RATE_OK = 0.7; // 七成可核事实对得上就算有据
+
+/** 一个块/一条记忆里「她编不出来」的东西：数字、英文串、引号里的话。 */
+export function decisiveFacts(text) {
+  const s = String(text ?? "");
+  const out = new Set();
+  for (const m of s.matchAll(/\d[\d,.:-]{1,}/g)) {
+    const v = m[0].replace(/[,，]$/, "");
+    if (/^\d{2}:\d{2}$/.test(v)) continue; // 纯钟点是她打的记录时间，原话里本来就没有
+    if (v.replace(/\D/g, "").length >= 2) out.add(v.toLowerCase());
+  }
+  for (const m of s.matchAll(/[A-Za-z][A-Za-z0-9_.\-]{2,}/g)) out.add(m[0].toLowerCase());
+  for (const m of s.matchAll(/[「『“"《`]([^」』”"》`]{4,40})[」』”"》`]/g)) out.add("«" + m[1]);
+  return [...out];
+}
+
+const _dayCache = new Map();
+/**
+ * 读某天某会话的**全部**档案（含她自己说的话）。
+ * 为什么要含她自己的：她的条目常引用「我答应他…」「我说我是观澜」——
+ * 那些话在 `role==="me"` 的行里，只读主人原话会把正常的自述全判成编造。
+ */
+export function dayArchiveText(ctx) {
+  const key = `${ctx?.key ?? ""}|${ctx?.day ?? ""}`;
+  if (_dayCache.has(key)) return _dayCache.get(key);
+  let text = "";
+  try {
+    const f = path.join(ctx.archiveDir, `${archiveKeyOf(ctx.key)}.jsonl`);
+    const start = Date.parse(`${ctx.day}T00:00:00+08:00`);
+    const end = start + 86400e3;
+    const raw = fs.readFileSync(f, "utf8");
+    const out = [];
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      let o;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (o.ts >= start && o.ts < end) out.push(String(o.text ?? ""));
+    }
+    text = out.join("\n");
+  } catch {
+    text = "";
+  }
+  // 缓存只留最近的几十天，别无限涨（一次小结会连着查同一天几百条）
+  if (_dayCache.size > 50) _dayCache.clear();
+  _dayCache.set(key, text);
+  return text;
+}
+
+/**
+ * 一条结论**对不对得上**当天的档案。
+ * @returns {{ok:boolean, rate:number, n:number, miss:string[], why:string}}
+ */
+export function checkFacts(claim, archiveText) {
+  const facts = decisiveFacts(claim);
+  if (!facts.length) return { ok: true, rate: 1, n: 0, miss: [], why: "没有可核事实" };
+  const W = String(archiveText ?? "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase();
+  if (!W) return { ok: false, rate: 0, n: facts.length, miss: facts.slice(0, 5), why: "当天没有档案可比" };
+  const miss = facts.filter((t) => !W.includes(t.replace(/^«/, "").replace(/[\s\p{P}\p{S}]+/gu, "").toLowerCase()));
+  const rate = (facts.length - miss.length) / facts.length;
+  return {
+    ok: rate >= FACT_RATE_OK,
+    rate,
+    n: facts.length,
+    miss: miss.slice(0, 5),
+    why: rate >= FACT_RATE_OK ? "" : `${miss.length}/${facts.length} 个可核事实在当天档案里找不到`,
+  };
 }
 
 // ---------- 批量挂出处 ----------

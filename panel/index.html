@@ -1579,6 +1579,165 @@
         color: #9ecbff;
         margin: 12px 0 6px;
       }
+      /* ---------- 设置菜单（2026-10-27 D 档） ---------- */
+      .set-group + .set-group {
+        margin-top: 18px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+      }
+      .set-group > h3 {
+        font-size: 13px;
+        font-weight: 600;
+        color: #cfe0f5;
+        margin: 0 0 3px;
+      }
+      .set-group > p.g-hint {
+        font-size: 11.5px;
+        color: var(--dim2);
+        margin: 0 0 10px;
+      }
+      .set-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 14px;
+        padding: 9px 2px;
+        border-bottom: 1px solid #161d28;
+      }
+      .set-row:last-child {
+        border-bottom: none;
+      }
+      .set-row .s-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .set-row .s-label {
+        font-size: 12.5px;
+        color: #dbe6f4;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .set-row .s-label code {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--dim2);
+        background: #101822;
+        border: 1px solid #1b2532;
+        border-radius: 5px;
+        padding: 0 5px;
+      }
+      .set-row .s-desc {
+        font-size: 11.5px;
+        color: var(--dim2);
+        line-height: 1.6;
+        margin-top: 3px;
+      }
+      .set-row .s-ctl {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding-top: 1px;
+      }
+      .set-row.dirty .s-label {
+        color: #ffd479;
+      }
+      .set-row.dirty .s-label code {
+        color: #b8860b;
+        border-color: #4a3a12;
+      }
+      /* 开关 */
+      .sw {
+        position: relative;
+        width: 40px;
+        height: 22px;
+        border-radius: 11px;
+        background: #1b2432;
+        border: 1px solid var(--line2);
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+        flex: 0 0 auto;
+      }
+      .sw::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #7a8798;
+        transition: transform 0.15s, background 0.15s;
+      }
+      .sw.on {
+        background: #1d4d8f;
+        border-color: #2f7cf6;
+      }
+      .sw.on::after {
+        transform: translateX(18px);
+        background: #cfe4ff;
+      }
+      .sw:active::after {
+        width: 18px;
+      }
+      .set-num {
+        width: 92px;
+        background: #0c1219;
+        border: 1px solid var(--line2);
+        border-radius: 7px;
+        color: #dbe6f4;
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 4px 7px;
+        text-align: right;
+      }
+      .set-num:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .set-unit {
+        font-size: 11px;
+        color: var(--dim2);
+        font-family: var(--mono);
+        min-width: 30px;
+      }
+      .set-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+      }
+      /* 顶部「有 N 项待生效」提示条 */
+      .pend {
+        display: none;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 0 0 12px;
+        padding: 9px 14px;
+        border-radius: 10px;
+        border: 1px solid #5c4a1c;
+        background: linear-gradient(180deg, #2a2313, #1d1a10);
+        font-size: 12.5px;
+        color: #ffd479;
+      }
+      .pend.on {
+        display: flex;
+      }
+      .pend b {
+        color: #ffb84d;
+      }
+      .pend .p-keys {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: #b89a5a;
+      }
+      .pend .btn {
+        padding: 4px 11px;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
@@ -1743,6 +1902,23 @@
             </svg>
             重启</a
           >
+          <a class="navi" href="#settings" data-view="settings">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path
+                d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6h.08A1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9v.08a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"
+              />
+            </svg>
+            设置</a
+          >
           <a class="navi" href="#logs" data-view="logs">
             <svg
               class="ic"
@@ -1780,6 +1956,14 @@
             <button class="btn danger" onclick="act('stop')">停止</button>
           </div>
         </header>
+
+        <!-- 设置改了但还没重启：所有页都能看见（2026-10-27 D 档） -->
+        <div class="pend" id="pend">
+          <span>⚠ 有 <b id="pendN">0</b> 项设置改了还没生效</span>
+          <span class="p-keys" id="pendKeys"></span>
+          <button class="btn primary" onclick="act('restart')">现在重启</button>
+          <button class="btn" onclick="showView('settings')">去设置</button>
+        </div>
 
         <!-- 概览 -->
         <section class="view on scrolly" id="view-overview">
@@ -2330,6 +2514,31 @@
           </div>
         </section>
 
+        <!-- 设置 -->
+        <section class="view scrolly" id="view-settings">
+          <div class="card">
+            <div class="card-h">
+              <b>功能开关</b
+              ><span class="hint" id="setStats">读取中…</span>
+            </div>
+            <p class="hint" style="margin: 0 0 12px; line-height: 1.7">
+              改了先存在 <code>config.json</code> 里，<b>要重启她才生效</b>——她的配置是启动时读一次的，
+              这里不自动重启是因为她可能正在跑一轮，打断比多等几秒更糟。改完顶部会出现「有 N 项待生效」，点那里重启。
+              <br />只放开关和数值。白名单、名字、屏蔽名单这类列表要专门的编辑器，还没做。
+            </p>
+            <div class="set-bar">
+              <button class="btn primary" id="setSave" onclick="saveSettings()">保存改动</button>
+              <button class="btn" onclick="loadSettings()">放弃改动、重新读</button>
+              <span class="hint" id="setMsg"></span>
+            </div>
+          </div>
+          <div class="card">
+            <div id="setList">
+              <div class="empty" style="padding: 8px">正在读 config.json…</div>
+            </div>
+          </div>
+        </section>
+
         <!-- 日志 -->
         <section class="view" id="view-logs">
           <div class="card" style="display: flex; flex-direction: column">
@@ -2355,6 +2564,7 @@
         dream: ["梦与留档", "她做的梦（不进记忆库）和质量门拦下的条目（审计留档）。"],
         skip: ["沉默", "她选择不回的那些话；硬消息不许跳过，被拦下的单独记一类。"],
         boots: ["重启", "她每次起来的流水账：断了多久、今天第几次、跑的是哪版代码。"],
+        settings: ["设置", "功能开关都在这里点；改完要重启才生效，顶部会提示有几项待生效。"],
         logs: ["日志", "看门人最近写了什么。"],
       };
       let view = "overview";
@@ -2423,6 +2633,7 @@
         if (name === "dream") loadDreams();
         if (name === "skip") loadSkips();
         if (name === "boots") loadBoots();
+        if (name === "settings") loadSettings();
         if (name === "overview") load();
       }
       function route() {
@@ -2452,6 +2663,7 @@
       async function load() {
         try {
           const d = await apiGet("/api/status");
+          renderPending(d.pendingSettings);
           $("dot").className = "dot" + (d.running ? " on" : "");
           $("state").textContent = d.running ? "在跑" : "停着";
           $("heroPill").className = "pill" + (d.running ? " on" : "");
@@ -3511,6 +3723,120 @@
       }
 
       // 重启流水账（2026-10-26）：只读 boots.jsonl，不碰机器人进程。
+      // ---------- 设置菜单（2026-10-27 D 档）----------
+      // 只改本地一份草稿（setDraft），点「保存改动」才发 POST。
+      // 这样他连点几个开关时不会每点一次就打一次盘、也不会每次都重启。
+      let setDraft = {}; // key -> 新值
+      let setLoaded = {}; // key -> 从服务端读到的原值
+
+      async function loadSettings() {
+        setDraft = {};
+        try {
+          const d = await apiGet("/api/settings");
+          if (!d.ok) {
+            $("setList").innerHTML = `<div class="empty">${esc(d.msg || "读不到配置")}</div>`;
+            $("setStats").textContent = "读不到";
+            return;
+          }
+          const flat = d.groups.flatMap((g) => g.items);
+          setLoaded = Object.fromEntries(flat.map((x) => [x.key, x.cur]));
+          const nBool = flat.filter((x) => x.type === "bool").length;
+          $("setStats").textContent = `${flat.length} 项（${nBool} 个开关 · ${flat.length - nBool} 个数值）`;
+          $("setList").innerHTML = d.groups
+            .map(
+              (g) => `<div class="set-group">
+                <h3>${esc(g.title)}</h3>
+                <p class="g-hint">${esc(g.hint || "")}</p>
+                ${g.items.map((it) => setRowHtml(it)).join("")}
+              </div>`,
+            )
+            .join("");
+          $("setMsg").textContent = "";
+        } catch (e) {
+          $("setList").innerHTML = `<div class="empty">读设置出错：${esc(String(e))}</div>`;
+        }
+      }
+
+      function setRowHtml(it) {
+        const cur = it.cur;
+        const ctl =
+          it.type === "bool"
+            ? `<div class="sw${cur ? " on" : ""}" id="sw-${it.key}" onclick="setToggle('${it.key}')"></div>`
+            : `<input class="set-num" id="in-${it.key}" type="number" value="${cur}"
+                 min="${it.min ?? ""}" max="${it.max ?? ""}" step="${it.step ?? 1}"
+                 onchange="setNum('${it.key}', this.value)" />
+               <span class="set-unit">${esc(it.unit || "")}</span>`;
+        return `<div class="set-row" id="row-${it.key}">
+          <div class="s-main">
+            <div class="s-label">${esc(it.label)}<code>${esc(it.key)}</code></div>
+            <div class="s-desc">${esc(it.desc || "")}</div>
+          </div>
+          <div class="s-ctl">${ctl}</div>
+        </div>`;
+      }
+
+      function setToggle(key) {
+        const el = $("sw-" + key);
+        if (!el) return;
+        const now = !el.classList.contains("on");
+        el.classList.toggle("on", now);
+        setDraft[key] = now;
+        markDirty(key);
+      }
+
+      function setNum(key, raw) {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return;
+        setDraft[key] = n;
+        markDirty(key);
+      }
+
+      function markDirty(key) {
+        const row = $("row-" + key);
+        if (!row) return;
+        const changed = setDraft[key] !== setLoaded[key];
+        row.classList.toggle("dirty", changed);
+        if (!changed) delete setDraft[key];
+        const n = Object.keys(setDraft).length;
+        $("setMsg").textContent = n ? `${n} 项改动待保存` : "";
+      }
+
+      async function saveSettings() {
+        const patch = { ...setDraft };
+        if (!Object.keys(patch).length) {
+          $("setMsg").textContent = "没有改动";
+          return;
+        }
+        $("setSave").disabled = true;
+        try {
+          const r = await apiPost("/api/settings", { patch });
+          if (!r.ok) {
+            $("setMsg").textContent = "没存上：" + (r.msg || "未知错误");
+            return;
+          }
+          $("setMsg").textContent = r.msg || "存好了";
+          if (r.bad && r.bad.length) $("setMsg").textContent += `（没认：${r.bad.join("、")}）`;
+          // 存完立刻重读：把「已生效」和「待生效」两件事都刷成服务端的真实状态
+          const keep = $("setMsg").textContent;
+          await loadSettings();
+          $("setMsg").textContent = keep;
+          await load();
+        } finally {
+          $("setSave").disabled = false;
+        }
+      }
+
+      /** 顶部「有 N 项待生效」提示条。数据来自 /api/status 的 pendingSettings，3 秒轮询顺手刷。 */
+      function renderPending(p) {
+        const box = $("pend");
+        if (!box) return;
+        const n = Number(p?.count) || 0;
+        box.classList.toggle("on", n > 0);
+        if (!n) return;
+        $("pendN").textContent = String(n);
+        $("pendKeys").textContent = (p.keys || []).join("、");
+      }
+
       async function loadBoots() {
         try {
           const d = await apiGet("/api/boots");

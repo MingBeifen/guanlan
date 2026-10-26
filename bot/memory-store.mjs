@@ -1095,9 +1095,27 @@ function pickCite(key, day, text) {
     }
   }
   if (!good.length) return { cite: "", citeKind: "", body: raw, stripped };
+  // 2026-10-27（A5）：「指得到」之后再核一道「对得上」。
+  // resolveCite 只证明那个钟点/那天的文件真的存在；它不证明这条结论出自那里。
+  // 判据用 cite.checkFacts（可核事实 = 数字/英文串/引号内原话），
+  // 实测真实条目 95.8% 判「对得上」、整条编造能抓 93.8%。
+  // 核不上**不删出处**（出处本身是真的），只把 citeKind 降成 "mismatch"，
+  // 由 A1 的来源置信（CONF_BY_KIND.mismatch = 0.2）在检索时轻微压它。
+  // 这样一次判定的结果会一直带着走，事后也能靠 citeKind 查出来。
+  let kind = (kinds.size === 1 ? [...kinds][0] : "mixed").slice(0, 12);
+  try {
+    const dayText = cite.dayArchiveText(ctx);
+    const chk = cite.checkFacts(stripped, dayText);
+    // 判不上就记成 mismatch。**这里不写日志**：memory-store 没有自己的 logger，
+    // 想查「哪条被判对不上」直接 `grep '"citeKind":"mismatch"' home/memory/store.json`，
+    // 条目本身立刻能看见，比翻日志更直接。
+    if (!chk.ok) kind = "mismatch";
+  } catch {
+    /* 核不了就当没核过，不改变原有判定 */
+  }
   return {
     cite: [...new Set(good)].join("、").slice(0, 120),
-    citeKind: (kinds.size === 1 ? [...kinds][0] : "mixed").slice(0, 12),
+    citeKind: kind.slice(0, 12),
     body: stripped,
     stripped,
   };

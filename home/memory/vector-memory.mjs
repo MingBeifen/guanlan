@@ -774,6 +774,67 @@ const KW_W2 = 0.25; // 无实体路时，词面占 0.25
 const FUSE_TEXT = Number(process.env.WW_FUSE_TEXT ?? 0.6);
 const FUSE_REC = Number(process.env.WW_FUSE_REC ?? 0.25);
 const FUSE_IMP = Number(process.env.WW_FUSE_IMP ?? 0.15);
+
+// ---------- 记忆来源置信（2026-10-27 加；对照 BioCore 的 _BASE_CONFIDENCE） ----------
+// 为什么加：库里**早就有** `source`（ledger/extract/consolidate/short/own-thought）
+// 和 `citeKind`（card/raw/mixed/none/owner-ok）两个字段，写了、存了，
+// 但 `grep -c "source\|citeKind" vector-memory.mjs` = **0** —— 检索从来没读过它们。
+// 后果不是「检索不准」，是**她把自己想出来的、听来的，当成自己亲眼见过的**说出去。
+// （她自己都写过这条：「档案里写得最满的那几天，我反而最容易把听来的事说成自己见过的」。）
+//
+// 设计上刻意**只做轻微修正**：最大 10%，绝不推翻现有的文字/新近/记忆分三路融合。
+// 理由是这几路权重是 10-23 拿 290 条真实问句校准出来的，加一路就把校准推翻重来，
+// 代价远大于收益。所以它只做两件事：
+//   ① **打平局**——分数咬得很近时，让「有原话底账的」压过「她自己的念头」；
+//   ② **给出置信**——下游（whale-bot 的 vectorBlockFor）据此提醒她「这条记得不太准」。
+// 用 WW_FUSE_SRC=0 可以整条关掉。
+const FUSE_SRC = Number(process.env.WW_FUSE_SRC ?? 0.1);
+// 低于这个置信就在正文前贴一句「记得不太准」，让模型知道这条别当确定的事说。
+const CONF_HEDGE = Number(process.env.WW_CONF_HEDGE ?? 0.5);
+// 按「这条是怎么来的」给置信。数值参照 BioCore 的六档（direct 0.82 / told 0.62 /
+// inferred 0.45 …），但**改成观澜自己已有的取值**，不引入它那套 vocabulary。
+const CONF_BY_SOURCE = {
+  ledger: 1.0, // 主人原话底账：最硬，就是他说过的
+  extract: 0.7, // 从对话里抽出来的要点：已经过一道转述
+  short: 0.75, // 当天小结：也是转述，但时间近
+  consolidate: 0.7, // 巩固出来的
+  "own-thought": 0.3, // 她自己琢磨的：是想法，不是事实
+  manual: 0.6,
+};
+// 按「有没有能指过去的地方」给置信
+const CONF_BY_KIND = {
+  raw: 1.0, // 指到原话那一行
+  card: 0.85, // 指到事件卡（事件卡本身已经是二手的）
+  mixed: 0.8,
+  "owner-ok": 1.0, // 主人点头认过的
+  none: 0.25, // 明确标了「未核实」
+  // 2026-10-27（A5）：「指得到」但「对不上」——出处真、结论假的那种。
+  // 比 none 还低，但**不归零**：她可能只是把两件事写在同一行，
+  // 完全归零等于让这条记忆彻底消失，那比记错更糟。
+  mismatch: 0.2,
+};
+// 没有记忆库条目（没有 sid）的块，只能按它来自哪个目录判：
+// 原话底账是原始语料（最硬），日记是她自己写的（软），档案页是汇总（中）。
+function confOfSrcPath(src) {
+  const s = String(src || "");
+  if (/^原话\//.test(s)) return 1.0;
+  if (/^事件卡\//.test(s)) return 0.85;
+  if (/^档案\//.test(s)) return 0.95;
+  if (/^日子账\//.test(s)) return 0.8;
+  if (/^日记\//.test(s)) return 0.7;
+  return 0.85;
+}
+// 两样都有就取平均（都很硬才硬）；只有一样就用它；都没有退回路径判断。
+function confOf(it, st) {
+  if (st) {
+    const s = CONF_BY_SOURCE[st.source];
+    const k = CONF_BY_KIND[st.citeKind];
+    if (s != null && k != null) return (s + k) / 2;
+    if (s != null) return s;
+    if (k != null) return k;
+  }
+  return confOfSrcPath(it?.src);
+}
 // 2026-10-24 加（B8）：问句里只有人名/高频词（df > ENT_DF_MAX）时，实体路的权重打折。
 // 人名 df 天然极高（主人 530 / 〔主人名〕 850），不能当"锁"，但也不该完全不用。
 const ENT_WEAK_RATIO = Number(process.env.WW_ENT_WEAK_RATIO ?? 0.5);
@@ -1051,6 +1112,7 @@ export async function search(
     if (!(strongSim || weakButSupported)) continue;
     const st = it.sid ? info.get(it.sid) : null;
     const isSup = Boolean(st && st.status === "superseded");
+    const conf = confOf(it, st);
     // ⚠️ 问过去时**关掉时间衰减**（2026-10-24 想清楚的一条）：
     // 「你以前用什么模型」这个问题，答案本身就是**旧**的东西——如果还按「越新越好」打分，
     // 那条最该被召回的旧块会同时挨两刀（recency 低 + superseded 降权），
@@ -1058,6 +1120,11 @@ export async function search(
     const rec = wantsHistory ? 1.0 : recencyOf(it.day, layerOfSrc(it.src));
     const imp = st ? Math.min(1, Math.max(0, Number(st.score ?? 40) / 100)) : 0.5;
     let fused = Math.min(1, FUSE_TEXT * textSim + FUSE_REC * rec + FUSE_IMP * imp);
+    // 来源置信（2026-10-27）：**乘**一个 0.9~1.0 的系数，不做第四路相加。
+    // 为什么乘不为什么加：三路权重 0.6/0.25/0.15 加起来正好 1.0，再加一路就得重调全部权重，
+    // 等于把 10-23 拿 290 条真实问句做的校准全部作废。乘法只轻微压「她自己的念头/没核实的」，
+    // 分数咬得近时才改变顺序，压不动的一条都不动。
+    if (FUSE_SRC > 0) fused *= 1 - FUSE_SRC + FUSE_SRC * conf;
     // 被顶掉的旧说法降权 15%，让它排在现状答案后面（问过去时也留这一刀，
     // 但 rec 已经封顶成 1.0 了，实际只挨这一刀，不再双重惩罚）。
     if (isSup) fused *= 0.85;
@@ -1068,7 +1135,7 @@ export async function search(
       if (gap > 3) fused *= 0.55;
       else if (gap > 1) fused *= 0.8;
     }
-    scored.push({ it, fused, sim, textSim, rec, imp, kw, ent, superseded: isSup });
+    scored.push({ it, fused, sim, textSim, rec, imp, kw, ent, conf, superseded: isSup });
   }
   if (!scored.length) {
     // 一条都没够着门槛：词面退路也过同一道关（压中 KW_GATE 处、向量不低于 KW_FLOOR），过不了就老实空着。
@@ -1100,7 +1167,16 @@ export async function search(
       day: h.it.day,
       via: "fused",
       sim: Math.round(h.sim * 1000) / 1000,
+      // 2026-10-27 加：这条有多可信（0~1）。下游据此决定要不要提醒她「记得不太准」。
+      conf: Math.round(h.conf * 1000) / 1000,
     };
+    // 低置信的块，**在正文前贴一句**（不是只给字段）。
+    // 理由和 superseded 前缀同一条：这些块最终是拼进提示词的纯文本，
+    // 模型看不到元数据；只有写进正文，它才知道「这条别当确定的事说」。
+    if (h.conf < CONF_HEDGE && !h.superseded) {
+      o.text = `【这条记得不太准，别当确定的事说】${h.it.text}`;
+      o.hedged = true;
+    }
     // 时间推理（2026-10-24）：被顶掉的旧说法出结果时，**在正文前面贴一句日期前缀**。
     // 为什么要在正文里写而不是只给个字段：这些块最终是拼进提示词的纯文本，
     // 模型看不到元数据；只有写进正文，它才知道「这是老说法，不是现状」。
@@ -1121,6 +1197,7 @@ export async function search(
         imp: Math.round(h.imp * 1000) / 1000,
         kw: h.kw,
         ent: Math.round((h.ent ?? 0) * 1000) / 1000,
+        conf: Math.round((h.conf ?? 0) * 1000) / 1000,
       };
     return o;
   });

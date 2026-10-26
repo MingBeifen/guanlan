@@ -212,6 +212,203 @@ function bootHistory(limit = 60) {
   };
 }
 
+// ---------- 设置菜单（2026-10-27 主人拍的 D 档）----------
+// 为什么要它：她的功能开关原来全散在 config.json 里，改一个要开文本编辑器、还要记得重启。
+// 面板上能看能点，就不用记键名了。
+//
+// **三条硬约束**（这是这套设计的前提，改动前先读）：
+// ① 配置**不热读**：`bot/whale-bot.mjs` 的 CFG 是模块加载时从 config.json 构建一次的 const，
+//    运行期不重读。所以这里写完 config.json 只是「存下来了」，要重启才生效。
+//    → 因此有 `pendingSettings()`：记下「哪些键在机器人起来之后被改过」，面板顶部提示他重启。
+// ② config.json 里有 `models[].apiKey` 真密钥。**绝不能做整份 JSON 编辑器**，
+//    只认下面 SETTINGS_SCHEMA 里白名单列出的键，别的一律拒绝。
+// ③ 只放**纯开关和纯数值**。数组类（白名单/名字/屏蔽名单）要专门的列表编辑器，那是第二批。
+const SETTINGS_FILE = path.join(ROOT, 'config.json');
+const SETTINGS_PENDING = path.join(ROOT, 'home', 'state', 'settings-pending.json');
+
+// 每一项：key（config.json 里的点路径）/ label / desc（写清「关掉会怎样」）/ type / def / min / max / unit
+const SETTINGS_SCHEMA = [
+  {
+    id: 'memory',
+    title: '记忆与检索',
+    hint: '管她「能想起多少旧事」。全关她也能聊天，只是会忘得很快。',
+    items: [
+      { key: 'bot.memoryOpen', label: '记忆打通', type: 'bool', def: true,
+        desc: '开：群聊里也能想起私聊和别的群的事（但只对主人说具体内容）。关：各看各的。' },
+      { key: 'bot.vectorMemory', label: '向量记忆', type: 'bool', def: true,
+        desc: '开：按意思找旧事（要显存）。关：只按词面翻。' },
+      { key: 'bot.vectorKeywordFallback', label: '向量没够分时补词面', type: 'bool', def: true,
+        desc: '不花钱不占显存，建议开着。' },
+      { key: 'bot.vectorTopK', label: '向量取几条', type: 'num', def: 3, min: 1, max: 10, unit: '条',
+        desc: '每轮最多捞几条旧事进提示词。多了费 token。' },
+      { key: 'bot.vectorMinScore', label: '向量最低分', type: 'num', def: 0.5, min: 0, max: 1, step: 0.01,
+        desc: '低于这个相似度就不算「想起」。调低会捞进更多不相干的。' },
+      { key: 'bot.rawTailMsgs', label: '私聊带多少句原话', type: 'num', def: 20, min: 2, max: 60, unit: '句',
+        desc: '每轮提示词里附多少句最近的原话。少了接不上话，多了费 token。' },
+      { key: 'bot.groupRawTailMsgs', label: '群聊带多少句原话', type: 'num', def: 20, min: 2, max: 60, unit: '句',
+        desc: '同上，群里的。' },
+      { key: 'bot.summaryEveryMsgs', label: '攒多少句压一次当天小结', type: 'num', def: 20, min: 5, max: 100, unit: '句',
+        desc: '越小记得越细、越费钱。' },
+      { key: 'bot.dreamEnabled', label: '做梦', type: 'bool', def: true,
+        desc: '夜里一次，写独立文件不进主库。成本很低。' },
+    ],
+  },
+  {
+    id: 'talk',
+    title: '说话与回复',
+    hint: '管她「怎么说话、什么时候先应答」。',
+    items: [
+      { key: 'bot.stripTailPeriod', label: '掐掉句末句号', type: 'bool', def: true,
+        desc: 'QQ 上没人每句都打句号。关了就退回「全靠模型自觉」。' },
+      { key: 'bot.fishWarn', label: '鱼味警告（只记日志）', type: 'bool', def: true,
+        desc: '判出 AI 腔只记日志、不改她的话。成本约等于零，建议开。' },
+      { key: 'bot.fishRewrite', label: '鱼味自动重写', type: 'bool', def: false,
+        desc: '判出 AI 腔后真的改写她要说的话。默认关——先看效果再开。' },
+      { key: 'bot.parallelChat', label: '私聊长活不让路', type: 'bool', def: true,
+        desc: '开：她正在跑长活时，新消息另开一条车道先答。关：所有私聊排一条队（会等十几分钟）。' },
+      { key: 'bot.busyAck', label: '忙时先回一句', type: 'bool', def: true,
+        desc: '开：她忙的时候先说「我看到了，等下细说」。关：什么都不说，等他等。' },
+      { key: 'bot.chatMergeMax', label: '积压消息合并上限', type: 'num', def: 8, min: 1, max: 20, unit: '条',
+        desc: '他连发好几条时，一次最多合并成一轮。写 1 = 不合并。' },
+      { key: 'bot.chatParallelGraceMs', label: '另开车道前等多久', type: 'num', def: 30000, min: 1000, max: 60000, unit: '毫秒',
+        desc: '给「马上就结束的那一轮」一个收尾机会，太急会白多跑一轮。' },
+      { key: 'bot.busyAckCooldownMs', label: '「先回一句」冷却', type: 'num', def: 300000, min: 10000, max: 3600000, unit: '毫秒',
+        desc: '同一次忙里只咳一声，别每来一条都说一遍。' },
+    ],
+  },
+  {
+    id: 'voice',
+    title: '语音与表情',
+    hint: '她发不发语音、发多少张表情。',
+    items: [
+      { key: 'bot.voiceEnabled', label: '语音', type: 'bool', def: false,
+        desc: '开：她偶尔会发语音（要 CosyVoice3 装好）。关：只打字。' },
+      { key: 'bot.voiceDailyLimit', label: '语音日上限', type: 'num', def: 80, min: 0, max: 500, unit: '条',
+        desc: '一天最多几条语音。写 0 = 不发。' },
+      { key: 'bot.voiceInMaxSeconds', label: '收到的语音转写上限', type: 'num', def: 90, min: 10, max: 600, unit: '秒',
+        desc: '超过这个长度的语音她不转写。' },
+      { key: 'bot.maxStickersPerReply', label: '一次最多几张表情', type: 'num', def: 2, min: 0, max: 6, unit: '张',
+        desc: '和正图分开计数。写 0 = 不发表情包。' },
+      { key: 'bot.syncFavorites', label: '同步 QQ 收藏表情', type: 'bool', def: true,
+        desc: '只读不写，一天一次，成本约等于零。' },
+      { key: 'bot.maxFavUploadPerDay', label: '往收藏夹写几张/天', type: 'num', def: 3, min: 0, max: 20, unit: '张',
+        desc: '写的是你 QQ 账号的云端收藏（手机端可见）。写 0 = 完全不许写。' },
+    ],
+  },
+  {
+    id: 'group',
+    title: '群聊',
+    hint: '管她在群里「说不说、说多快、说几句」。',
+    items: [
+      { key: 'group.enabled', label: '群聊总开关', type: 'bool', def: true,
+        desc: '关：群里完全不理，只收私聊。' },
+      { key: 'group.speakGapMs', label: '群内开口间隔', type: 'num', def: 30000, min: 5000, max: 600000, unit: '毫秒',
+        desc: '半分钟才开口一次。窗口里的话先攒着，到点合成一轮。' },
+      { key: 'group.maxBubbles', label: '一次最多几句', type: 'num', def: 3, min: 1, max: 10, unit: '句',
+        desc: '群里一次最多分几条气泡。' },
+    ],
+  },
+  {
+    id: 'life',
+    title: '她自己的生活',
+    hint: '她晚上给自己找事、写日记复盘那几条线。关掉不影响聊天。',
+    items: [
+      { key: 'bot.newsEnabled', label: '晚上读新闻', type: 'bool', def: true,
+        desc: '开：晚上给自己找事时抓几条当天标题（落盘到 home\\news\\），读完写感想。关：不联网不落盘，只写自己的想法。' },
+      { key: 'bot.dailySummarySend', label: '每日小结（晚上发那句）', type: 'bool', def: true,
+        desc: '关掉只是不把「今天收个尾、最实在的一件是…」发出来；复盘照写进文件，晚上照发一句晚安。' },
+    ],
+  },
+  {
+    id: 'cost',
+    title: '预算与兜底',
+    hint: '管她「一轮最多花多少、主模型挂了要不要花钱兜底」。',
+    items: [
+      { key: 'bot.maxSteps', label: '单轮最多几步', type: 'num', def: 40, min: 0, max: 200, unit: '步',
+        desc: '写 0 = 不限（主人 2026-10-24 明确要的）。' },
+      { key: 'bot.chatLaneMaxTokens', label: '对话车道 token 上限', type: 'num', def: 400000, min: 0, max: 5000000, unit: 'token',
+        desc: '先答一句那条车道的天花板，防止两条线同时跑长活。写 0 = 不限。' },
+      { key: 'bot.longTailTokens', label: '长尾警戒线', type: 'num', def: 2000000, min: 0, max: 20000000, unit: 'token',
+        desc: '单轮越线只记日志 + 打标记，**不拦截**。' },
+      { key: 'bot.autoFallback', label: '主模型挂了自动退官方', type: 'bool', def: false,
+        desc: '开：免费模型挂了自动花钱兜底。关：挂了就是挂了（2026-10-23 主人关的，因为一天打了 221 次官方请求）。' },
+    ],
+  },
+];
+
+/** 点路径读写：'bot.vectorTopK' → cfg.bot.vectorTopK */
+function cfgGet(obj, key) {
+  let cur = obj;
+  for (const seg of key.split('.')) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = cur[seg];
+  }
+  return cur;
+}
+function cfgSet(obj, key, val) {
+  const segs = key.split('.');
+  let cur = obj;
+  for (const seg of segs.slice(0, -1)) {
+    if (cur[seg] == null || typeof cur[seg] !== 'object') cur[seg] = {};
+    cur = cur[seg];
+  }
+  cur[segs[segs.length - 1]] = val;
+}
+
+/** 机器人这一版是什么时候起来的（boot.json 的 startAt，机器人自己写的，比 bot.pid 的 mtime 准）。 */
+function botStartedAt() {
+  try {
+    const b = JSON.parse(fs.readFileSync(path.join(ROOT, 'home', 'state', 'boot.json'), 'utf8'));
+    return Number(b.startAt) || 0;
+  } catch { return 0; }
+}
+
+/**
+ * 在机器人起来之后被改过、但还没生效的键。
+ * 记录形状：`{items:{key:{at,from}}}` —— 每条记「什么时候改的、改之前是什么」。
+ * 记 `from` 是为了处理「改了又改回去」：最终值跟启动时一样，就不该再算待生效。
+ */
+function pendingSettings() {
+  const started = botStartedAt();
+  const empty = { count: 0, keys: [] };
+  if (!started || !alive(readPid('bot.pid'))) return empty;
+  let rec = null;
+  try { rec = JSON.parse(fs.readFileSync(SETTINGS_PENDING, 'utf8')); } catch { return empty; }
+  const items = rec && typeof rec.items === 'object' && rec.items ? rec.items : null;
+  if (!items) return empty;
+  const keys = Object.keys(items).filter((k) => Number(items[k]?.at) > started);
+  return { count: keys.length, keys };
+}
+
+/** 读当前 pending 记录（内部用，不判机器人活没活）。 */
+function readPendingRecord() {
+  try {
+    const r = JSON.parse(fs.readFileSync(SETTINGS_PENDING, 'utf8'));
+    if (r && typeof r.items === 'object' && r.items) return r;
+  } catch { /* 没记录 */ }
+  return { items: {} };
+}
+
+/** GET /api/settings：schema + 当前值 + 待生效。 */
+function readSettings() {
+  const cfg = loadConfig();
+  if (!cfg) return { ok: false, msg: '读不到 config.json（设置向导还没跑过？）' };
+  const groups = SETTINGS_SCHEMA.map((g) => ({
+    id: g.id,
+    title: g.title,
+    hint: g.hint,
+    items: g.items.map((it) => {
+      const raw = cfgGet(cfg, it.key);
+      const def = it.def;
+      const cur = it.type === 'bool'
+        ? (raw === undefined ? def : raw === true)
+        : (Number.isFinite(Number(raw)) && raw !== null && raw !== '' ? Number(raw) : def);
+      return { ...it, cur };
+    }),
+  }));
+  return { ok: true, groups, pending: pendingSettings(), botStartedAt: botStartedAt() };
+}
+
 // 主人睡（2026-10-20 的老功能）：机器人把状态写进 home\state\proactive.json，
 // 面板只读文件，不跟机器人进程打交道。
 // 2026-10-25：心情/氛围/主动生活的字段也一并读出来（原来只给 asleep/busy/mood 三样，
@@ -471,6 +668,9 @@ function status() {
       const b = bootHistory(1);
       return { todayCount: b.todayCount, todayMaxGapMin: b.todayMaxGapMin, total: b.total, exists: b.exists };
     })(),
+    // 设置菜单里改过、但机器人还没重启所以没生效的项（2026-10-27 D 档）。
+    // 放在 /api/status 里，前端那个 3 秒轮询顺手就能把顶部提示刷新掉，不用另开一个定时器。
+    pendingSettings: pendingSettings(),
     log: tailLog('supervisor.log', 80),
     botLog: tailLog('whale-bot.log', 40),
   };
@@ -1028,6 +1228,73 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/rejected') return json(res, 200, { ok: true, ...rejectedList(Number(url.searchParams.get('limit')) || 50) });
     if (url.pathname === '/api/sessions') return json(res, 200, { now: Date.now(), sessions: listSessions(25) });
     if (url.pathname === '/api/boots') return json(res, 200, bootHistory(Number(url.searchParams.get('limit')) || 60));
+    // ---- 设置菜单（2026-10-27 D 档）----
+    if (url.pathname === '/api/settings' && req.method !== 'POST') return json(res, 200, readSettings());
+    if (url.pathname === '/api/settings' && req.method === 'POST') {
+      const b = await body(req);
+      const patch = b && typeof b === 'object' ? (b.patch || {}) : {};
+      // 白名单：只认 schema 里出现过的键。config.json 里有真密钥，绝不做整份编辑器。
+      const allowed = new Map();
+      for (const g of SETTINGS_SCHEMA) for (const it of g.items) allowed.set(it.key, it);
+      const cfg = loadConfig();
+      if (!cfg) return json(res, 500, { ok: false, msg: '读不到 config.json' });
+      const changed = [];
+      const bad = [];
+      // 改之前的原值（记进 pending 的 from，用来处理「改了又改回去」）
+      const before = new Map();
+      for (const [k, v] of Object.entries(patch)) {
+        const it = allowed.get(k);
+        if (!it) { bad.push(`${k}（不在白名单里）`); continue; }
+        const prev = cfgGet(cfg, k);
+        if (it.type === 'bool') {
+          const nv = v === true || v === 'true' || v === 1 || v === '1';
+          if (prev === nv) continue;
+          before.set(k, prev === undefined ? it.def : prev === true);
+          cfgSet(cfg, k, nv);
+          changed.push(k);
+        } else {
+          const n = Number(v);
+          if (!Number.isFinite(n)) { bad.push(`${k}（不是数字）`); continue; }
+          const lo = it.min ?? -Infinity;
+          const hi = it.max ?? Infinity;
+          const clamped = Math.min(hi, Math.max(lo, n));
+          if (Number(prev) === clamped) continue;
+          before.set(k, Number.isFinite(Number(prev)) && prev !== null && prev !== '' ? Number(prev) : it.def);
+          cfgSet(cfg, k, clamped);
+          changed.push(k);
+        }
+      }
+      if (!changed.length) {
+        return json(res, 200, { ok: true, changed: [], bad, pending: pendingSettings(), msg: bad.length ? `有几项没认：${bad.join('、')}` : '没有变化' });
+      }
+      saveConfig(cfg);
+      // 记一笔「哪些键在机器人起来之后被改过」——面板顶部靠它算「有几项待生效」。
+      // 每条记 `{at, from}`：`from` 是**机器人启动时那个值**（不是上一次改之前的值）。
+      // 为什么：改了又改回去 = 跟启动时一样 = 不该再算待生效，所以要跟 from 比。
+      try {
+        const rec = readPendingRecord();
+        const now = Date.now();
+        for (const k of changed) {
+          const prevRec = rec.items[k];
+          // 已经有记录就沿用它的 from（那才是启动时的值）；没有就把这次的原值当 from
+          const from = prevRec && 'from' in prevRec ? prevRec.from : before.get(k);
+          const nowVal = cfgGet(cfg, k);
+          if (nowVal === from) delete rec.items[k]; // 改回原样了，不算待生效
+          else rec.items[k] = { at: now, from };
+        }
+        fs.mkdirSync(path.dirname(SETTINGS_PENDING), { recursive: true });
+        fs.writeFileSync(SETTINGS_PENDING, JSON.stringify(rec, null, 2) + '\n', 'utf8');
+      } catch { /* 记不上不影响配置已经存好 */ }
+      const pend = pendingSettings();
+      return json(res, 200, {
+        ok: true,
+        changed,
+        bad,
+        pending: pend,
+        // 只写 config.json，不自动重启：她可能正在跑一轮，打断比多等几秒更糟（D 档的核心取舍）
+        msg: `存好了 ${changed.length} 项。${pend.count ? `还有 ${pend.count} 项要重启才生效。` : ''}`,
+      });
+    }
     if (url.pathname === '/api/session') {
       const file = sessionFile(url.searchParams.get('ws'), url.searchParams.get('sid'));
       if (!file) return json(res, 404, { ok: false, msg: '找不到这个会话' });

@@ -2,7 +2,7 @@
 //
 // 这个网关不是我们起的：它由桌面 DSH 里的 dsh-our-free-model 插件（vendor/channel-pack）
 // 挂起来，默认 127.0.0.1:8326，密钥落在 <DSH_HOME>\openai-gateway\api-key。
-// 它同时供给：第三方账号渠道（workbuddy / trae / qoder 等）、
+// 它同时供给：白嫖渠道（workbuddy / trae / qoder ... 十三个账号渠道）、
 // our-free-model 免费车道、以及桌面 DSH 自己的 deepseek-official。
 //
 // 代价必须记住：网关活在桌面 DSH 进程里，桌面关了机器人就没模型。
@@ -54,7 +54,7 @@ function toRow(model) {
 }
 
 const PROVIDER_LABEL = {
-  workbuddy: 'WorkBuddy（第三方账号渠道）',
+  workbuddy: 'WorkBuddy（白嫖渠道）',
   'our-free-model': '免费车道',
   'our-free-model-region': '免费车道 · 地区限制',
   'deepseek-official': 'DeepSeek 官方',
