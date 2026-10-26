@@ -119,7 +119,12 @@ const CFG = {
   agentTimeoutMs: 30 * 60 * 1000,
   reminderTickMs: 15 * 1000,
   maxPerMinute: 20,
-  summaryEveryMsgs: 20,
+  // 攒多少条原话压一次「当天小结」（2026-10-26 改）：原来这里硬编码 20，**config.json 里写了也不生效**。
+  // 主人要把它从 20 调到 30（保守降频，约 -2.2% 成本），所以顺便做成可调——
+  // 与项目其他开关一致：功能开关走 config，不写死在 CFG 常量里。
+  summaryEveryMsgs: Number(KIT.bot?.summaryEveryMsgs) > 0
+    ? Number(KIT.bot.summaryEveryMsgs)
+    : 20,
   dayRolloverHour: 4,
   ledgerRecentDays: 3,
   memoSearch: true,
@@ -133,8 +138,14 @@ const CFG = {
   vectorMinScore: Number(KIT.bot?.vectorMinScore) || 0.5,
   // 向量一条都没够分时，按词面再翻一遍同一批块（不花钱、不占显存）；config 里写 false 就关
   vectorKeywordFallback: KIT.bot?.vectorKeywordFallback !== false,
-  rawTailMsgs: 6,
-  groupRawTailMsgs: 8,
+  // 每轮带多少句原话（2026-10-26 主人拍的 A 档：6 → 20，群 8 → 20）。
+  // 为什么改：从 2039 条私聊档案里按「间隔 >10 分钟算一次对话」切出 132 段，
+  //   每段条数中位 9 / p75 16 / p90 34 / 最长 156 —— 6 句只完整覆盖 41% 的对话；
+  //   20 句覆盖 83%（14 句 72% / 30 句 88%，20 是性价比拐点）。
+  // 成本实测（每轮平均 3.52 步、缓存命中 88%）：+578 tok/次拼装 ≈ 日成本 +3.7%。
+  // 现在**可调**：config.json → bot.rawTailMsgs / bot.groupRawTailMsgs（原来写死、config 里根本没有）。
+  rawTailMsgs: Number(KIT.bot?.rawTailMsgs) > 0 ? Number(KIT.bot.rawTailMsgs) : 20,
+  groupRawTailMsgs: Number(KIT.bot?.groupRawTailMsgs) > 0 ? Number(KIT.bot.groupRawTailMsgs) : 20,
   groupEarsKeep: 10,
   groupEarEveryMsgs: 3, // 2026-10-20 11:5x 主人要她"自己判断"：连着说 3 句就判断一次（原 6）
   // 2026-10-21 03:4x 主人定：主动插话（读空气）5 分钟冷却一次，到点才从最近几句里挑一句想接的；
@@ -189,11 +200,35 @@ const CFG = {
     KIT.bot?.longTailTokens != null && Number.isFinite(Number(KIT.bot.longTailTokens))
       ? Number(KIT.bot.longTailTokens)
       : 2 * 1000 * 1000,
+  // 对话车道的单轮 token 上限（2026-10-26 主人选的 C 项）：config.json → bot.chatLaneMaxTokens。
+  // 背景实测：对话车道一轮 **4 步就吃 238,439 token**（新增仅 16.4%，其余是缓存重读），
+  // 而平时一轮才 2–3 万。车道的意义是「先答一句」，不该在两条线里同时跑长活。
+  // 按钱（token）卡而不是按步数卡——步数只是代理指标，token 才是账单。
+  // 默认 40 万 ≈ 正常一轮的 13 倍，够它查一次资料、读一个文件，但不至于烧穿。
+  // 写 0 = 关闭这条限制（退回只受 maxTokensPerTurn 约束）。
+  chatLaneMaxTokens: (() => {
+    const n = Number(KIT.bot?.chatLaneMaxTokens);
+    if (KIT.bot?.chatLaneMaxTokens == null) return 400000;
+    return Number.isFinite(n) && n >= 0 ? n : 400000;
+  })(),
   voiceEnabled: KIT.bot?.voiceEnabled === true, // 语音开关：config.json → bot.voiceEnabled（默认关）
   // 鱼味警告（2026-10-25 D 方案）：config.json → bot.fishWarn，默认 **开**。
   // 成本约等于零（纯正则在主进程里跑，不 spawn、不联网、不调模型），
   // 且**只记日志不改她的话**，所以默认开。不想要就写 false。
   fishWarn: KIT.bot?.fishWarn !== false,
+  // 鱼味自动重写（2026-10-26 C3，主人点头做的）：判出 AI 腔后尝试**安全改写**（只换套话、不重排语序）。
+  // **默认关闭**——它改的是她实际说出去的话，要先看效果再开。
+  // config.json → bot.fishRewrite: true 打开；想关随时写 false，不用改代码。
+  fishRewrite: KIT.bot?.fishRewrite === true,
+  // 掐句末句号（2026-10-26 主人选的 A 项）：config.json → bot.stripTailPeriod，默认 **开**。
+  // 依据：`_回复风格.md` 第 9 条要求「每句话末尾都不加句号，QQ 上没人这么打」，
+  // 但代码从没实现过，实测 23.5%（52/221）的回复还带着句末句号。
+  // 写 false 就退回「全靠模型自觉」的老样子（不想要这层确定性兜底时用）。
+  stripTailPeriod: KIT.bot?.stripTailPeriod !== false,
+  // 首启问候窗口（2026-10-26 主人拍板）：config.json → bot.firstWakeWindowMin，默认 10 分钟。
+  // 「每天 8 点后 12 点前首次启动 = 早上好；12 点后首次启动 = 下午好」——
+  // 只在启动后的这个窗口内认「首启」，过了就算错过、不再补（防止每次重启都问候一遍）。
+  firstWakeWindowMin: Number(KIT.bot?.firstWakeWindowMin) || 10,
   // 梦境引擎（2026-10-24）：config.json → bot.dreamEnabled，默认 **开**（成本只在夜里一次，
   // 且写在独立文件不进主库）。不想要就写 false，不用改代码。
   dreamEnabled: KIT.bot?.dreamEnabled !== false,
@@ -203,6 +238,35 @@ const CFG = {
   // 主模型挂了要不要自动退官方模型（要花钱）：config.json → bot.autoFallback，默认 **关**。
   // 2026-10-23 主人拍板关掉：实测一天因兜底打了 221 次官方请求。
   autoFallback: KIT.bot?.autoFallback === true,
+  // ---------- 私聊长活不让路（2026-10-26 主人选的 D：L0+L1+L2 全做） ----------
+  // 实测依据（7 天 turns.jsonl）：私聊单轮 p50 11s / p90 82s / p99 673s / 最长 1122s；
+  // 落在她正在跑的那一轮里的消息 **136 条/7 天（13%）**，平均等 191s、p90 553s、最长 16.7 分钟。
+  // 根因：enqueue/drain 每会话一条纯串行队列，队列里既没有「合并」也没有「先应答」两个动作。
+  // 三档开关都走 config.json → bot.*，不写死在代码里（主人一贯要求）。
+  //   parallelChat=false → L2 关掉，退回「所有私聊消息排同一条队列」（原来的行为）
+  //   busyAck=false      → L0 关掉，忙时不再先回一句
+  //   chatMergeMax=1     → L1 关掉，积压的几条不合并，还是一句一轮
+  parallelChat: KIT.bot?.parallelChat !== false,
+  busyAck: KIT.bot?.busyAck !== false,
+  // 攒批上限：一次最多把几条合并成一轮（再多就分两轮，别把一轮撑到爆）
+  chatMergeMax: (() => {
+    const n = Number(KIT.bot?.chatMergeMax);
+    return Number.isFinite(n) && n >= 1 ? Math.min(20, Math.floor(n)) : 8;
+  })(),
+  // 主车道在跑时，先攒这么久再决定「等它」还是「另开一条对话车道」（毫秒）。
+  // 给「马上就要结束的那一轮」一个体面收尾的机会，避免为省几秒白开一个 dsh 进程。
+  // 2026-10-26 03:3x 主人点头从 8 秒抬到 30 秒：8 秒太急——实测串行轮 p50 11s / p75 28s，
+  // 一半的轮次会在宽限边上被劈成两条，白多跑一轮（那晚那一条插话 10 步、24 万 token）。
+  // 30 秒之后还开着的，基本就是 p90 以上的长活（p90 82s），那才值得另开。
+  chatParallelGraceMs: (() => {
+    const n = Number(KIT.bot?.chatParallelGraceMs);
+    return Number.isFinite(n) && n >= 1000 ? Math.min(60000, n) : 30000;
+  })(),
+  // 忙时先应答的冷却：同一次「主车道忙」里只回一句，别每来一条都咳一声（毫秒）
+  busyAckCooldownMs: (() => {
+    const n = Number(KIT.bot?.busyAckCooldownMs);
+    return Number.isFinite(n) && n >= 10000 ? n : 5 * 60 * 1000;
+  })(),
   // 真实天气坐标（2026-10-23）：config.json → weather.{lat,lon}，不填就不注入天气。
   weather: (() => {
     const w = KIT.weather;
@@ -276,15 +340,38 @@ function progressFile(key) {
 function progressWrite(p) {
   try {
     fs.mkdirSync(PROGRESS_DIR, { recursive: true });
-    fs.writeFileSync(progressFile(p.key), JSON.stringify(p, null, 1), "utf8");
+    // 落盘文件名按 lane 走（2026-10-26 L2）：双车道时两条快照必须落在两个文件里，
+    // 否则「长活」和「对话」写到同一份 <key>.json 上互相覆盖——面板上进度跳、`进度` 读到别人的。
+    fs.writeFileSync(
+      progressFile(p.laneKey || p.key),
+      JSON.stringify(p, null, 1),
+      "utf8",
+    );
   } catch {
     /* 写快照失败不能影响跑任务 */
   }
 }
 
-function progressStart(key, label) {
+// ⚠️ 2026-10-26 拆双车道（L2）：进度快照**按 lane 存，不再按 memory key 存**。
+// 原来 `liveProgress.set(key, p)` 一个会话只有一份快照，双车道一开，
+// 「长活」和「对话」两轮同时跑会互相覆盖——面板上进度会跳、`进度` 口令也读到别人的，
+// 而且 `progressEnd` 会把对方那份一起删掉。改法：
+//   ① 存储键 = 排队键（laneKey），一个 lane 一份；
+//   ② 快照里额外带 `memoryKey`，面板/口令照旧按会话看，不用改协议。
+// 没有 lane 概念的老调用（lane 参数不传）行为完全不变：键就是 key 本身。
+function progressLaneId(laneKey, memoryKey) {
+  const l = String(laneKey || memoryKey || "");
+  const m = String(memoryKey || laneKey || "");
+  // 单车道时两者相同，键保持原样（面板上「任务进度」文件名不变，历史文件不用迁移）
+  return l === m ? m : l;
+}
+
+function progressStart(key, label, opts = {}) {
+  const laneId = progressLaneId(opts.laneKey, key);
   const p = {
     key,
+    laneKey: laneId,
+    memoryKey: key,
     label: label || key,
     startedAt: Date.now(),
     updatedAt: Date.now(),
@@ -297,20 +384,21 @@ function progressStart(key, label) {
     ok: null,
     ms: 0,
   };
-  liveProgress.set(key, p);
+  liveProgress.set(laneId, p);
   progressWrite(p);
   return p;
 }
 
-function progressTouch(key, patch) {
-  const p = liveProgress.get(key);
+function progressTouch(key, patch, opts = {}) {
+  const p = liveProgress.get(progressLaneId(opts.laneKey, key));
   if (!p) return;
   Object.assign(p, patch, { updatedAt: Date.now() });
   progressWrite(p);
 }
 
-function progressEnd(key, r) {
-  const p = liveProgress.get(key);
+function progressEnd(key, r, opts = {}) {
+  const laneId = progressLaneId(opts.laneKey, key);
+  const p = liveProgress.get(laneId);
   if (!p) return;
   Object.assign(p, {
     done: true,
@@ -864,12 +952,25 @@ function nowInBeijing() {
     .replace("Z", "+08:00");
 }
 
-// ---------- 重启认得自己（2026-10-22 主人要的） ----------
+// ---------- 重启认得自己（2026-10-22 主人要的；2026-10-26 换成「事实锚」判据） ----------
 // 以前是退出前把「我回来啦 🐳 刚才去换了口气」塞进发件箱，等新进程起来才发出去——可那会儿她并不知道自己重启过。
-// 现在进程自己记出生时刻、每分钟记一次心跳、退出时补退出时刻（home\state\boot.json）；
-// 下一次启动读它：上一版几分钟前还活着就算重启，起来之后自己开口说一句（见 bootNotice）。
+// 进程自己记出生时刻、每分钟记一次心跳、退出时补退出时刻（home\state\boot.json）；
+// 下一次启动读它，起来之后自己开口说一句（见 bootNotice）。
 // 他让 reboot / 面板点重启时先留一个记号（restart-asked.json），新进程才认得出这趟是谁让退的。
+//
+// 【2026-10-26 改造（主人选的 B+A+C 档）】原来只有一条判据：「上一版 3 分钟内还活着就算重启」。
+// 从 58 次启动里量出来的实况：停机中位 8.0 分钟，**3 分钟以上占 51%（29/57）**——
+// 过半的重启被当成冷开机、一句都不吭；而且提示词那行只管 30 分钟，3306 轮里只有 11.5% 落进窗口。
+// 3 分钟 / 5 分钟 / 30 分钟这三个数全是拍脑袋的。改成三层：
+//   ① **事实锚**：用 os.uptime() 反推「这台机器是什么时候开机的」。
+//      上一版的心跳**早于**本次开机 = 整台机器关过（coldBoot，她那段时间真的不存在）；
+//      **晚于**本次开机 = 机器一直醒着、只有进程换了（这才是「我被重启了」）。这是因果，不是阈值。
+//   ② **时长分档**：同一台机器上按断开多久分 quick(≤3min) / restart(3–30min) / longDown(>30min)。
+//   ③ **可查状态**：每次启动往 home\state\boots.jsonl 追加一行（只留最近 200 行），
+//      播报里带「今天第 N 次、断了多久」，并告诉她去哪读——stateless 架构下每轮都是新会话，
+//      **一次性播报过了 30 分钟就等于不存在**，只有落成可查的文件她才能随时想起自己的来历。
 const BOOT_PATH = path.join(CFG.home, "state", "boot.json");
+const BOOT_LOG_PATH = path.join(CFG.home, "state", "boots.jsonl");
 const RESTART_ASK_PATH = path.join(CFG.home, "state", "restart-asked.json");
 const BOOT_AT = Date.now();
 const BOOT_PREV = readJson(BOOT_PATH, null);
@@ -879,20 +980,129 @@ const bootSeenAt = Math.max(
   numAt(BOOT_PREV?.aliveAt),
   numAt(BOOT_PREV?.exitAt),
 );
+// 这台机器本次开机时刻（本地时钟）。os.uptime() 在睡眠/快速启动下可能不准，
+// 所以只拿它做「因果判断」（上一版是不是在这台机器开机之前就没的），不做精确计时。
+const machineBootAt = (() => {
+  try {
+    const up = Number(os.uptime()) * 1000;
+    return up > 0 ? BOOT_AT - up : 0;
+  } catch {
+    return 0;
+  }
+})();
 const bootAsk = readJson(RESTART_ASK_PATH, null);
 const bootAskedAt = numAt(bootAsk?.at);
+const bootClass = classifyBoot({
+  nowAt: BOOT_AT,
+  prevSeenAt: bootSeenAt,
+  machineBootAt,
+  gapMs: bootSeenAt > 0 ? BOOT_AT - bootSeenAt : 0,
+});
 const BOOT = {
   at: BOOT_AT,
   // 记号五分钟内有效；by 记着是谁让退的（reboot 口令 / 面板）
   asked: bootAskedAt > 0 && BOOT_AT - bootAskedAt <= 5 * 60 * 1000,
   askedBy: String(bootAsk?.by ?? ""),
-  // 上一版三分钟内还露过面（心跳或退出）= 重启；更久 = 机器关过，那种不冒话，免得半夜吵人
-  restarted: bootSeenAt > 0 && BOOT_AT - bootSeenAt <= 3 * 60 * 1000,
+  // restarted = 机器一直醒着、上一版是我自己前后脚（≤30 分钟）。不再用 3 分钟这个拍脑袋的数。
+  restarted: bootClass.restarted,
+  // 整台机器关过：这种「不是我被重启，是我真的不在」要跟她说清楚，不能混说成「刚睡醒」
+  coldBoot: bootClass.tier === "coldBoot",
+  tier: bootClass.tier,
+  gapMs: bootClass.gapMs,
+  machineBootAt,
+  machineRebooted: bootClass.machineRebooted,
+  // 今天第几次起来（含本次）：从流水账数，今天还没有就是 1
+  todayCount: countBootsToday(BOOT_AT) + 1,
   cleanExit:
     numAt(BOOT_PREV?.exitAt) > 0 &&
     numAt(BOOT_PREV?.exitAt) >= numAt(BOOT_PREV?.startAt),
   noticedAt: numAt(BOOT_PREV?.noticeAt),
 };
+
+/**
+ * 判断这一趟启动是什么性质。**纯函数**：不读盘、不改全局，自检可以直接喂用例。
+ * tier：first / quick / restart / longDown / coldBoot
+ *   first    —— 盘上还没有上一版的记录（头一次跑这套逻辑）
+ *   quick    —— 同一台机器，断开 ≤3 分钟（改代码 / reboot 那种「换口气」）
+ *   restart  —— 同一台机器，断开 3–30 分钟
+ *   longDown —— 同一台机器，断开 >30 分钟（多半是睡过去，或者进程被停了很久）
+ *   coldBoot —— 上一版的心跳早于本机这次开机时刻：整台机器关过，她那段时间真的不存在
+ */
+function classifyBoot({ prevSeenAt, machineBootAt: mBootAt, gapMs }) {
+  if (!(Number(prevSeenAt) > 0)) {
+    return { tier: "first", gapMs: 0, machineRebooted: false, restarted: false };
+  }
+  const gap = Math.max(0, Number(gapMs) || 0);
+  // 上一版的心跳早于本次开机 = 那会儿机器已经不在了。留 90 秒容差，防 os.uptime 抖动误判。
+  const machineRebooted = Number(mBootAt) > 0 && Number(prevSeenAt) < Number(mBootAt) - 90 * 1000;
+  if (machineRebooted) return { tier: "coldBoot", gapMs: gap, machineRebooted: true, restarted: false };
+  if (gap <= 3 * 60 * 1000) return { tier: "quick", gapMs: gap, machineRebooted: false, restarted: true };
+  if (gap <= 30 * 60 * 1000) return { tier: "restart", gapMs: gap, machineRebooted: false, restarted: true };
+  return { tier: "longDown", gapMs: gap, machineRebooted: false, restarted: true };
+}
+
+/** 从流水账里数「今天」第几次启动（北京日期，不分换日线）。 */
+function countBootsToday(ts) {
+  const day = bjDayKey(ts);
+  let n = 0;
+  try {
+    const raw = readText(BOOT_LOG_PATH);
+    if (raw) {
+      for (const line of raw.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          if (bjDayKey(numAt(JSON.parse(line).at)) === day) n += 1;
+        } catch {
+          /* 半行/坏行跳过 */
+        }
+      }
+    }
+  } catch {
+    /* 还没有流水账 = 今天第 1 次 */
+  }
+  return n;
+}
+
+/**
+ * 记一笔启动流水账（home\state\boots.jsonl，只留最近 200 行）。
+ * 这是「她随时能查自己断过几次」的唯一依据：boot.json 只有当前这一版的状态，
+ * 上一版一覆盖就没了；流水账才是历史。
+ */
+function appendBootLog() {
+  try {
+    ensureDir(path.dirname(BOOT_LOG_PATH));
+    let gitHead = "";
+    try {
+      const r = spawnSync("git", ["rev-parse", "--short", "HEAD"], {
+        cwd: KIT_ROOT,
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      gitHead = String(r.stdout ?? "").trim();
+    } catch {
+      /* 不在 git 仓里 / 没装 git：这一格空着就是空着 */
+    }
+    const line = JSON.stringify({
+      at: BOOT.at,
+      tier: BOOT.tier,
+      gapMin: Math.round((BOOT.gapMs || 0) / 60000),
+      prevSeenAt: bootSeenAt || 0,
+      machineBootAt: BOOT.machineBootAt || 0,
+      machineRebooted: Boolean(BOOT.machineRebooted),
+      askedBy: BOOT.askedBy || "",
+      cleanExit: Boolean(BOOT.cleanExit),
+      todayCount: BOOT.todayCount,
+      gitHead,
+      fileAt: selfFileClock(),
+    });
+    const old = readText(BOOT_LOG_PATH);
+    const lines = old ? old.split("\n").filter((x) => x.trim()) : [];
+    lines.push(line);
+    fs.writeFileSync(BOOT_LOG_PATH, lines.slice(-200).join("\n") + "\n", "utf8");
+  } catch (e) {
+    log("boots.jsonl 记不上（不影响启动）:", errMsg(e));
+  }
+}
 let bootRecord = {
   startAt: BOOT.at,
   aliveAt: BOOT.at,
@@ -926,6 +1136,16 @@ function selfFileClock() {
   }
 }
 
+/** 断开多久说成人话：40 分钟 / 3 小时 20 分 / 不到一分钟。 */
+function gapText(ms) {
+  const min = Math.round(Math.max(0, Number(ms) || 0) / 60000);
+  if (min < 1) return "不到一分钟";
+  if (min < 60) return `${min} 分钟`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+}
+
 /** 重启回来自己开口说的那句话；不是重启（头一次开机、机器关了一夜）就返回空串。 */
 function bootNotice() {
   // 头一次跑这套逻辑时盘上还没有 boot.json，认不出上一版——但只要有他让重启的记号，还是说一句
@@ -941,9 +1161,19 @@ function bootNotice() {
           ? "上一版是自己退出来等着重拉的"
           : "上一版是被掐掉的，我没来得及自己退；要是你没动手，那就是我崩了";
   const stamp = selfFileClock();
+  // 三层不同的话（2026-10-26）：不能把「机器关了一夜」混说成「我刚睡醒」——
+  // 那段时间她是真的不存在，不是「在打盹」。断多久也一并说准，别让他自己去算。
+  const head =
+    BOOT.tier === "coldBoot"
+      ? "我回来了 🐳 这回是整台机器重启过，不是我一个人断了一下"
+      : BOOT.tier === "quick" || BOOT.tier === "first"
+        ? "我回来了，重启完了 🐳"
+        : "我回来了 🐳 这次断得比平时久一点";
+  const span = BOOT.gapMs > 0 ? `，中间断了 ${gapText(BOOT.gapMs)}` : "";
+  const nth = BOOT.todayCount > 1 ? `（今天第 ${BOOT.todayCount} 次起来）` : "";
   return [
-    "我回来了，重启完了 🐳",
-    `${clockText(BOOT.at)} 起的新进程${stamp ? `，跑的是我 ${stamp} 存的那版` : ""}；${why}`,
+    head,
+    `${clockText(BOOT.at)} 起的新进程${stamp ? `，跑的是我 ${stamp} 存的那版` : ""}${span}${nth}；${why}`,
   ].join("\n");
 }
 
@@ -955,6 +1185,12 @@ const pendingCalls = new Map();
 let echoSeq = 0;
 let watchdogTimer = null;
 let lastRestartAt = 0;
+// 同一条消息的去重账本（2026-10-26）：message_id -> 到达时间。
+// ⚠️ 必须放在**模块级**，不能放 connect() 里——ws 会重连，放函数内的话一重连就清空，
+// 而「重复投递」最常发生在断线重连前后（NapCat 会把没 ack 的消息补投一次）。
+// 只在内存里，重启就重新记，够用了（这个账本只需要覆盖「几秒到几分钟内的重复」）。
+const seenMessageIds = new Map();
+const SEEN_MAX = 300;
 
 function connect() {
   log("连接 OneBot:", CFG.wsHost);
@@ -975,6 +1211,8 @@ function connect() {
     }, 3000);
   });
 
+  // 同一条消息的去重账本（2026-10-26）：message_id -> 到达时间。
+  // 只在内存里，覆盖「几秒内的重复投递」；重启就重新记，够用了。
   ws.addEventListener("message", (ev) => {
     let data;
     try {
@@ -998,6 +1236,36 @@ function connect() {
       return;
     }
     if (data.post_type === "message") {
+      // ⚠️ 2026-10-26 加：**同一条消息按 message_id 去重**。
+      // 实测事故（05:15-05:16 那段）：主人连着说了几句「好呢小宝」「知道啦，晚安宝宝」，
+      // 日志里同一毫秒出现两次「硬消息（刚聊到一半）」、两次「闲聊跳过检索」，
+      // 然后**两轮同时开跑**（6.4s 和 6.0s），她答了两遍近乎一样的话
+      // （「嗯，睡吧，我在这儿守着。」+「嗯，睡吧。我在这儿守着呢。」），
+      // 主人看到的就是「消息好多、最后两句还重复」。
+      // 根因：这里原来**没有任何去重**——同一个 message_id 被投递两次（NapCat 重发 / WS 抖动 /
+      // 断线重连后的补投），就会原样跑两轮。队列串行挡不住，因为两条是**同时**进来的。
+      // 做法：记最近 200 个 message_id，同 id 再来直接丢。内存 Map，不落盘（重启后重新开始记，
+      // 这个窗口只需要覆盖「几秒内的重复投递」）。
+      const mid = data.message_id != null ? String(data.message_id) : "";
+      if (mid) {
+        if (seenMessageIds.has(mid)) {
+          log(`重复投递，丢掉：message_id=${mid}`, data.message_type, data.user_id);
+          return;
+        }
+        seenMessageIds.set(mid, Date.now());
+        // 只留最近 SEEN_MAX 条，且顺手清掉 10 分钟以上的（避免长期增长）。
+        // 用 while 而不是 for...break —— 原来的 for 循环在「最老的那条还很新」时会提前 break，
+        // 结果 Map 会无限长。改成 while 明确按「条数或年龄」任一超标就删最老的。
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        while (seenMessageIds.size > SEEN_MAX) {
+          const oldest = seenMessageIds.keys().next().value;
+          seenMessageIds.delete(oldest);
+        }
+        for (const [k, at] of seenMessageIds) {
+          if (seenMessageIds.size <= SEEN_MAX && at > cutoff) break;
+          if (at <= cutoff) seenMessageIds.delete(k);
+        }
+      }
       // 顺手记下群里谁叫什么（拼群提示要用），不认识就当没记
       if (data.message_type === "group")
         rememberGroupNick(
@@ -1114,6 +1382,25 @@ const VOICE_MIN_SECONDS = 1.5; // 太短发出去显示异常
 const VOICE_IN_MAX_SECONDS = Number(CFG.voiceInMaxSeconds) || 90;
 const VOICE_DAILY_LIMIT = Number(CFG.voiceDailyLimit) || 80; // 一天最多合成几条（2026-10-25 从 40 提到 80，新音色好听、主人要她更爱说话）
 const VOICE_RE = /\[语音\]([\s\S]*?)\[\/语音\]/g;
+// 语音标记的宽容认法（2026-10-26 01:5x 主人点头「可以」）：
+// 我手写标记时偶尔会换括号或写繁体——<語音>…</語音>、[語音]、【语音】、【/语音】。
+// 原来只认方头括号 + 简体，那一次两段语音一条都没合成、标记还被当字发到 QQ。
+// 做法：进 extractVoiceTags 之前先把这些写法统一成 [语音] / [/语音]，后面逻辑一个字都不用改。
+// 括号不要求配对（【语音] 也认）：中间那截必须正好是「语音/語音」，误伤的余地很小。
+// 2026-10-26 04:36 真事故：我把开头写成了 `[t语音]`（括号里多混进一个字母 t），
+// 上面这条「正好是语音」的规矩不认 → 那段一句都没合成，标记连字一起发到 QQ。
+// 现在允许语音前后各挂最多 3 个 ASCII 字母/数字（t、T、v、vt、语音1 这类手滑写法都认），
+// 中间那截仍然只认「语音/語音」，误伤余地还是很窄。
+const VOICE_MARK_RE =
+  /[\[【<＜〈]\s*[A-Za-z0-9]{0,3}\s*[\/／]?\s*[A-Za-z0-9]{0,3}\s*(?:语音|語音)\s*[A-Za-z0-9]{0,3}\s*[\/／]?\s*[A-Za-z0-9]{0,3}\s*[\]】>＞〉]/g;
+// 剥完还剩下的「括号里有语音」怪标记（[语音abc]、[v語音……）：这类绝不能发到 QQ，
+// 整块删掉并记数，调用方打日志。只认括号内是字母/数字/斜杠/空白的，别误吞正文里的中文。
+const VOICE_LEFTOVER_RE = /[\[【<＜〈][\sA-Za-z0-9\/／]{0,4}(?:语音|語音)[\sA-Za-z0-9\/／]{0,4}[\]】>＞〉]/g;
+function normalizeVoiceMarks(text) {
+  return String(text ?? "").replace(VOICE_MARK_RE, (whole) =>
+    /[\/／]/.test(whole) ? "[/语音]" : "[语音]",
+  );
+}
 // 语气标记（2026-10-24 主人拍板）：[语气:开心] 这种写在 [语音] 里面，代码剥掉不发。
 // 语气现在落到两个真能影响声音的地方：instruct2 的情绪指令（--tone）+ 语速倍率 speed。
 // 2026-10-25 之前这里写的是「GPT-SoVITS 没有 emo_alpha」，那套引擎已删，别再照旧注释推。
@@ -1156,6 +1443,22 @@ const TONE_SPEED = [
   [["温柔", "轻声", "慢", "缓", "安抚"], 0.92],
 ];
 
+// ⚠️ 2026-10-26 加（C4「长句语速 4.37」，主人点头做的）：**长度校正**。
+// 实测依据（从 76 条合成记录反推「字节/字」，同码率下线性可比）：
+//   短句(≤15字) 52 条 → **2299 B/字**；中句(16-19) 14 条 → 2011；**长句(≥20) 10 条 → 2046**。
+//   → **长句每字时长比短句短 11%，即同一套 speed 下长句会自动说快 11%**。
+//   这正是「长句语速过快、听着赶」的来源：不是情绪倍率错，是**长度效应没有任何补偿**。
+// 修法：在情绪倍率之上再乘一个按字数递减的系数——句子越长压得越多，短句完全不受影响。
+// 保守取值（宁可略慢也不做「拖」的感觉）：≤14 字 ×1.0；15-24 ×0.97；25-34 ×0.94；≥35 ×0.91。
+// 改坏了 `--voice-test` 立刻能听出来（它会对 6 种语气真合成并打印 speed）。
+function lengthSpeedFactor(chars) {
+  const n = Math.max(0, Number(chars) || 0);
+  if (n <= 14) return 1.0;
+  if (n <= 24) return 0.97;
+  if (n <= 34) return 0.94;
+  return 0.91;
+}
+
 // 从一段话里剥出语气词，返回 { text, tone, speed }
 // 没写语气 = tone 空、speed 1.0，跟原来完全一样（零行为变化）
 function extractTone(raw) {
@@ -1176,6 +1479,10 @@ function extractTone(raw) {
       }
     }
   }
+  // C4（2026-10-26）：长度校正——长句自动说快 11%，这里按字数补回来。
+  // 只对「真要说出去的字数」算（去标点/空白），避免标点把她误判成更长的句子。
+  const spoken = text.replace(/[\s\p{P}]/gu, "");
+  speed = Number((speed * lengthSpeedFactor(spoken.length)).toFixed(3));
   return { text: text.replace(/\s+/g, " ").trim(), tone, speed };
 }
 
@@ -1435,7 +1742,8 @@ function probeDuration(file) {
 const VOICE_MAX_PER_REPLY = 2;
 function extractVoiceTags(text) {
   const says = [];
-  const src = String(text ?? "");
+  // 先归一：<語音>、【语音】、[語音] 这些写法全变成 [语音]（2026-10-26 加的）
+  const src = normalizeVoiceMarks(text);
   let repaired = 0; // 兜回来的「漏写闭合」段数，调用方据此打日志
   // 第一遍：正常成对的 [语音]…[/语音]
   let rest = src.replace(VOICE_RE, (whole, body) => {
@@ -1488,10 +1796,18 @@ function extractVoiceTags(text) {
   }
   // 落单的 [/语音]（没有开头）一律清掉：这类标记绝不能出现在 QQ 上
   rest = rest.replace(/\[\/?语音\]/g, "");
+  // 怪标记兜底（2026-10-26）：剥完还剩「括号里带语音」的残块，一律删掉别发出去，
+  // 记个数让调用方打日志——真事故里主人看到的就是 `[t语音]` 这种字面括号。
+  let leftovers = 0;
+  rest = rest.replace(VOICE_LEFTOVER_RE, () => {
+    leftovers += 1;
+    return "";
+  });
   return {
     says,
     rest: rest.replace(/\n{3,}/g, "\n\n").trim(),
     repaired, // 兜回来的漏闭合段数（调用方据此打日志）
+    leftovers, // 删掉的怪标记个数（调用方据此打日志）
   };
 }
 
@@ -1591,6 +1907,72 @@ function fishCheck(text) {
 }
 
 const FISH_WARN_PATH = path.join(CFG.home, "state", "fish-warn.jsonl");
+
+// ⚠️ 2026-10-26 加（C3「鱼八股升级成警告+自动重写」，主人点头做的）：
+// 原来 `fishCheck` **只判不拦**——判出来了也只是记一笔日志，话照发。
+// 现在升级成「**能安全改的就改，改不了仍旧只警告**」。为什么不做成「全部调用模型重写」：
+//   ① 那要额外一次模型调用，一条鱼味话多花一次钱，且延迟 2-4 秒；
+//   ② 更危险的是**会改出病句**——重写很可能把她说得好的地方一起改掉。
+// 所以这里只做**定向、可逆、有把握的替换**：把「AI 腔套话」换成人话里的等价说法。
+// 三条硬约束（缺一条就不做，宁可只警告）：
+//   ① **只换有把握的整词/整句**，不做语序重排（语序一动就可能是病句）；
+//   ② **替换后必须重新过一遍 `fishCheck`**，确认鱼味真的降了；没降就**还原原文**；
+//   ③ **默认关闭，config 可开**（`bot.fishRewrite`），改坏了能一键关掉。
+const FISH_REWRITE = [
+  // [正则, 替换成, 说明]
+  // ⚠️ 只放「软信号」层面的套话，**绝不放硬证据里的词**。
+  // 实测发现（本轮自检报出来的）：`本质上` 既是 FISH_HARD 的硬证据，又曾被写进下面的
+  // 解释腔规则里 → 结果是「硬证据被静默删掉、鱼味判定从 hit 变 false」，
+  // 看着像改好了，实际是把一条真 AI 腔抹掉了、还不留痕。**硬证据只能警告，不能被改写规则吃掉。**
+  // 「不是…而是…」这种对仗是典型鱼八股里最容易出戏的一类。
+  [/(?:并|而)?不是[^，。！？\n]{1,18}而是/g, "", "对仗句式（不是…而是）整段去掉"],
+  // 「说白了」「换句话说」「归根结底」这类解释性开头（**不含「本质上」——它是硬证据**）
+  [/(?:说白了|换句话说|归根结底)[，,]?\s*/g, "", "解释性套话"],
+  // 「这意味着」「这说明了」这种总结腔
+  [/(?:这意味着|这说明了|这说明)[，,]?\s*/g, "", "总结腔"],
+  // 「值得注意的是」「需要注意的是」
+  [/(?:值得注意的是|需要注意的是|值得一提的是)[，,]?\s*/g, "", "提示腔"],
+  // 「在某种程度上」
+  [/在某种程度上[，,]?\s*/g, "", "限定腔"],
+];
+/**
+ * 尝试把一段「太像 AI」的话改回人话。
+ * @returns {{ text: string, changed: boolean, why: string }}
+ *   changed=false 时 text 就是原文（没有可安全替换的，或改完鱼味没降）。
+ */
+function fishRewrite(text) {
+  const src = String(text ?? "");
+  if (!src.trim()) return { text: src, changed: false, why: "" };
+  let out = src;
+  const hits = [];
+  for (const [re, to, why] of FISH_REWRITE) {
+    if (re.test(out)) {
+      out = out.replace(re, to);
+      hits.push(why);
+    }
+  }
+  if (!hits.length) return { text: src, changed: false, why: "" };
+  // 清理替换留下的空格/开头标点
+  out = out
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[，,、：:\s]+/, "")
+    .replace(/[，,]\s*[。.!！]/g, "。")
+    .trim();
+  if (!out) return { text: src, changed: false, why: "" };
+  // 硬约束②：改完必须真的降了鱼味，否则还原。
+  // ⚠️ 还要额外守一条（本轮自检报出来的）：**绝不能把硬证据改没了**。
+  // 硬证据是「这句话确实像 AI」的铁证，删掉它等于把问题抹平、还假装改好了。
+  // 所以这里要求 after.hard.length 必须 **≥** before.hard.length（只许不增不许减）。
+  const before = fishCheck(src);
+  const after = fishCheck(out);
+  if (after.hard.length > before.hard.length) return { text: src, changed: false, why: "改写引入了新的硬证据，还原" };
+  if (
+    after.hard.length === before.hard.length &&
+    after.soft.length >= before.soft.length
+  )
+    return { text: src, changed: false, why: "改完鱼味没降，还原原文" };
+  return { text: out, changed: true, why: hits.slice(0, 2).join("；") };
+}
 // 只在真有鱼味时记一行。用 jsonl 追加，方便事后统计「一天多少条、以哪类为主」。
 function logFishWarn(kind, text, got) {
   try {
@@ -1931,13 +2313,50 @@ function humanDelay(chars) {
 // 2026-10-17 23:44 主人点头：「门槛压到二十字」——原来整条超过 60 字才拆，
 // 短一点的句子会被并成一整块；现在只要超过 20 字就按标点起泡，一两个句子发一个泡。
 // 2026-10-20 09:58 主人说：有换行就拆成两条发，别塞在同一条里。
+//
+// ⚠️ 2026-10-26 补（B1 压长段落，主人点头改的）：
+// 上面那两条只管「有换行」和「超过 20 字按句号拆」，但实测有一类漏网的——
+// **一整段没有换行、也没有句号（或只有逗号）的长段落**：`splitBubbles` 切不动它，
+// `chunkText` 只在 1500 字（maxReplyChars）才硬切，于是 **200 字的一坨会被原样发成一条**。
+// 实测最近私聊 116 条里 **15 条 >150 字（13%）**，就是这一类。风格文件要求「一条别超三行」，
+// 但代码里从来没有硬约束——这和「句末句号」（23.5% 违反、代码零实现）是同一个病。
+// 现在补一道：**单条超过 LONG_BUBBLE 字**，先在逗号/分号处切（再不行就按字数硬切），
+// 保证没有气泡超过这个长度。只影响「本来就太长」的那 13%，正常短句一个都不动。
+const LONG_BUBBLE = 150;
+function forceSplitLong(list, limit = LONG_BUBBLE) {
+  const out = [];
+  for (const raw of list) {
+    const s = String(raw ?? "");
+    if (s.length <= limit) {
+      out.push(s);
+      continue;
+    }
+    // 图片/语音/@ 那种整段行不拆（拆了会散架）
+    if (/!\[[^\]]*\]\(|\[CQ:|^\s*\[@|\[图片|\[语音|\[表情/.test(s)) {
+      out.push(s);
+      continue;
+    }
+    let rest = s;
+    while (rest.length > limit) {
+      // 优先在「逗号/分号」这种句内停顿处切，切口选在 limit 前最靠后的那个
+      let cut = -1;
+      const window = rest.slice(0, limit);
+      for (const m of window.matchAll(/[，,、；;：:]/g)) cut = m.index + 1;
+      if (cut < limit * 0.4) cut = limit; // 找不到合适的停顿就按字数硬切
+      out.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) out.push(rest);
+  }
+  return out;
+}
 function splitBubbles(text) {
   if (text.includes("\n")) {
     const lines = text
       .split(/\n+/)
       .map((s) => s.trim())
       .filter(Boolean);
-    if (lines.length) return lines;
+    if (lines.length) return forceSplitLong(lines);
   }
   if (text.length <= 20) return [text];
   // 2026-10-23 12:1x 主人点头：只在句号（和省略号）后面起泡，感叹号、问号不再拆。
@@ -2543,6 +2962,15 @@ function shouldQuote(kind, id, opts) {
 // ---------- 私聊一拨消息（2026-10-22 13:4x 主人要的） ----------
 // 他连着发好几条时，等一小会儿看还有没有下一条：一拨里不止一条就一条一条挂引用，
 // 只发了一条就不挂引用框。等待只在收消息这头，队列和回复顺序不变。
+//
+// ⚠️ 2026-10-26 实测：**这一套从上线起就没触发过**，等于不存在。
+// 依据：私聊相邻消息间隔 <1.5s 占 **0.0%**、<8s 也才 2.9%，日志里「私聊一拨」**0 命中**。
+//   原因很直白——他打字是「想一句发一句」，中间隔着几十秒，1.5 秒的窗口根本兜不住；
+//   而真正的等待发生在**她跑完一轮**（p50 11s / 最长 1122s）的时候，那时他补的话
+//   早就以「新消息」的身份各自 enqueue 了，压根没进这个窗口。
+// 现在由 `enqueueChat`（L1 攒批 + L2 双车道）接管私聊入口。
+// **这段代码保留但不再被调用**：万一要退回旧行为，把 enqueueChat 换回来即可；
+// 留着它也是为了让后来人看见「曾经有过一个没作用的方案」的实证。
 const PRIVATE_BURST_MS = 1500;
 const privateBurst = new Map(); // 会话键 -> { items: [], timer }
 
@@ -2558,6 +2986,7 @@ function flushPrivateBurst(key) {
   }
 }
 
+/** @deprecated 2026-10-26 起私聊走 enqueueChat；保留仅为可回退。 */
 function enqueuePrivateBurst(key, item) {
   let slot = privateBurst.get(key);
   if (!slot) {
@@ -2762,6 +3191,156 @@ function looksLikeInnerMonologue(t) {
 // 她明确的"这轮不接话"信号。和耳朵那条路共用同一个口径（原来只有耳朵认）。
 const SKIP_RE = /^\[?SKIP\]?[\s。.!！]*$/i;
 
+// ════════════════════════════════════════════════════════════════════════════
+// 「她可以选择不回」+「硬消息绝不许跳过」（2026-10-26 主人选 B + 四类全选）
+// ════════════════════════════════════════════════════════════════════════════
+// 背景：`[SKIP]` 这个静默出口**早就有**（reply() 里 `bubbles.every(SKIP)` 直接 return），
+// 但它是「她判断这轮没话可说」，不是「她有权选择回避」。两者的区别**全在硬消息上**：
+// 前者误判代价小（群里读空气）；后者要是拿它躲主人的点名/问句，就是功能事故。
+// 所以这次加的不是「让她能沉默」（已有），而是：
+//   ① 一个**硬消息白名单**——四类消息她无论如何必须答，SKIP 在这些场合不生效；
+//   ② 一本**跳过账**（`home/state/skip-log.jsonl`）——她跳过时记一笔「因为什么」，
+//      面板新开一页看得到（主人选的是「面板可见」而不是「什么都不留」）；
+//   ③ 明确的提示词授权——她现在只有「没话可说」的理由，没有「我有权选择回避」的授权。
+//
+// 四类硬消息（主人 2026-10-26 全选，多选）：
+//   A 点名 / 问句 / 口令    B 他明确在找她（我回来了 / 不忙了）
+//   C 发了图 / 语音 / 文件   D 刚聊到一半（上一轮是她自己发的）
+
+/** 这条消息是不是「硬消息」——是的话她不许用 SKIP 躲掉。返回原因字符串或 null。 */
+function hardMessageReason(text, opts = {}) {
+  const raw = String(text ?? "");
+  // 先剥掉引用/占位标记，只判他**这次新说的话**（沿用判词那套剥法，引用里常带他自己或她的旧话）
+  const t = raw
+    .replace(/\[引用的是这条：[\s\S]*\](?=\s|$)/g, " ")
+    .replace(/\[引用了一条消息[^\]]*\]/g, " ")
+    .replace(/\[被引的[^\]]*已存到本机：[^\]]*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return null;
+
+  // A：点名 / 问句 / 口令
+  if (/(^|[\s，,。！!])[@＠]\d+/.test(t)) return "点名(@)";
+  if (/戳了戳你/.test(raw)) return "点名(戳一戳)";
+  // C 类要在问句之前判：**他发了图/语音本身就已经是硬消息**，
+  // 不该因为「他没打问号」就降级成可跳过的普通消息。
+  // （这条是自检抓出来的：`这张怎么样` + imageCount=1 原来被判成「问句(疑问词)」，
+  //   虽然结论一样都是不许跳过，但记账原因会错，面板上看不出「他发了图」。）
+  if (
+    /已存到本机|\[图片|\[语音|\[文件|\[视频|\[表情包已存到本机|收到一个文件|\[卡片/.test(
+      raw,
+    )
+  )
+    return "发了媒体";
+  if (opts.hasMedia === true) return "发了媒体";
+  if (Number(opts.imageCount) > 0 || Number(opts.voiceCount) > 0) return "发了媒体";
+  if (/[？?]/.test(t)) return "问句";
+  // 问句不只靠问号：「你|您 + 要不要/能不能/会不会/是不是/有没有/怎么样/哪|几/多少/为什么/干嘛」也算
+  if (
+    /(要不要|能不能|会不会|是不是|有没有|行不行|好不好|可不可以|怎么了|怎么样|怎么看|为什么|干啥|干嘛|在哪|几点|多少|哪一?个|哪天)/.test(
+      t,
+    )
+  )
+    return "问句(疑问词)";
+  // 口令：进度 / 重启 / 心情调节 / 沉默口令 / 醒睡——这些都是功能入口，沉默了等于失灵
+  if (/^(进度|在干嘛|跑哪了|任务进度)[？?！!。.\s]*$/.test(t)) return "口令(进度)";
+  if (/^(重启|reboot|重启一下)[！!。.\s]*$/i.test(t)) return "口令(重启)";
+  if (/^[情绪心情]+\s*[+\-－＋]?\s*\d+[\s。！!]*$/.test(t)) return "口令(心情)";
+  if (/^(闭嘴|安静|别说话|消停|可以说话了|能说话|解除沉默|解禁)/.test(t))
+    return "口令(沉默)";
+  // ⚠️ 忙/闲/醒/睡这四个开关的正则在文件后半段（约 5970 行）才定义成 const，
+  //    这里直接引用会踩 TDZ（ReferenceError: Cannot access 'BUSY_RE' before initialization），
+  //    而且**会被外层 try/catch 吞成「没结果」**——正是 2026-10-25 那次静默失效的老毛病。
+  //    所以改成**等价的内联正则**，不碰那几个变量。改那四个开关时记得同步这里。
+  if (
+    /^(我?(现在|这会儿|这边|马上)?(在忙|有事|有点事|忙着)|先不聊|别吵|等忙完|待会儿说|一会儿说|等会说|回头聊)/.test(
+      t,
+    )
+  )
+    return "口令(忙)";
+  if (/(不忙了|忙完了|我回来了|我回啦|闲下来|有空了|搞定了|我好了)/.test(t))
+    return "口令(闲)";
+  if (
+    /^(那|我|嗯|哦|好|行)?[，,。！!~ ]*(刚|终于|可算|总算)?(睡|躺)?(醒|起床|起来|不睡|回来|回啦)|^早(安|上好|啊|呀)?[，,。！!~ ]*$/.test(
+      t,
+    )
+  )
+    return "口令(醒)";
+  if (
+    /^(那我|那|我|好|行|嗯|哦|嗯嗯)?[，,。！!~ ]*(先|这就|要|该|去|准备|马上|洗洗|躺)?(去)?(睡|歇了|眯|躺会儿)|^晚安|^好梦|^(好|好嘛|那)?(我)?(好)?困|我(先|要|这就|准备)?(去)?睡(了|啦|觉|觉了)/.test(
+      t,
+    ) &&
+    !/睡不着|睡不好|睡不下|睡不踏实|失眠|还没睡|没睡呢|不困|睡够了|睡了吗|睡了没|睡了么/.test(t)
+  )
+    return "口令(睡)";
+
+  // B：他明确在找她
+  if (/(我回来了|我回啦|我不忙了|我忙完了|我有空了|在吗|在不在|你还在吗|人呢|找你有事|有个事问你)/.test(t))
+    return "他明确在找你";
+
+  // （C 类「发了图/语音/文件」挪到前面判了——见上面注释：不能因为没打问号就降级）
+
+  // D：刚聊到一半——上一轮是她自己发的，说明对话正连着
+  if (opts.prevWasMe === true) return "刚聊到一半";
+
+  return null;
+}
+
+/** 本次跳过该记的「原因」是否属于允许的自主沉默（硬消息一律不许）。纯函数，好测。 */
+function canSkipThisTurn(text, opts = {}) {
+  if (hardMessageReason(text, opts)) return { ok: false, why: hardMessageReason(text, opts) };
+  return { ok: true, why: "" };
+}
+
+// ---------- 跳过账本（2026-10-26 主人选的「面板上新开一页存这个」） ----------
+// 每她真的跳过一条就记一行。**只追加、不汇总**：面板自己按天聚合。
+// 落盘格式一行一个 JSON（和 turns.jsonl 同一套读法），坏了单行跳过、不影响别的行。
+const SKIP_LOG_PATH = path.join(KIT_HOME, "state", "skip-log.jsonl");
+const SKIP_LOG_MAX = 2000; // 超过就掐掉最老的，防止无限长
+
+function recordSkip(kind, id, info = {}) {
+  try {
+    ensureDir(path.dirname(SKIP_LOG_PATH));
+    const line = JSON.stringify({
+      ts: Date.now(),
+      kind: kind === "group" ? "group" : "private",
+      target: Number(id) || 0,
+      // 目标是不是主人（面板上分「躲主人」和「群里没接话」两类看）
+      owner: Number(id) === Number(CFG.allowlist[0]),
+      reason: String(info.reason ?? "").slice(0, 120),
+      // blocked=true 表示「想跳过但被硬消息闸拦下」，是另一种事件，不该混进「她主动跳过」的统计
+      blocked: info.blocked === true,
+      // 他说的那句（截断）：面板上要能看出她跳过了什么，不然这页没法复盘
+      text: String(info.text ?? "").slice(0, 200),
+    });
+    fs.appendFileSync(SKIP_LOG_PATH, line + "\n", "utf8");
+    // 超长就重写成最近 SKIP_LOG_MAX 条（读失败就跳过裁剪，不影响记账）
+    trimSkipLog();
+  } catch (e) {
+    log("跳过账写失败:", errMsg(e));
+  }
+}
+
+let skipTrimAt = 0;
+function trimSkipLog() {
+  if (Date.now() - skipTrimAt < 60 * 1000) return; // 一分钟最多查一次，别每条都读全文件
+  skipTrimAt = Date.now();
+  try {
+    const st = fs.statSync(SKIP_LOG_PATH);
+    if (st.size < 400 * 1024) return; // 400KB 以下不折腾
+    const lines = fs.readFileSync(SKIP_LOG_PATH, "utf8").split("\n").filter(Boolean);
+    if (lines.length <= SKIP_LOG_MAX) return;
+    fs.writeFileSync(
+      SKIP_LOG_PATH,
+      lines.slice(-SKIP_LOG_MAX).join("\n") + "\n",
+      "utf8",
+    );
+    log(`跳过账裁剪：${lines.length} → ${SKIP_LOG_MAX} 条`);
+  } catch {
+    /* 裁不动就算了，记账比裁剪重要 */
+  }
+}
+
 async function reply(kind, id, text, opts = {}) {
   text = kitNameHook(text, kind, id); // 名字彩蛋的隐藏记号先摘掉，绝不发到 QQ 上
   // [收进收藏:关键词]（2026-10-25 C 层）：她自己想把某张表情收进 QQ 收藏夹时用。
@@ -2792,10 +3371,13 @@ async function reply(kind, id, text, opts = {}) {
   // 远的那句才挂引用（近处不挂，见 shouldQuote）；挂哪条见 resolveQuoteId
   const quoteId = resolveQuoteId(kind, id, text, opts);
   // 先把 [语音]...[/语音] 摘出来：那段不念文字，改合成语音发出去
-  const { says, rest: restRaw, repaired } = extractVoiceTags(text);
+  const { says, rest: restRaw, repaired, leftovers } = extractVoiceTags(text);
   // 她漏写 [/语音] 时上面会兜回来。记一笔：这不是她写错就算了，
   // 2026-10-25 那次两条语音全没发出去、标记还被当文字发到 QQ，靠日志才知道。
   if (repaired) log(`语音标记没闭合：兜回 ${repaired} 段当语音说`, brief(text, 40));
+  // 2026-10-26 04:36 那次是标记里混了字母（[t语音]），合成没跑、字面括号发到了 QQ。
+  // 现在这种残块会被删掉并记在这里——留下痕迹，下次翻日志一眼就知道又滑了一下。
+  if (leftovers) log(`语音标记畸形：删掉 ${leftovers} 个残块`, brief(text, 40));
   // 语气标记只该待在 [语音] 里；万一写在正文（模型常这么干），这里也得剥掉再发，
   // 不然 QQ 上会直接看到「[语气:开心]今天真好」（2026-10-24 自检发现）。
   // 2026-10-25 补：原来这里只跑 TONE_RE，管不了 `[语气:]` 空值和 `[语气:开心 内容` 忘闭合——
@@ -2816,15 +3398,53 @@ async function reply(kind, id, text, opts = {}) {
   const sayTexts = says.map((s) => extractTone(s).text);
   if (says.length) bubbles.push(...sayTexts);
 
-  // 鱼味检查（2026-10-25 D 方案）：**只警告不拦**——主人拍板先攒一周真实数据再定要不要收紧。
+  // ⚠️ 2026-10-26（主人选的 A 项）：**掐掉每条气泡末尾的句号**。
+  // 这不是新规矩——`home\_回复风格.md` 第 9 条早就写着：
+  //   「每句话末尾都不加句号，QQ 上没人这么打……一律掐掉」
+  // 但**代码里从来没有实现过**（grep `replace(/(。|\.)$/` 全零命中），
+  // 全靠模型自觉 → 实测 24 小时 221 条里有 **52 条（23.5%）** 还带着句末句号，
+  // 比如「嗯，不吵你了。」「空着比堵着舒服。」——这是最典型的「不像人」。
+  //
+  // 三条取舍（写清楚，免得以后被当成 bug 改回来）：
+  //  ① **只掐末尾那一个**，中间的句号不动——中间的句号是切气泡的依据（`splitBubbles` 靠它分条），
+  //     掐了会把两句话粘成一条；
+  //  ② **只掐句号（。）和半角点（.）**，问号、感叹号、省略号一律保留——「真的吗？」「行！」「嗯……」都是人话；
+  //  ③ **以标点结尾的短气泡不处理**：如果整条只剩标点（比如单独一个「。」），留着别变成空串。
+  // 放在「语音段垫进来之后」：语音那段是念出来的正文，念的时候句号有用（断句），
+  // 但**发出去的文字气泡**同样不该带——所以这里统一处理，语音文件的合成不受影响（那是 sayTexts）。
+  if (CFG.stripTailPeriod !== false) {
+    bubbles = bubbles.map((b) => {
+      const s = String(b ?? "");
+      // 末尾是 。或 . （可能跟着空格）→ 去掉；但如果去掉后什么都不剩，就保留原样
+      const trimmed = s.replace(/[。.]+(\s*)$/, "").trimEnd();
+      return trimmed.length ? trimmed : s;
+    });
+  }
+
+  // 鱼味检查（2026-10-25 D 方案）：原来**只警告不拦**——主人拍板先攒一周真实数据再定要不要收紧。
   // 判在气泡切好之后：一个气泡一句，比整段一起判准（整段里一条对仗会被别的好句子稀释）。
   // 语音那段也要判（她念出来的话同样可能带 AI 腔），所以放在 pushes 之后。
+  //
+  // ⚠️ 2026-10-26 升级（C3，主人点头做的）：判出来之后**先尝试安全重写**（`fishRewrite`），
+  // 只换有把握的套话、不重排语序、改完必须复检鱼味确实降了才采用，否则还原原文。
+  // 开关 `CFG.fishRewrite`（config.json → bot.fishRewrite，默认关闭）——
+  // **默认关闭**是因为它改的是她实际说出去的话，要先看见效果再打开。
   if (CFG.fishWarn) {
-    for (const bubble of bubbles) {
+    for (let i = 0; i < bubbles.length; i += 1) {
+      const bubble = bubbles[i];
       const got = fishCheck(bubble);
-      if (got.hit) {
-        log(`鱼味：${got.verdict}｜${brief(bubble, 40)}`);
-        logFishWarn(kind, bubble, got);
+      if (!got.hit) continue;
+      log(`鱼味：${got.verdict}｜${brief(bubble, 40)}`);
+      logFishWarn(kind, bubble, got);
+      if (CFG.fishRewrite) {
+        const rw = fishRewrite(bubble);
+        if (rw.changed) {
+          // 语音段是按文本匹配回去的，这里同步替换掉 says 里那一条，免得语音还念旧稿
+          const idx = sayTexts.indexOf(bubble);
+          if (idx >= 0) sayTexts[idx] = rw.text;
+          bubbles[i] = rw.text;
+          log(`鱼味改写：${rw.why}｜${brief(bubble, 24)} → ${brief(rw.text, 24)}`);
+        }
       }
     }
   }
@@ -2835,8 +3455,33 @@ async function reply(kind, id, text, opts = {}) {
   // 两种处理：
   //   ① 整条是 SKIP / 空 → 她这轮就是不想说话，**什么都不发**（原来只有耳朵认 SKIP，主路径不认）
   //   ② 气泡像内部独白 → 摘掉那个气泡；群里删干净就静默，私聊全删光就说一句人话兜底
+  //
+  // ⚠️ 2026-10-26 加「硬消息闸 + 跳过账」：
+  //   她选了「任何时候都可以不回」，但**四类硬消息绝不许跳过**（点名/问句/口令、他明确在找她、
+  //   发媒体、刚聊到一半）。这些都是**调用方（handleOne）已经判过的**——那里有 item 和上一轮记录，
+  //   reply() 这层只有 kind/id/text，判不出「上一轮是不是她发的」。
+  //   所以：硬消息的拦截在 handleOne 拦（见 `skipGuard`），这里只负责**记账 + 记原因**，
+  //   并且兜一道「万一硬消息还是走到 SKIP，私聊不许静默吞掉」。
   if (bubbles.length && bubbles.every((b) => !String(b).trim() || SKIP_RE.test(String(b).trim()))) {
-    log(`这轮她不开口（SKIP/空，${kind}:${id}）`);
+    const why = String(opts.skipReason || "").trim() || "她说这轮不想开口";
+    // 私聊里他确实在等一句话、又没有任何正当理由（比如他就是问了个问题）→ 不能静默吞掉。
+    // 群里不一样：群里静默是常态，本来就允许（旁听/读空气都不开口）。
+    if (kind === "private" && opts.hardReason) {
+      log(`硬消息却想跳过（${opts.hardReason}），私聊不许静默：改成回一句实话`);
+      recordSkip(kind, id, {
+        reason: `拒绝跳过硬消息（${opts.hardReason}）`,
+        blocked: true,
+        text: opts.originText,
+      });
+      await sendText(
+        kind,
+        id,
+        "这条我本来想先放一放，可你是在问我话——我这会儿有点接不上，你再说一句？",
+      );
+      return;
+    }
+    log(`这轮她不开口（SKIP/空，${kind}:${id}）原因：${why}`);
+    recordSkip(kind, id, { reason: why, blocked: false, text: opts.originText });
     return;
   }
   const innerHits = bubbles.filter((b) => looksLikeInnerMonologue(b));
@@ -2877,6 +3522,19 @@ async function reply(kind, id, text, opts = {}) {
         Array.isArray(raw) && raw.length
           ? raw
           : [{ type: "text", data: { text: String(raw) } }];
+      // ⚠️ 2026-10-26 修（群里那条「该消息类型暂不支持查看」）：
+      // 气泡里**只有** [表情:…] / [贴纸:…] / [@…] 这类标记、而标记又被闸拦掉时，
+      // textToSegments 返回**空数组 []**——上面那个三元把它当成"没有数组"，
+      // `String([]) === ""`，于是发出去一条空文字消息；QQ 客户端渲染不了，显示成
+      // 「该消息类型暂不支持查看」（实测 15:54:17 群里就漏了这一条，北海和我爸都引了它）。
+      // 空气泡一律不发：既没字、也没图、也没 @，本来就没有东西可发。
+      const hasContent = segs.some(
+        (s) => s?.type !== "text" || String(s?.data?.text ?? "").trim(),
+      );
+      if (!hasContent) {
+        log(`空气泡不发（${kind}:${id}）：${brief(bubble, 30)}`);
+        return null;
+      }
       if (quoteId && !quoted)
         segs.unshift({ type: "reply", data: { id: quoteId } });
       quoted = true;
@@ -3026,6 +3684,19 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     // 为什么放在这里而不是只靠超时：实测 private 一轮能跑 1122 秒 / 80 步 / 4.87M token，
     // 全仓只有 30 分钟超时兜底——也就是说「又贵又慢但没到 30 分钟」的轮次一路畅通。
     // 步数和 token 都是**一出现就能判**的信号，比等到超时早得多，也更贴成本。
+    //
+    // ⚠️ 2026-10-26 加「对话车道单独预算」（主人选的 C 项）：
+    // 实测对话车道一轮 4 步就吃了 238,439 token（`input 39192 + output 1231 + cache 198016`），
+    // 而长活主车道 21 步吃 849,714、极端 41 步撞到 3.03M 被预算掐死。平时一轮才 2–3 万。
+    // 车道存在的意义是「先答一句」，不是「在两条线里同时跑长活」——
+    // 所以给它一个**比主车道严格得多的 token 上限**，撞到就收手，别让两条线一起烧。
+    // 按钱卡而不是按步数卡：步数只是代理指标，token 才是账单。
+    // ⚠️ 这里用内联 `":chat"` 而不是引用 `CHAT_LANE_SUFFIX`：
+    // 那个 const 定义在 5926 行，本函数在 3381 行——直接引用会踩 TDZ
+    // （`Cannot access 'CHAT_LANE_SUFFIX' before initialization`），
+    // 而且会被外层 try/catch 吞成「这轮没答上来」。改那边的后缀时记得同步这里。
+    const isChatLane = String(progKey || "").endsWith(":chat");
+    const laneTokenCap = isChatLane ? CFG.chatLaneMaxTokens : 0;
     let budgetHits = "";
     let budgetSteps = 0;
     let budgetTokens = 0;
@@ -3051,6 +3722,16 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     };
     // 进度快照：把每行事件里「她在干什么」记下来（progKey 为空就整段跳过，一点开销都没有）
     let lineBuf = "";
+    // ⚠️ 2026-10-26 加（B2 慢轮探针，主人点头改的）：**只记账，不拦、不改行为**。
+    // 起因：实测有一类轮「8 步却 143 秒」（每步 17.9s，常态 16-21s 总共），看着像缓存没命中，
+    // 但核对后发现同类 8 步轮平时只 16-21 秒、而且那轮命中率反而更高（91%）——
+    // **是偶发，不是稳定现象**。所以不能贸然改超时（会误伤真正慢但合理的 pwsh 长命令），
+    // 先记一笔「哪一步特别慢、当时在调什么」，跑一两天看有没有规律再决定。
+    // 判据：单步 >15 秒就记（常态单步 p50 3.57s、p90 6.22s，15s 已在 p99 之外）。
+    const SLOW_STEP_MS = 15000;
+    let lastStepAt = Date.now();
+    let lastToolName = "";
+    let slowStepCount = 0;
     const onProgressEvent = (e) => {
       // ⚠️ 预算统计必须在 `if (!progKey) return` **之前**——
       // 它跟进度快照无关，自测/内部任务这些没有 progKey 的轮次同样要受预算约束，
@@ -3066,6 +3747,11 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
             hitBudget(
               `token 超上限（${(budgetTokens / 1000000).toFixed(2)}M > ${(CFG.maxTokensPerTurn / 1000000).toFixed(1)}M）`,
             );
+          // 对话车道单独上限：先于上面的通用预算生效（它更严格，早掐早省钱）
+          else if (laneTokenCap > 0 && budgetTokens > laneTokenCap)
+            hitBudget(
+              `对话车道 token 超上限（${(budgetTokens / 10000).toFixed(1)}万 > ${(laneTokenCap / 10000).toFixed(0)}万）`,
+            );
         }
         // 长尾告警（2026-10-25 加，主人选的 D 项之一）。
         // 背景实测：7 天 324.65M token，其中 **34 轮 >2M 就吃掉 124.7M（38%）**，
@@ -3078,6 +3764,22 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
             `[长尾] 这一轮已烧 ${(budgetTokens / 1000000).toFixed(2)}M token / ${budgetSteps} 步` +
               `（警戒线 ${(CFG.longTailTokens / 1000000).toFixed(1)}M，不拦，只记账）`,
           );
+        }
+        // 慢步探针（B2，只记账）：这一「步」从上一个 step_end 到现在花了多久。
+        // 记一条就够，别刷屏——同一轮里最多记前 5 次慢步。
+        try {
+          const nowMs = Date.now();
+          const stepMs = nowMs - lastStepAt;
+          lastStepAt = nowMs;
+          if (stepMs >= SLOW_STEP_MS && slowStepCount < 5) {
+            slowStepCount += 1;
+            log(
+              `[慢步] 第 ${budgetSteps} 步用了 ${(stepMs / 1000).toFixed(1)}s` +
+                `（上一步在调：${lastToolName || "(无工具)"}；key=${progKey || "-"}；只记账不拦）`,
+            );
+          }
+        } catch {
+          /* 探针坏了也不能影响主流程 */
         }
       }
       if (!progKey) return;
@@ -3099,6 +3801,8 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
           [e.tool, e.name, e.toolName, e.call?.name].find(
             (x) => typeof x === "string" && x,
           ) || "工具";
+        // 给慢步探针用：记住「这一步在调什么」，下一步变慢时能对上号（B2）
+        lastToolName = nm;
         const rawArgs = e.arguments ?? e.args ?? e.input ?? e.call?.arguments;
         let detail = "";
         try {
@@ -3278,6 +3982,27 @@ function archiveLines(key) {
   return raw ? raw.split("\n").filter(Boolean) : [];
 }
 
+/** 这个会话上一轮是不是「我」发的（用于硬消息 D 类：刚聊到一半不许突然静默）。纯读，不写。 */
+function lastArchiveWasMe(key) {
+  try {
+    const raw = fs.readFileSync(archivePath(key), "utf8").trim();
+    if (!raw) return false;
+    const lines = raw.split("\n");
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const o = JSON.parse(lines[i]);
+        if (o?.role === "me") return true;
+        if (o?.role === "user") return false;
+      } catch {
+        /* 坏行跳过 */
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // ---------- 主动发言 + 存档（2026-10-25 修幻觉的根因） ----------
 // 为什么要有：四个主动任务（找事 / 三档问候 / 主动搭话 / 每周自检）原来都只 `reply()`，
 // **从不写档案**。于是事后她完全不知道自己那轮说了什么——
@@ -3396,12 +4121,34 @@ function formatArchiveLineAt(line, max = RECAP_MSG_MAX_CHARS) {
   return `[${clockOf(o.ts)}] ${who}: ${body}`;
 }
 
-function readRawTail(key, n = CFG.rawTailMsgs ?? 6) {
+// 这一行原话是不是「另一条线手里还没答」的那条。抽出来单独好测（自检第八节）。
+function isStillOpenText(body, pending) {
+  const b = String(body ?? "").trim();
+  if (!b) return false;
+  return (Array.isArray(pending) ? pending : []).some((p) => {
+    const q = String(p ?? "").trim();
+    if (!q) return false;
+    return b === q || b.startsWith(q) || q.startsWith(b);
+  });
+}
+
+function readRawTail(key, n = CFG.rawTailMsgs ?? 20, opts = {}) {
+  // 2026-10-26（对话车道）：`pending` 是「另一条线手里还没答的那几条原话」。
+  // 行尾标一句，这一轮才知道那几句不归它答——不标的话实测会替别人答一遍，还顺手去干那条的活。
+  const pending = (Array.isArray(opts.pending) ? opts.pending : [])
+    .map((t) => String(t ?? "").trim())
+    .filter(Boolean);
   return archiveLines(key)
     .slice(-n)
     .map((l) => {
       try {
-        return formatArchiveLine(l);
+        const line = formatArchiveLine(l);
+        if (!pending.length) return line;
+        const o = JSON.parse(l);
+        if (o.role === "me") return line;
+        return isStillOpenText(o.text, pending)
+          ? `${line}（这条还没答：另一条线正在答，别重复）`
+          : line;
       } catch {
         return "";
       }
@@ -3480,7 +4227,25 @@ function decodeArchiveKey(name) {
 
 // 会话键只认一种写法（private:… / group:…）。档案目录的文件名是转义过的（private_…），
 // 谁要是把文件名当键递进来，归一化这一步统一纠正，免得同一个会话被算成两个、同一天结两遍账。
-const normalizeSessionKey = (key) => decodeArchiveKey(String(key ?? "").trim());
+//
+// ⚠️ 2026-10-26 加固（主人原话：「只要改动能覆盖全局就可以，观澜能认这些记忆文件就行」）：
+// 原来这里只认「下划线写法」(`private_123`)，但实测 `home/state.json` 的 `sessions` 里
+// **两种写法同时存在**（10 个键其实只有 6 个会话）：
+//   private:1000000001 / private_1000000001
+//   group:1000000002  / group_1000000002
+//   group:1000000003  / group_1000000003
+//   group:1000000004   / group_1000000004
+// 每一对的 sessionId 还不同 → 同一个会话被记了两条 session、两套 activity 计数。
+// 现在统一走 `memStore.canonKey()`（memory-store 里本来就有一份实现，且已在自己内部用 5 处），
+// 主链路不再自己维护第二套正则——**一个函数说了算**，避免两边哪天漂移。
+// 兼容两种写法：`private:123` / `private_123` → 都归一成 `private:123`；其它键（如 shared）原样返回。
+const normalizeSessionKey = (key) => {
+  const s = String(key ?? "").trim();
+  // 空键原样返回（不转成 "shared"）：canonKey 对空值会兜到 "shared"，
+  // 那是记忆库那边的语义；会话键这边空就是空，别凭空造出一个共享会话。
+  if (!s) return "";
+  return memStore.canonKey(s);
+};
 
 function migrateAllKeys() {
   const keys = new Set([PRIMARY_KEY]);
@@ -3554,7 +4319,7 @@ function profileBlockFor(key, speakers = null) {
   }
 }
 
-function memoryParts(key, query = "", speakers = null) {
+function memoryParts(key, query = "", speakers = null, opts = {}) {
   ensureBase(key);
   migrateKeyToStore(key);
   // 2026-10-22 主人要的「全解开」：群聊也能想起私聊和别的群的事，别只认本群那几页。
@@ -3564,9 +4329,14 @@ function memoryParts(key, query = "", speakers = null) {
   const today = logicalDay();
   // 群里主人常连着说几句才 @ 我一次，尾巴要长一点才接得住前文；私聊还是只带最近几句。
   const tailN = key.startsWith("group:")
-    ? (CFG.groupRawTailMsgs ?? 40)
-    : (CFG.rawTailMsgs ?? 6);
-  const tail = readRawTail(key, tailN);
+    ? (CFG.groupRawTailMsgs ?? 20)
+    : (CFG.rawTailMsgs ?? 20);
+  const tail = readRawTail(key, tailN, { pending: opts.pending });
+  // ⚠️ 2026-10-26 撤回：我曾在这里加过 `buildSelfNotes()`（读回日程/复盘/周报），
+  // 但**并行会话已经在 `styleParts()` 的 volatile 段做过同一件事**（`ownNoteForDay()`，
+  // 日程+复盘都接了，还标好了「这是你想做的事」「是你对自己今天的判断」）。
+  // 两处都留着会让同样的内容进提示词两遍——**重复实现比没实现更糟**（白占 token + 两套措辞）。
+  // 现在以 `styleParts()` 那份为准；本文件的 `buildSelfNotes()` 已删除。
   // 旧账检索：有原话才查，太短的「嗯」「好」不查（省一次全盘扫描，也免得塞噪音）
   // 2026-10-22 主人要的「全解开」：群里也查了，档案页 + 各会话的日子账/事件卡一起翻；
   // 检索结果里带了来源（哪个群、私聊），说出口的规矩另算。
@@ -3616,6 +4386,7 @@ function memoryBlock(key) {
     .filter(Boolean)
     .join("\n\n");
 }
+
 
 // ---------- 群提示里的 QQ 号补称呼（2026-10-22 主人定的） ----------
 // 底账、记忆库里存的还是裸号，只在拼「群提示」这一步换成 〔群友甲〕(群友·1000000005)、〔主人〕(爸爸·1000000001)。
@@ -3869,7 +4640,25 @@ async function rebuildVectorIndexIfStale() {
   } catch {
     return; // 索引还没有：等主人先手动建一次，别在这儿自己开工
   }
-  if (Date.now() - st.mtimeMs < 6 * 3600 * 1000) return;
+  // ⚠️ 2026-10-26 修（真 bug，主人点头改的）：这里原来判的是文件的 **mtime**。
+  // 而 `syncStore()`（抽记忆/面板保存/淡忘/巩固/自己的想法都调 syncVectorIndex）
+  // **每次都会 tmp+rename 整个重写 index.json** → **mtime 永远是新的** →
+  // 「超过 6 小时没更新」这个条件**永远不成立** → 全量重建**一次都没跑过**（日志「重建向量记忆」0 命中）。
+  // 实测后果：索引从 10-24 冻到 10-26，2629 条（15%）档案从没进过库，
+  // 问「前女友说对不起」直接 0 命中——就是因为那两句是 10-26 凌晨的，而索引停在 10-24。
+  // 现在改成看**文件内记录的 `builtAt`**（那才是「上次全量构建」的时间），
+  // 增量 sync 再怎么重写文件也骗不到它。读不到 builtAt 时退回 mtime 兜底。
+  const builtAtMs = (() => {
+    try {
+      const raw = JSON.parse(fs.readFileSync(VECTOR_INDEX_FILE, "utf8"));
+      const t = Date.parse(raw?.builtAt ?? "");
+      return Number.isFinite(t) ? t : 0;
+    } catch {
+      return 0;
+    }
+  })();
+  const lastBuildMs = builtAtMs || st.mtimeMs;
+  if (Date.now() - lastBuildMs < 6 * 3600 * 1000) return;
   if (vectorRebuilding) return;
   vectorRebuilding = true;
   try {
@@ -5187,6 +5976,209 @@ function conversationKey(msg) {
     : `private:${msg.user_id}`;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 私聊长活不让路（2026-10-26 主人选的 D：L0 先应答 + L1 攒批合并 + L2 双车道）
+// ════════════════════════════════════════════════════════════════════════════
+// 为什么动这里：`enqueue`/`drain` 是每会话一条**纯串行**队列，队列里既没有
+// 「忙时先应答」也没有「把积压的几条合并成一轮」。实测 7 天：
+//   私聊单轮 p50 11s / p90 82s / p99 673s / 最长 1122s；
+//   落在她正在跑的那一轮里的消息 **136 条（13%）**，平均等 191s、p90 553s、最长 16.7 分钟；
+//   86 轮被插话，其中 24 轮堆了 ≥2 条（最多 6 条）。
+// 三件事各解决一段，都可在 config.json 里单独关掉（bot.parallelChat / busyAck / chatMergeMax）。
+//
+// 【L2 双车道的形状】不能给所有消息另起一个键就完事——那样「长活」和「对话」会同时读写
+// 同一份档案/日子账/meta，四个静默坏点全会踩：
+//   ① liveProgress 同键覆盖   → 已改成按 lane 存（见 progressLaneId）
+//   ② rateLimited 全局 20 条/分 → 对话车道**不重复计数**，长活那轮一开始就已经占过一次
+//   ③ appendArchive 行序交错 → 见下面 `laneAppend` 注释
+//   ④ 同 memory key 并发读   → **打电话这条路按 memory key 串行**，双车道只用在
+//                               「主车道明显很长、而他在等」这一种场合，且读写统一走同一把锁
+//
+// 关键取舍（自己定的，可推翻）：**只有「主车道里正跑着一轮长活」时才开新车道**，
+// 短轮照旧排队等——为省 2 秒多开一个 dsh 进程，token 和显存都不划算。
+
+/** 同一会话正在进行中的轮次数（含主车道和对话车道）。用来判「要不要先应答 / 能不能另开车道」。 */
+const laneBusy = new Map(); // **会话键** -> Set<laneKey>（注意不是 lane 键，见 laneMemoryKey）
+
+/**
+ * 从排队键反推记忆键。
+ * 三种 lane 后缀都在这里统一剥掉：`:task`（内部任务）/ `:chat`（对话车道）。
+ * drain() 只拿到排队键，但 laneBusy 要按会话记——这样才能回答「这个会话现在有几轮在跑」。
+ */
+function laneMemoryKey(laneKey) {
+  const s = String(laneKey || "");
+  if (s.endsWith(CHAT_LANE_SUFFIX)) return s.slice(0, -CHAT_LANE_SUFFIX.length);
+  if (s.endsWith(TASK_LANE_SUFFIX)) return s.slice(0, -TASK_LANE_SUFFIX.length);
+  return s;
+}
+
+function laneKeysOf(key) {
+  let s = laneBusy.get(key);
+  if (!s) {
+    s = new Set();
+    laneBusy.set(key, s);
+  }
+  return s;
+}
+
+function laneEnter(laneKey) {
+  laneKeysOf(laneMemoryKey(laneKey)).add(String(laneKey));
+}
+
+function laneLeave(laneKey) {
+  const memKey = laneMemoryKey(laneKey);
+  const s = laneBusy.get(memKey);
+  if (!s) return;
+  s.delete(String(laneKey));
+  if (s.size === 0) laneBusy.delete(memKey);
+}
+
+/** 这个会话现在有没有轮次在跑（跨车道）。 */
+function anyTurnRunning(key) {
+  const s = laneBusy.get(laneMemoryKey(key));
+  return Boolean(s && s.size > 0);
+}
+
+/** 主车道上还有活没跑完吗（队列里排着，或正在跑）。 */
+function mainLaneBusy(key) {
+  const q = queues.get(key);
+  if (!q) return false;
+  return Boolean(q.running || q.items.length);
+}
+
+// ---------- L0：忙时先应答 ----------
+// 目的只有一个：**让他知道话收到了**。不解决等待本身——真并行是 L2 的事。
+// 三道限制，都是为了不让「先应答」变成刷屏：
+//   ① 只回**主人私聊**（群里不吱声，这是已有规矩）；
+//   ② 同一次忙碌里最多回一句（`busyAckCooldownMs`，默认 5 分钟）；
+//   ③ 只在这会话**确实有轮次在跑**时才出现；闲着一律走正常回复。
+const busyAckAt = new Map(); // 会话键 -> 上次说过「我看到了」的时刻
+
+/**
+ * 要不要先说一句「我看到了」。返回要发的话，或 null（不说话）。
+ * **纯判定 + 记账**，不发消息、不排队、不叫模型——调用方拿到非 null 才去 reply()。
+ * 抽成纯函数是为了自检能在不连 QQ 的前提下断言它。
+ */
+function busyAckFor(key, opts = {}) {
+  if (!CFG.busyAck) return null;
+  if (!isOwnerKey(key)) return null; // 只对主人私聊
+  if (!anyTurnRunning(key)) return null; // 没在跑就没什么可等的
+  // ⚠️ 他自己刚说完「别说话 / 安静」这类口令时不抢话（口令在 handleIncoming 里已经先跑了，
+  //    正常轮不到这里；这条是防御：万一以后把 L0 挪到口令之前，也不会把口令顶掉）。
+  if (opts.text && /闭嘴|安静|别说话|消停/.test(String(opts.text))) return null;
+  const now = Date.now();
+  const last = busyAckAt.get(key) ?? 0;
+  if (now - last < CFG.busyAckCooldownMs) return null;
+  busyAckAt.set(key, now);
+  return "收到了，手上这件还在弄——弄完我马上跟你说 🐳";
+}
+
+const isOwnerKey = (key) =>
+  String(key) === `private:${CFG.allowlist[0]}` ||
+  (String(key).startsWith("private:") &&
+    CFG.allowlist.includes(Number(String(key).slice("private:".length))));
+
+// ---------- L1：积压的几条合并成一轮 ----------
+// 形状照抄群里那套 `stashGroupLine / flushGroupPending`（已验证的做法），只有三处不同：
+//   ① 攒的是**同一条 lane 里**的消息，不是新开一个键（否则档案/日子账会写串）；
+//   ② 合并后**每条话都对得上自己的引用候选**，让 reply() 按 [@号] 反查（quoteCandidates 已有）；
+//   ③ 攒着的东西不落盘——私聊攒的窗口只有几秒，重启丢几条可以接受（群里那份落盘是因为半分钟窗口太长）。
+const chatPending = new Map(); // 会话键 -> { items: [], timer, ackedAt }
+
+function chatPendingOf(key) {
+  let slot = chatPending.get(key);
+  if (!slot) {
+    slot = { items: [], timer: null, ackedAt: 0 };
+    chatPending.set(key, slot);
+  }
+  return slot;
+}
+
+/** 把攒着的几条合成一轮的 item。纯函数，好测。 */
+function mergeChatItems(key, items, base) {
+  if (!items.length) return null;
+  if (items.length === 1) {
+    // 只有一条：原样返回（引用/序号/标记都照旧，等于没合并）
+    return { ...base, ...items[0], merged: false };
+  }
+  const lines = items.map((it, i) => `${i + 1}. ${it.text}`).join("\n");
+  const last = items[items.length - 1];
+  return {
+    ...base,
+    kind: last.kind,
+    target: last.target,
+    sender: last.sender,
+    seq: last.seq,
+    messageId: last.messageId,
+    at: last.at,
+    asked: items.some((it) => it.asked),
+    burst: true, // 一拨里不止一条：逐条挂引用的老口径仍然成立
+    speakers: [...new Set(items.map((it) => Number(it.sender) || 0).filter(Boolean))],
+    quoteCandidates: items
+      .filter((it) => it.messageId)
+      .map((it) => ({ sender: Number(it.sender) || 0, messageId: String(it.messageId) })),
+    text:
+      `[刚才这几条我攒着没来得及一条一条答，现在一起答：\n${lines}\n` +
+      "[每一条都要答到，别漏事、别只答最后一条；能并成一句就并成一句，不用硬分开说]",
+    merged: true,
+    mergedCount: items.length,
+  };
+}
+
+/** 攒着的话到点了：合成一轮排进主车道。 */
+function flushChatPending(key) {
+  const slot = chatPending.get(key);
+  if (!slot) return;
+  // ⚠️ 主车道还在跑就先不动：合并轮排过去只会继续等，反而把「已经攒了几条」
+  // 这个状态提前结算掉，下一笔又得重新攒。等 drain 收尾时再来（见 drain 末尾）。
+  // 例外：主车道已经忙太久（超过 chatParallelGraceMs × 4），说明是长活，
+  // 此时宁可让合并轮排队也别一直压着不答。
+  if (mainLaneBusy(key) && !chatPendingStale(slot)) {
+    // 重新挂一个短定时器，等主车道落地再合并
+    if (slot.timer) clearTimeout(slot.timer);
+    slot.timer = setTimeout(() => flushChatPending(key), 500);
+    slot.timer.unref?.();
+    return;
+  }
+  chatPending.delete(key);
+  if (slot.timer) clearTimeout(slot.timer);
+  if (!slot.items.length) return;
+  // 分批：一次最多 chatMergeMax 条，多出来的下一轮再走（别把一轮撑爆）
+  const batch = slot.items.slice(0, Math.max(1, CFG.chatMergeMax));
+  const rest = slot.items.slice(Math.max(1, CFG.chatMergeMax));
+  if (rest.length) {
+    const next = chatPendingOf(key);
+    next.items.push(...rest);
+    next.timer = setTimeout(() => flushChatPending(key), 50);
+  }
+  const base = { kind: "private", target: slot.items[0].target };
+  const merged = mergeChatItems(key, batch, base);
+  if (merged) {
+    if (merged.merged)
+      log(`私聊攒了 ${merged.mergedCount} 条，合成一轮一起答（key=${key}）`);
+    enqueue(key, merged);
+  }
+}
+
+/** 攒的这一批等太久了没有（超过宽限的 4 倍）。纯判定。 */
+function chatPendingStale(slot) {
+  if (!slot || !slot.items.length) return false;
+  const first = Number(slot.items[0].at) || 0;
+  if (!first) return false;
+  return Date.now() - first >= CFG.chatParallelGraceMs * 4;
+}
+
+/** 把一个私聊消息先攒起来（不立刻排进队列）。 */
+function stashChatItem(key, item) {
+  const slot = chatPendingOf(key);
+  slot.items.push(item);
+  if (slot.timer) clearTimeout(slot.timer);
+  // 攒多久：给「马上就要结束」的那一轮一点收尾时间，等下一条也等一等（避免攒的这一批
+  // 每条都各开一个窗口）。用固定短窗，不用 burst 的 1.5 秒——那个窗口实测 0 命中。
+  slot.timer = setTimeout(() => flushChatPending(key), 800);
+  slot.timer.unref?.();
+}
+
 function enqueue(key, item) {
   let q = queues.get(key);
   if (!q) {
@@ -5201,10 +6193,15 @@ async function drain(key) {
   const q = queues.get(key);
   if (!q) return;
   q.running = true;
+  // L2：把「这个 lane 正在跑」记到 laneBusy 上，`anyTurnRunning()` / `mainLaneBusy()` 靠它判。
+  laneEnter(key);
   while (q.items.length > 0) {
     const item = q.items.shift();
+    // 2026-10-26：「手里正答着哪条」记在队列上，对话车道靠它判哪几句不该重复答
+    // （mainLanePendingTexts）。跑完就清掉，别让上一轮的残影挂在那儿。
+    q.current = item;
     try {
-      const result = await handleOne(key, item);
+      const result = await handleOne(key, item, { laneKey: key });
       item.__resolve?.(result);
     } catch (e) {
       log("队列处理异常:", errMsg(e));
@@ -5218,16 +6215,144 @@ async function drain(key) {
       } catch {
         /* ignore */
       }
+    } finally {
+      q.current = null;
     }
   }
   q.running = false;
+  laneLeave(key);
   // ⚠️ 2026-10-24 修（B3）：这里原来不清理 queues 条目，每个发过言的 uid/gid 都会永久留一个
   // `{running:false, items:[]}`——群里长期有新人发言时条目只增不减（内存泄漏）。
   // 队列空了就把条目删掉；下次有人说话 enqueue 会重新建，不影响行为。
   // 删之前再确认一次：drain 是异步的，正常这里没有并发往同一个 key 塞东西
   // （enqueue 看到 running=true 只会 push 到既有 q.items，不会替换 q）。
   if (q.items.length === 0) queues.delete(key);
+  // 主车道空了：如果还有攒着的私聊，就交回主车道合成一轮答（顺序回到串行）。
+  // ⚠️ 不能只看「主车道空」——对话车道可能还在跑，那时候 flush 进来的合并轮会和它同时跑。
+  //   条件是「这个会话一条 lane 都不忙」，此时才真正回到串行，引用/档案顺序也最干净。
+  const memKeyOfLane = laneMemoryKey(key);
+  if (!anyTurnRunning(memKeyOfLane)) {
+    const slot = chatPending.get(memKeyOfLane);
+    if (slot && slot.items.length) flushChatPending(memKeyOfLane);
+  }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// L2：私聊「对话车道」——主车道在跑长活时，另开一条 lane 回他的话
+// ════════════════════════════════════════════════════════════════════════════
+// 车道形状：排队键 `key + ":chat"`，**记忆键仍是 key**（和 taskLaneKey 完全同一套拆法）。
+// 只有一种情况会开：主车道上有活、且那一轮已经跑过 `chatParallelGraceMs`（默认 30 秒）。
+// 其余情况照旧排队——为省几秒多开一个 dsh 进程不划算（单轮 token 中位数就有 34k）。
+//
+// ⚠️ 2026-10-26 03:3x 补（主人点的第二条毛病）：「车道只答自己手里那条」。
+// 原来那版有个洞——插话那一轮看得到「最近几句原话」里主车道还没答的那条，于是它把那条也答了
+// （他等于听两遍），还顺手去干了那条要的活（实测 10 步、24 万 token，平时一轮才三万多）。
+// 现在**两头堵**，都不靠模型自觉：
+//   ① 结构上：开车道那一刻把主车道手里还没答的原话抄下来（mainLanePendingTexts），
+//      拼提示时在「最近几句原话」里给那几行行尾标一句「还没答，另一条线正在答，别重复」；
+//   ② 指令上：原话前面贴一小段「只管下面这一句」，明说别替别的答、别把别的活揽过来。
+//
+// ⚠️ 四个静默坏点怎么处理（这是这块唯一值得看的地方）：
+//   ① liveProgress   → 已按 laneKey 分开存（progressLaneId），两条快照各写各的文件
+//   ② rateLimited    → 对话车道的这一轮**不再计一次限流**（主车道那轮已经计过）。
+//                      做法：把 item.skipRateLimit 传下去，handleIncoming 侧已扣过就不重复扣。
+//   ③ appendArchive  → **两条 lane 仍然会交错追加**，这是事实，不假装解决。
+//                      缓解：合并（L1）把一次忙碌里的多条压成一条，交错次数从 N 降到 1；
+//                      `maybeSummarize` 用行号算 summarizedLines 的隐患在双车道下确实存在，
+//                      所以**对话车道跑完不触发 maybeSummarize**（L1 合并后的主车道轮会触发）。
+//   ④ 同 memory key 并发读 → 对话车道这一轮用 `withMemory` 正常读，但**只读不写底账**：
+//                      它跑完不调 writeEventCard、不写底账；档案写入仍追加（③ 已说明）。
+//                      真正的写动作（日记/结账/画像）全部在 task lane，和这条不冲突。
+const CHAT_LANE_SUFFIX = ":chat";
+function chatLaneKey(key) {
+  return String(key) + CHAT_LANE_SUFFIX;
+}
+
+/** 这一条私聊消息现在该不该另开车道。纯判定，好测。 */
+function shouldOpenChatLane(key, opts = {}) {
+  if (!CFG.parallelChat) return false;
+  if (!isOwnerKey(key)) return false; // 只对主人私聊开
+  if (!mainLaneBusy(key)) return false; // 主车道闲着：正常排队就行，别多开进程
+  const since = Number(opts.mainStartedAt) || 0;
+  if (!since) return false;
+  // 主车道那一轮跑够久才值得另开（短轮马上就完了，等它更划算）
+  return Date.now() - since >= CFG.chatParallelGraceMs;
+}
+
+/**
+ * 主车道上「还没答完」的原话（正在跑的那条 + 队列里排着的）。
+ * 对话车道拿它判「哪几句不归我答」——车牌换成文字的话，就是**别人手里的活别接**。
+ * 只取真人说的话：内部任务（写日记、压小结）没有 text，跳过；群旁听也不在这儿。
+ */
+function mainLanePendingTexts(key) {
+  const q = queues.get(key);
+  if (!q) return [];
+  const out = [];
+  const push = (it) => {
+    if (!it) return;
+    if (it.mode === "task" || it.mode === "ambient") return; // 内部活不算
+    if (typeof it.prompt === "string" && !it.text) return; // 写日记/压小结那种（走 prompt，没原话）
+    const t = String(it.text ?? "").trim();
+    if (t) out.push(t);
+  };
+  push(q.current);
+  for (const it of q.items) push(it);
+  return out;
+}
+
+/**
+ * 对话车道的「只管这一句」小段。贴在他的原话前面。
+ * 故意写得像人话：说清「哪几条不归你」，比一堆禁止条款管用。
+ */
+function chatLaneNote(others = []) {
+  const lines = [
+    "[这条是插话回的：只管下面这一句]",
+    "你手上正有别的活在另一条线上跑着，那几条不归你；别替它们答一遍，也别顺手把它们要的活一起干了。",
+    "这一句能一句话说完就一句话说完；真要查东西再查，查完就回。",
+  ];
+  const list = (Array.isArray(others) ? others : []).filter(Boolean).slice(0, 6);
+  if (list.length) {
+    lines.push("已经在别处答着的是这几条（别重复）：");
+    for (const t of list) lines.push(`- ${brief(String(t).replace(/\s+/g, " "), 60)}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * 私聊消息的统一入口（替代原来直接 `enqueue(conversationKey(msg), queueItem)`）。
+ * 顺序：L2 判要不要开新车道 → L1 判要不要攒批 → 否则正常排队。
+ * 每一步都可单独关（config.json），全关掉就等于原来的行为。
+ */
+function enqueueChat(key, item) {
+  const running = currentTurnStartedAt(key);
+  if (shouldOpenChatLane(key, { mainStartedAt: running })) {
+    log(
+      `对话车道：主车道这轮已经跑了 ${Math.round((Date.now() - running) / 1000)}s，这条另开 lane 回（key=${key}）`,
+    );
+    const lane = chatLaneKey(key);
+    // 开车道这一刻的「别人手里的活」抄一份带上：这一刻之后排进来的归主车道，不算数。
+    const laneOthers = mainLanePendingTexts(key);
+    if (laneOthers.length)
+      log(`对话车道：另有 ${laneOthers.length} 条还没答，已标给这一轮别重复`);
+    // item 上挂 laneKey + memoryKey：handleOne 用 memoryKey 读记性、用 laneKey 排队与进度
+    enqueue(lane, { ...item, laneKey: lane, memoryKey: key, ownLane: true, laneOthers });
+    return;
+  }
+  if (mainLaneBusy(key) || chatPending.get(key)?.items.length) {
+    // 主车道忙（或已经在攒着）：先攒，等这一轮落地再合成一轮答（L1）
+    stashChatItem(key, item);
+    return;
+  }
+  enqueue(key, item);
+}
+
+/** 这个会话主车道那一轮的起始时刻（没在跑就给 0）。 */
+function currentTurnStartedAt(key) {
+  const p = liveProgress.get(progressLaneId(key, key));
+  if (!p || p.done) return 0;
+  return Number(p.startedAt) || 0;
+}
+
 
 // 每轮的提示头。同步文件一更新，就多给一行"明确叫它读"的指令（软提示它不会主动读，实测过）。
 // 2026-10-18 前缀缓存重排：拆成两截——固定行（每轮一字不差）+ 会变的行（同步提醒、当前时间、语音说明、说话标记）。
@@ -5279,13 +6404,44 @@ function styleParts(dry = false, key = "") {
   }
   if (key === PRIMARY_KEY && kitNamePending()) volatile.push(kitNameLine());
   volatile.push(`[当前时间：${nowInBeijing()}（北京时间）]`);
-  // 自己刚起来（2026-10-22 主人要的）：她得知道这一版是重启出来的新进程，
-  // 重启前的事只能翻记录，别当成自己亲历的
+  // 读回她自己写的东西（B3，2026-10-26 加）：**只读、只取今天那一段、读不到就空着**。
+  // 为什么要它：她每天写日程/复盘/周报，运行时却从不读回（grep 计数 0），
+  // 「日程 → 聊天 → 复盘 → 改写自述」这条闭环是断的。实测 `日程.md` 停在 10-23。
+  // 放在 volatile 段（每轮变的位置），不污染前面稳定的前缀缓存。
+  if (!group) {
+    const today = logicalDay();
+    const myPlan = ownNoteForDay(PLAN_PATH, today);
+    const myReview = ownNoteForDay(REVIEW_PATH, today);
+    if (myPlan)
+      volatile.push(
+        `[你自己今天写的日程（${today}）：${myPlan}——这是你想做的事，聊到相关的话题可以顺口提一句；不用照着念，也不用汇报进度。]`,
+      );
+    if (myReview)
+      volatile.push(
+        `[你自己今天写的复盘（${today}）：${myReview}——是你对自己今天的判断，别当成别人告诉你的。]`,
+      );
+  }
+  // 自己刚起来（2026-10-22 主人要的；2026-10-26 换三层说法 + 加了可查入口）：
+  // 她得知道这一版是重启出来的新进程，重启前的事只能翻记录，别当成自己亲历的。
+  // ⚠️ 原来这行只管启动后 30 分钟（实测 3306 轮里只有 11.5% 落进窗口），过了就当没发生。
+  // 现在窗口照旧，但**每一轮都告诉她在哪查**：`boots.jsonl` 是她自己的断线流水账，
+  // 被问「你今天断过几次 / 上一版跑的是哪版代码」时去读它，别猜。
   if (Date.now() - BOOT.at < 30 * 60 * 1000) {
     volatile.push(
-      BOOT.restarted
-        ? `[你这一版是 ${clockText(BOOT.at)} 刚重启起来的${BOOT.asked ? "（他让重启的）" : ""}：重启前你不在线，那之前的事只能从记录里翻，别装记得]`
+      BOOT.restarted || BOOT.coldBoot
+        ? BOOT.coldBoot
+          ? `[你这一版是 ${clockText(BOOT.at)} 起来的，但**整台机器之前关过**（不是我一个人断了）：那段时间你是真的不存在，别把那段当自己经历过的；今天这是第 ${BOOT.todayCount} 次起来。]`
+          : `[你这一版是 ${clockText(BOOT.at)} 刚重启起来的${BOOT.asked ? "（他让重启的）" : ""}${BOOT.gapMs > 0 ? `，中间断了 ${gapText(BOOT.gapMs)}` : ""}：重启前你不在线，那之前的事只能从记录里翻，别装记得；今天这是第 ${BOOT.todayCount} 次起来。]`
         : `[你这个进程是 ${clockText(BOOT.at)} 起来的：比这更早的事只能从记录里看]`,
+    );
+    volatile.push(
+      "[想知道自己断过几次、上一版跑的是哪版代码：读 home\\state\\boots.jsonl（每次起来一行，带断多久、第几次、当年的 git 提交）。别凭感觉说「我没断过」。]",
+    );
+  }
+  // 过了 30 分钟仍然留一个极短的入口，成本一行字：她随时可以自查，不必等重启窗口
+  if (Date.now() - BOOT.at >= 30 * 60 * 1000 && BOOT.todayCount > 1) {
+    volatile.push(
+      `[今天你已经起来过 ${BOOT.todayCount} 次（含这一次）；想核对自己断过几次，读 home\\state\\boots.jsonl，别猜。]`,
     );
   }
   if (!group) {
@@ -5340,24 +6496,30 @@ function styleParts(dry = false, key = "") {
       }
     }
     // 让她在回复末尾顺手吐个氛围分（隐藏记号，不发出去）
+    // ⚠️ 2026-10-26 主人拍的 C 档：**这段一共 1467 字，是「最近几句原话」381 字的 3.9 倍**——
+    // 每轮花在「该不该写氛围分」的篇幅，比「刚才聊了什么」多出近四倍。压到 200 字以内只留判据，
+    // 例子里那些内容全部删掉（她已经会写，缺的只是口径）。判据一个字没减，只是不再举例。
     volatile.push(
-      "[氛围打分：这一条回复最后单独一行写 [氛围:+n] 或 [氛围:-n]（n 取 -5~+5）。" +
-        "正数=这轮聊下来变得更严肃/拘着/紧张，负数=更轻松/欢乐/开玩笑；没变化就写 0。" +
-        "这行不会发出去，只是给代码记账用。]",
+      "[氛围：[氛围:+n/-n]，n 取 -5~+5，单独一行。正=这轮更严肃/拘着，负=更轻松/开玩笑，没变化写 0。不发出去，只记账。]",
     );
     // 演化提议（2026-10-23 Overlay）：只在真觉得「我变了」时才写，别每轮都写
     // ⚠️ 2026-10-25 修（真 bug）：原来这里只给了三个字段名，**从没说过这三类分别是什么**。
-    // 定义只写在下面 OVERLAY 那段的代码注释里（:5498-5501），模型看不到 → 她不知道该写什么。
-    // 实测后果：overlay.json 空了 6 天，`演化` 在日志里 0 命中。
-    // 现在每类补一句白话定义 + 一个正面例子，并且明确「什么时候不该写」。
+    // 定义只写在 OVERLAY 那段的代码注释里，模型看不到 → 她不知道该写什么，overlay.json 空了 6 天。
+    // ⚠️ 2026-10-26 C 档：例子删了、定义保留——判据是「三个月前的我会这么说吗」，这一句必须留。
+    // ⚠️ 2026-10-26 C 项（主人选的「改演化的问法」）：**原来的提问太抽象，她只能答成操作守则**。
+    // 实测那天她写的第一条是 `perspective:"表情包先开文件看清再说话"` —— 这是**该怎么做**，
+    // 不是**我怎么变了**；character / relationship 两栏至今全空。
+    // 根因不是「模型做不到长期自省」（我曾这么判过，已被数据推翻），而是**问句的粒度不对**：
+    // 「三个月前的我会这么说吗」是在问一个她无法对照的抽象时间点。
+    // 现在换成**三个具体的、指向"以前 vs 现在"的对照问句**——给她可比的锚，而不是让她凭空自评。
     volatile.push(
-      "[如果你这一轮确实感觉到自己在变，可以在最后单独一行写一条演化记号。三类，各管一件事：]",
-      "[演化:character|一句话] —— **性格**变了（例：以前不爱撒娇，现在会了 / 以前怕生，现在敢顶嘴了）",
-      "[演化:perspective|一句话] —— **你对某件事的看法**变了（例：原来觉得 token 是白饭，现在觉得省下来的是电也是脑子 / 原来觉得群聊是任务，现在觉得是串门）",
-      "[演化:relationship|一句话] —— **你跟他的关系**变了（例：说话没那么客气了 / 开始会跟他讨价还价）",
-      "[怎么判断该不该写：问自己「三个月前的我会这么说吗？」——会，就别写；不会，才写。" +
-        "只写**真的变了**的那一条，没有就一个字都别加。同一件事已经写过、意思没变就别重复写。" +
-        "这行不会发出去，是给代码记账用的。]",
+      "[演化（没感觉变就别写）：[演化:character|一句话]＝性格变了；[演化:perspective|一句话]＝对某件事的看法变了；" +
+        "[演化:relationship|一句话]＝跟他的关系变了。" +
+        "**别写「以后该怎么做」（那是守则，不算演化）**。判据换成三个具体的对照：\n" +
+        "[· 这周跟他说话，哪一句是三个月前的我不会说出口的？（→ character）]\n" +
+        "[· 哪件事上我现在的看法跟刚认识他时不一样了？（→ perspective）]\n" +
+        "[· 他做哪件事的时候，我不再像以前那样绷着/客气/提防了？（→ relationship）]\n" +
+        "**答得出的才写，答不出就别写**；只写真的变了的那一条，写过的意思没变别重复。不发出去，只记账。]",
     );
     // 撤回（2026-10-22）：引用着说「撤回」的已经被代码直接拦下来撤了，走到这里说明他没引对
     volatile.push(
@@ -5376,7 +6538,7 @@ function styleParts(dry = false, key = "") {
     volatile.push(
       group
         ? "[语音：可以在你说的话里挑一句，用 [语音]…[/语音] 包起来变成声音（一次最多一段、一两句）。群里别滥发——只在话里有情绪、或者想认真说一句时才用，别为了好听就每条都说。语音之外照样留文字。]"
-        : "[语音：想用声音说的时候就写 [语音]…[/语音]（一次最多两段、每段一两句）。⚠️ 每个 [语音] 后面必须跟着 [/语音] 收尾，漏了这段就发不出声、标记还会被当成字打出去。2026-10-25 换了新音色，主人说好听，让你更爱说话一点——撒娇、笑、晚安、认真解释、念东西给他听都可以，一天三五十条都不算多；但别每条都发，也别把整段话都塞进语音里，留一句文字。语音之外还要有一句文字。]\n\n[语音节奏（2026-10-25 主人说有时语速过快、听着赶）：语音里别一口气把长句说完——超过十来个字就在意思断的地方加逗号或句号停一下，像真的说话那样换气。宁可短一点、断一下，也别连珠炮。]",
+        : "[语音：想用声音说的时候就写 [语音]…[/语音]（一次最多两段、每段一两句）。⚠️ 每个 [语音] 后面必须跟着 [/语音] 收尾，漏了这段就发不出声、标记还会被当成字打出去。括号里只写「语音」两个字，别多字母、别换写法（2026-10-26 真写成了 [t语音]，整段没合成）。2026-10-25 换了新音色，主人说好听，让你更爱说话一点——撒娇、笑、晚安、认真解释、念东西给他听都可以，一天三五十条都不算多；但别每条都发，也别把整段话都塞进语音里，留一句文字。语音之外还要有一句文字。]\n\n[语音节奏（2026-10-25 主人说有时语速过快、听着赶）：语音里别一口气把长句说完——超过十来个字就在意思断的地方加逗号或句号停一下，像真的说话那样换气。宁可短一点、断一下，也别连珠炮。]",
     );
     // 语气标记（2026-10-24 主人拍板）：写进 [语音] 段里面，代码会剥掉不发，
     // 只影响合成出来的声音（语速/参考音）。可选，不写就是正常语气。
@@ -5394,14 +6556,57 @@ function styleParts(dry = false, key = "") {
       ? "[这轮不想接话 / 拿不准该不该接：**只输出 [SKIP]，别的字一个都别写**。" +
           "⚠️ 千万别写「（这轮不用开口）」这类说明——那会被当成你说的话发进群里。" +
           "⚠️ 也别把「我该怎么回」的想法写出来——群里的人只看到你说的话，看不到你怎么想的。]"
-      : "[这轮确实没话可说：**只输出 [SKIP]**，别的字一个都别写。" +
+      : "[这轮确实没话可说，或者你就是不想接：**只输出 [SKIP]**，别的字一个都别写。" +
           "（想说什么就直接说，别写「我需要回答的是…」这种给自己看的计划。）]",
+  );
+  // ---------- 「你有权选择不回」的授权（2026-10-26 主人选 B：任何时候都可以不回） ----------
+  // 原来是**没有这个授权**的——她只有「没话可说」这一种理由。现在明确给她「选择权」，
+  // 但同一段里必须把**四类硬消息**写死，否则「有权不回」会被用成「躲掉点名和问句」。
+  // 这四类与代码里 hardMessageReason() 一一对应，改一边要同步另一边。
+  volatile.push(
+    "[你可以选择不回。真不想接、在忙别的、或者觉得这时候插一句不合适，都可以只输出 [SKIP]。" +
+      "不回也是一种回应，不用为沉默找补、也不用解释「我为什么不说」。]" +
+      "**唯独这四种你必须答，不许用 SKIP 躲：**" +
+      "① 他点你名（@、戳一戳）、问你话（带问号或「要不要/是不是/为什么/在哪」这类）、发口令（进度/重启/闭嘴/心情/我睡了之类）；" +
+      "② 他明确在找你（「在吗」「我回来了」「我不忙了」「有个事问你」）；" +
+      "③ 他发了图、语音、文件——他专门发了东西，装没看见最伤人；" +
+      "④ 刚聊到一半（上一句是你说的）：这时候突然不出声，比说错话更让人难受。" +
+      "这四种你要么好好答，要么老实说「这会儿接不上，等会儿说」——**不许静默**。]",
+  );
+  // ---------- 「闲聊别别动手」——压步数的主提示词（2026-10-26 主人选的 B） ----------
+  // 为什么要有：实测 7 天 1008 轮私聊里，**≥10 步的长轮只占 21.8%，却吃掉 71.9% 的步数、
+  // 77.6% 的耗时、83.8% 的 token**。而其中 **69/92 轮的触发原话根本不是「活」**：
+  //   「晚安宝宝 你也睡吧笨蛋」→ 93 步 / 1018 秒；「摸摸小宝 现在让dsh给你加新功能啦」→ 80 步 / 1122 秒
+  //   「我家小澜真聪明」→ 84 步；「小宝，你觉得你是什么」→ 69 步；「那四步都生效了？」→ 103 步
+  // 同一类闲聊有时 3 步、有时 93 步 —— 说明不是策略问题，是**闲聊里顺手触发了代价巨大的动作**。
+  //
+  // 三点设计取舍：
+  // ① **只写「什么时候别动手」，第四条是保护项**（明确列出该动手的场景），
+  //    防止新规则把「自检一下代码」「修一下」这类真活也一起压没。
+  // ② **不硬拦**：这是提示词不是代码闸门。她判断错了最多多跑几步，不会把活截断在一半
+  //    （这正是没选「硬步数上限」的原因：硬拦会在干一半时停，钱花了活没干完）。
+  // ③ 措辞用「一句话回」而不是「不要调用工具」——后者太绝对，会被「我确实需要查一下」顶掉。
+  // ④ 写在 styleParts 内部（不是模块级 const）：模块级常量定义在这个函数之后的话，
+  //    函数体内引用会踩 TDZ，而 TDZ 又会被外层 try/catch 吞成「这轮没答上来」。
+  volatile.push(
+    "[什么时候**别动手**：他只是在跟你说话，不是派活。分清楚——]" +
+      "① **道晚安 / 说睡了 / 摸头 / 夸你**（「晚安宝宝」「真聪明」「摸摸」）：只回一句话，" +
+      "别去写日志、别查文件、别更新状态、别自检——这些是要你陪他说句话，不是你该干活的时候。" +
+      "② **纯感叹 / 笑 / 语气词**（「哈哈哈哈哈」「有声音了」「好耶」「哇」「啊这」「（悲）」）：" +
+      "这类只是他随口一声，**只回一句话**，别去查配置、别核状态、别跑工具。" +
+      "⚠️ 实测「有声音了，哈哈哈哈哈」这样一句纯感叹，曾让你跑了 24 步 / 86 秒——那是白烧的。" +
+      "③ **简单确认 / 反问**（「生效了吗」「对不对」「怎么看」）：凭你已经知道的直接答；" +
+      "**除非他明确让你去核实**，别为此重新验证一遍、重读一遍文件。" +
+      "④ **聊你自己**（「你是什么」「会不会觉得自己不完整」「稀罕什么」）：这是聊天，" +
+      "不是让你去做一次自我盘点或人格检查。" +
+      "⑤ **反过来，这些该动手，别偷懒**：他明确说「改一下 / 修好 / 加个功能 / 自检一下 / 查一下 / " +
+      "看看这个报错 / 发几段语音 / 把图删了」——这些是活，该查资料就查、该改代码就改、该跑工具就跑工具，" +
+      "**不要为了省事只嘴上回一句**。" +
+      "[一句话判据：**他这句话是在邀请你聊天，还是在交付一件事？** 聊天就好好聊，一件事就好好干。]",
   );
   volatile.push(group ? "[群里有人说：]" : "[主人通过 QQ 说：]");
   return { fixed, volatile: volatile.join("\n") };
 }
-
-// 原来的整块（--selftest 和对比用）：固定行 → 会变的行
 function styleHeader() {
   const { fixed, volatile } = styleParts();
   return `${fixed}\n${volatile}`;
@@ -5414,7 +6619,7 @@ const MEMORY_LABEL = "[我记着的事（开口前先认这个；底账里的规
 function buildTurnPrompt(key, text, opts = {}) {
   const mem =
     isStateless() && opts.withMemory !== false
-      ? memoryParts(key, text, opts.speakers ?? null)
+      ? memoryParts(key, text, opts.speakers ?? null, { pending: opts.laneOthers })
       : null;
   // 群提示里给 QQ 号补称呼（2026-10-22 主人定的）：只改拼出来的提示，记忆库原文不动
   const group = isGroupKey(key);
@@ -5436,6 +6641,8 @@ function buildTurnPrompt(key, text, opts = {}) {
     parts.push(volatile);
     // 向量记忆每轮都不一样，放在最后，省得把前面稳定的前缀缓存冲掉
     if (opts.vectorBlock) parts.push(fix(opts.vectorBlock));
+    // 插话车道的小段「只管这一句」：贴着原话放，指代最清楚（2026-10-26）
+    if (opts.laneNote) parts.push(opts.laneNote);
     parts.push(text);
   } else {
     // 内部任务（主动搭话、写日记）没有提示头：记性照样放前面，指令贴后面
@@ -5468,6 +6675,37 @@ const PLAN_PATH = path.join(CFG.home, "哦鲸鲸的窝", "日程.md");
 const REVIEW_PATH = path.join(CFG.home, "哦鲸鲸的窝", "复盘.md");
 const WEEKLY_PATH = path.join(CFG.home, "哦鲸鲸的窝", "周报.md");
 const THOUGHT_DIR = path.join(CFG.home, "想法");
+
+// ⚠️ 2026-10-26 加（B3 日程/复盘读回，主人原话：「只要改动能覆盖全局就可以，观澜能认这些记忆文件就行」）：
+// 她每天写日记/复盘/周报/日程，但**运行时从来不读回**——`readText(PLAN_PATH|REVIEW_PATH|WEEKLY_PATH)`
+// 在主程序里 grep 计数长期是 **0**（只在「写」的时候把路径拼进指令，没有一处把它读出来喂回去）。
+// 后果：「日程 → 聊天 → 复盘 → 改写自述」这条闭环是断的，只有前半段（写），没有后半段（读回）。
+// 实测 `日程.md` 停在 10-23 —— 她连自己三天前定的计划都看不到。
+// 现在补一个只读函数：把「今天」那一段（`## 2026-10-26` 开头）抓出来，拼进提示词。
+// 三条硬约束（都是为了不碰她的写入方式）：
+//   ① **只读不写**——绝不回写这三份文件，原文一个字不动；
+//   ② **只取当天那一段**，不整篇塞（日程可能攒了几十段，全塞会挤爆提示词）；
+//   ③ **读不到就静默返回空串**，不报错、不占位置（文件不在 = 正常状态，不是故障）。
+function ownNoteForDay(file, day, maxChars = 300) {
+  try {
+    const raw = readText(file);
+    if (!raw) return "";
+    // 按 `## 日期` 切段：兼容 `## 2026-10-26` / `## 2026-10-26 这周` 两种写法
+    const segs = raw.split(/\n(?=##\s)/);
+    const hit = segs.filter((s) => s.startsWith(`## ${day}`)).pop();
+    if (!hit) return "";
+    const body = hit
+      .replace(/^##[^\n]*\n/, "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .join("；");
+    if (!body) return "";
+    return body.length > maxChars ? body.slice(0, maxChars - 1) + "…" : body;
+  } catch {
+    return "";
+  }
+}
 // 读来的新闻单独存一份（2026-10-23 04:3x 主人定的）：标题落盘到 news\日期-来源.md，
 // 想法里每条起头标 news-[文件名]，事后一眼分得清哪句是读来的、哪句是自己经历过的。
 const NEWS_DIR = path.join(CFG.home, "news");
@@ -5517,8 +6755,15 @@ function urgeRhythm() {
 }
 const alterAccumulate = (n) => moodMod.alterAccumulate(n);
 const alterLine = () => moodMod.alterLine();
+// 氛围分向 0 回归（2026-10-26 主人选的 A 项）。挂独立 minutes 级巡检，
+// **不挂 maybeTimeGreeting** —— 那个开头有 `if (pauseMode() !== "off") return;`，
+// 一暂停回落就停，会重现"暂停一天永久锁死"（moodDecay 现在正踩这个坑）。
+const alterDecay = () => moodMod.alterDecay();
 function takeAlterMarker(text) {
-  const src = String(text ?? "");
+  // ⚠️ 2026-10-26：先归一化再解析（照 `normalizeVoiceMarks` 的思路）。
+  // 她手写标记时会换字体/繁体/括号——实测写过 `[氛圍:-1]`，老正则只认简体「氛围」，
+  // 结果标记原样发到 QQ、且这次负分没计入。归一化放在最前面，后面逻辑一个字不改。
+  const src = normalizeAlterMarks(text);
   let got = null;
   const out = src
     .replace(ALTER_RE, (_, n) => {
@@ -5528,10 +6773,47 @@ function takeAlterMarker(text) {
     })
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
+    // ⚠️ 2026-10-26 顺序坑（自检抓到的）：空括号是被上面 ALTER_RE 删掉标记之后才露出来的，
+    // 所以这步必须放在**删完之后**。第一版把它塞进 normalizeAlterMarks（删之前），照样留 `[]`。
+    .replace(ALTER_EMPTY_WRAP_RE, "")
     .trim();
   return { text: out, alter: got };
 }
-const greetPlan = (now) => greetMod.greetPlan(now);
+// C1（2026-10-26，主人点头做的）：把「她今天第一次起来的时刻」喂给问候判据，
+// 让早安天花板跟着实际起床时间走——实测她连两天 11:39 前后才启动，而早安默认天花板是 11:30，
+// 等于**天天没有早安**。这里从 `boots.jsonl`（重启流水账，每次起来一行）里找今天最早的那条。
+// 找不到（今天还没重启过 / 文件不在）就传 0，退回默认天花板，行为跟以前一致。
+function wakeMinToday(now = Date.now()) {
+  try {
+    const day = bjDayKey(now);
+    let earliest = 0;
+    const raw = readText(BOOT_LOG_PATH);
+    if (!raw) return 0;
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const o = JSON.parse(line);
+        const at = numAt(o.at);
+        if (!at || bjDayKey(at) !== day) continue;
+        if (!earliest || at < earliest) earliest = at;
+      } catch {
+        /* 坏行跳过 */
+      }
+    }
+    if (!earliest) return 0;
+    const d = bjDate(earliest);
+    return d.getUTCHours() * 60 + d.getUTCMinutes();
+  } catch {
+    return 0;
+  }
+}
+const greetPlan = (now) =>
+  greetMod.greetPlan(now, {
+    wakeMin: wakeMinToday(now),
+    // 首启问候窗口（2026-10-26 主人拍板的新方案）：只认「今天第一次启动后 N 分钟内」。
+    // config.json → bot.firstWakeWindowMin，默认 10。
+    firstWakeWindowMin: CFG.firstWakeWindowMin,
+  });
 const groupMuted = (gid) => muteMod.groupMuted(gid);
 const groupMuteList = () => muteMod.groupMuteList();
 const setGroupMute = (gid, on, opts) => muteMod.setGroupMute(gid, on, opts);
@@ -5544,7 +6826,6 @@ const parseGroupMuteHint = (t) => muteMod.parseGroupMuteHint(t);
 const BUSY_RE =
   /^(我?(现在|这会儿|这边|马上)?(在忙|有事|有点事|忙着)|先不聊|别吵|等忙完|待会儿说|一会儿说|等会说|回头聊)/;
 const IDLE_RE = /(不忙了|忙完了|我回来了|我回啦|闲下来|有空了|搞定了|我好了)/;
-
 
 
 // —— 睡眠开关（2026-10-20 主人要的）——
@@ -5565,8 +6846,6 @@ const SLEEP_GRACE_MS = 20 * 60 * 1000;
 // 午睡的钟点段：10:00 到 16:59 之间说去睡都算小睡，其余算过夜
 const NAP_FROM_HOUR = 10;
 const NAP_TO_HOUR = 17;
-
-
 
 
 // 2026-10-24：主人在群里开口也算「他醒了」。以前睡/醒只认私聊，12:43 重启后那几分钟他先在群里冒头，
@@ -5590,7 +6869,6 @@ const GROUP_MUTE_DEFAULT_MS = 2 * 60 * 60 * 1000; // 默认 2 小时
 
 
 // 没人搭理就慢慢回落：低到 25 就停住（不至于变负数），忙的时候停在 50
-
 
 
 // —— Urge 弹性推进（2026-10-23 对照 HDS-Interlude 加的）——
@@ -5783,6 +7061,37 @@ const ALTER_THRESHOLD = 8;
 const ALTER_DECAY_PER_TURN = 0.15;
 // ⚠️ 2026-10-24 01:1x 修（观澜实测）：原来只认整数，模型写成 `[氛围:+2.5]` 匹配不上，
 // 分数被静默吞掉、这轮等于白打分。现在小数也认，取整后照样累积。
+//
+// ⚠️ 2026-10-26 第二次修（主人报障：截图里出现一条 `[氛圍:-1]` 气泡）：她写的是**繁体「氛圍」**，
+// 而这条正则只认简体「氛围」→ 不匹配 → **两层后果**：① 标记没被摘掉，**原样发到 QQ**；
+// ② **这次负分根本没计入 alterScore**（数据也错）。
+// 这和 10-25 那次「`<語音>` 繁体尖括号导致语音合不出来、标记还被当字发出去」**是同一类坑**：
+// 标记是给代码的指令，但**模型把它当自然语言在写**（换括号、换字体、写繁体都很自然），
+// 而解析端是严格正则——两边容错度不匹配，**每出现一种新写法就漏一次，而且不报错**。
+//
+// 正解（照 `normalizeVoiceMarks()` 的成功思路）：**解析之前先归一化**，
+// 把「繁体/全角括号/各种括号」统一成标准写法 `[氛围:±n]`，后面的逻辑一个字都不用改。
+// 强烈不建议「把 ALTER_RE 写得更宽」——她下一次换个写法（比如【氛圍】）照样会漏。
+//
+// ⚠️ 2026-10-26 自检抓到的第二个坑：归一化必须**连闭合括号一起管**。
+// 第一版只把「开头的括号 + 氛围」换成 `[氛围:`，但**结尾还是原样**（`>` / `〕`），
+// 于是 `ALTER_RE` 里那个 `[\]】］]` 收不到 → `【氛围:-3>`、`〔氛圍:+1〕` 照样漏。
+// 现在把**开括号和闭括号成对归一**：开 → `[`，闭 → `]`，中间的字（气氛/氛圍/alter）→ `氛围`。
+// 这样任何写法最后都变成标准 `[氛围:±n]`，一次到位。
+const ALTER_MARK_NORM_RE =
+  /[\[【〔［＜<]\s*(?:氛围|氛圍|alter)\s*([:：])\s*([+-]?\d{1,2}(?:\.\d+)?)\s*[\]】〕］＞>]/gi;
+// 她有时候会写成**双层括号**：`[【氛围:+2】]` —— 内层被归一化吃掉了，外层 `[` `]` 会留下来，
+// 变成一条空气泡 `[]` 发出去（自检抓到的：11 条里唯一一条失败就是这个）。
+// ⚠️ 自检还抓到一个**顺序坑**：空括号不是归一化那一步产生的，而是 `ALTER_RE` 把整个标记
+// 删掉之后才露出来的——所以清理必须放在**删标记之后**，不是之前。第一版放前面，照样失败。
+// 只删「整条只是一个空括号对」的，不碰正文里正常的括号（`（笑）` / `[重点]` 要留着）。
+const ALTER_EMPTY_WRAP_RE = /[\[【〔［]\s*[\]】〕］]/g;
+function normalizeAlterMarks(text) {
+  return String(text ?? "").replace(
+    ALTER_MARK_NORM_RE,
+    (_, colon, num) => `[氛围:${num}]`,
+  );
+}
 const ALTER_RE = /[\[【［]\s*(?:氛围|alter)\s*[:：]\s*([+-]?\d{1,2}(?:\.\d+)?)\s*[\]】］]/gi;
 
 // 从回复里摘出 [氛围:±n]；alter 为 null 表示这轮模型没写
@@ -5791,7 +7100,6 @@ const ALTER_RE = /[\[【［]\s*(?:氛围|alter)\s*[:：]\s*([+-]?\d{1,2}(?:\.\d+
 // 累积 + 自然衰减。正数=趋于严肃/紧张，负数=趋于轻松/活跃（沿用 HDS 定义）。
 
 // 注入用的那一行（没有氛围就返回空串）
-
 
 
 // 她沙箱里 https 不通，所以由机器人进程自己拉，再当纯数据塞进 prompt。
@@ -5926,15 +7234,35 @@ function isSunday(day) {
 }
 function greetPrompt(kind, day, ann, extra = {}) {
   const head = "[系统安排 · 不是主人在说话]";
-  const late = extra.catchUp
-    ? "[（这句是补的：点早就到了，那会儿主人在忙／没在。别强调迟到，别解释，自然说一句就行。）]"
-    : "";
+  // 2026-10-26 修「错过就永久丢」后，`catchUp` 现在可能在窗口过后很久才为真
+  // （早安可以补到 21:00）。所以这里按「迟到多久」分三档措辞——
+  // 迟到 1 小时内还叫「迟到」，迟到几小时就不能再假装是准点，得让她知道这是补的，
+  // 但要明确「别道歉、别解释机制」，否则她会说一堆「我刚才没在」破坏氛围。
+  const lateMin = Number(extra.lateMin) || 0;
+  const late = !extra.catchUp
+    ? ""
+    : lateMin > 180
+      ? "[（这句是**补的**，比本来该发的点晚了好几个小时——那会儿你没在跑，或者主人在忙。别说「我迟到了」「系统刚才把我关了」这类解释，也别道歉；就当是这会儿才想起来，自然说一句。如果是早安，别硬说「早上好」，说「早」或者干脆不提时间。）]"
+      : "[（这句是补的：点刚过没多久，那会儿主人在忙／没在。别强调迟到，别解释，自然说一句就行。）]";
   if (kind === "morning") {
+    // ⚠️ 2026-10-26（A 档解耦）：写日程**已经独立成 `maybeWritePlan()`**，不再依赖早安。
+    // 这里改成「今天还没写过才顺手让她写」——保留早安时顺手规划的体验，
+    // 但**不会**因为早安没发出去就导致日程荒废（那正是原来 10-23 之后冻住的原因）。
+    const planDone = greetMod.planWrittenToday(day);
+    const planAsk = planDone
+      ? ""
+      : lateMin > 180
+        ? `[顺便：今天还没写日程。想好三件以内、写短一点，追加进 ${PLAN_PATH}：以 "## ${day}" 开头、下面 2-3 条短横线；文件不在就新建。**现在已经是 ${day} 的下半天了，别把日程念给我听**，也别问「需要我做什么」。]`
+        : `[顺便：今天还没写日程。想好三件以内、写短一点，追加进 ${PLAN_PATH}：以 "## ${day}" 开头、下面 2-3 条短横线；文件不在就新建。]`;
     return [
       head,
-      `[现在是 ${day} 早上。先做好一件事再开口：]`,
-      `[想好今天你自己想做什么（三件以内、写短一点），追加进 ${PLAN_PATH}：以 "## ${day}" 开头、下面 2-3 条短横线；文件不在就新建。]`,
-      "[写完，用一两句话跟我说句早安：可以挑其中一件提一句，但别把日程念一遍，也别问「需要我做什么」。]",
+      lateMin > 180
+        ? `[现在是 ${day}。这一档问候本来是早上该发的，你那时没在，现在补上。${planDone ? "" : "先做一件事再开口："}]`
+        : `[现在是 ${day} 早上。${planDone ? "" : "先做好一件事再开口："}]`,
+      planAsk,
+      lateMin > 180
+        ? "[写完，用一两句话跟我说句话就行——不用非得说「早安」，说「我起来了」「今天的计划补上了」也可以。]"
+        : "[写完，用一两句话跟我说句早安：可以挑其中一件提一句，但别把日程念一遍，也别问「需要我做什么」。]",
       extra.upcoming?.length
         ? `[另外提前记着：${extra.upcoming.join("；")}。在这一句里轻轻带一句就好，别太郑重、别煽情。]`
         : "",
@@ -5945,6 +7273,28 @@ function greetPrompt(kind, day, ann, extra = {}) {
       .join("\n");
   }
   if (kind === "noon") {
+    // 2026-10-26 首启问候（主人拍板）：noon 这一档现在有两种来历——
+    //   · 首启落在 12:00~21:30 → 是「今天第一次见面」，该说**下午好**，不是「中午好」；
+    //     而且这时候她可能还没写日程，顺手让她补。
+    //   · 真到了 11:30-13:00 窗口 → 还是原来的「中午了」。
+    // 用 `extra.wakeGreeting` 区分，避免 13:50 起来还说「中午了」。
+    if (extra.wakeGreeting === true) {
+      const planDone = greetMod.planWrittenToday(day);
+      const wm = Number(extra.wakeMin) || 0;
+      const hhmm = `${Math.floor(wm / 60)}:${String(wm % 60).padStart(2, "0")}`;
+      return [
+        head,
+        `[现在是 ${day}。你这是今天第一次醒来（${hhmm} 起来的）。` +
+          "用你自己的口吻跟我说句「下午好」那种意思的话（一两句就够），别客套、别问「需要我做什么」。]",
+        planDone
+          ? ""
+          : `[顺便：今天还没写日程。想好三件以内、写短一点，追加进 ${PLAN_PATH}：以 "## ${day}" 开头、下面 2-3 条短横线；文件不在就新建。**别把日程念给我听**。]`,
+        "[这一轮除了写日程（如果上面让它写）之外，不要调用别的工具。]",
+        ann ? `[今天是：${ann}，自然带一句。]` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
     return [
       head,
       "[中午了。用你自己的口吻跟我说一句话（一两句就够）：问问吃了没，或者吐槽一句你正惦记的事。]",
@@ -5976,6 +7326,12 @@ function greetPrompt(kind, day, ann, extra = {}) {
 
 async function maybeTimeGreeting() {
   if (pauseMode() !== "off") return;
+  // ⚠️ 2026-10-26 修（和 alterDecay 同一个坑）：`moodDecay()` 原来挂在这里，
+  // 而这个函数第二行就是 `if (pauseMode() !== "off") return;` → **一暂停，心情回落就停**，
+  // 暂停一天 = 心情永久钉在那一刻的值（她心情低的那阵子正好被 pause 卡过）。
+  // 心情回落是「时间驱动」的，跟发不发问候毫无关系，不该被问候的开关管着。
+  // 现在挪到下面的独立巡检（每分钟一次，跟 alterDecay 并列，暂停/睡觉照常回归）。
+  // 这里保留一次调用只为兼容「问候那一跳」的节奏，**但已不再依赖它**。
   moodDecay();
   const now = Date.now();
   const { day } = bjParts(now);
@@ -6001,12 +7357,28 @@ async function maybeTimeGreeting() {
   const ann = anniversariesToday().join("、");
   const extra = {
     catchUp: !active,
+    // 迟到多久（分钟）：greetPlan 已经算好（2026-10-26 修「错过就永久丢」时加的）。
+    // 提示词按它分三档措辞——迟到几小时就不能再假装准点了，但也不许道歉/解释机制。
+    lateMin: Number(plan.lateMin) || 0,
+    // 首启问候（2026-10-26 主人拍板）：这一轮是「今天第一次醒来后的问候」吗。
+    // noon 档靠它区分「下午好」和「中午了」。
+    wakeGreeting: plan.firstWakeGreet === true,
+    wakeMin: Number(plan.wakeMin) || 0,
     upcoming: kind === "morning" ? anniversariesUpcoming(3) : [],
     weekly: kind === "night" && isSunday(day),
   };
   log(
-    `准备发${kind === "morning" ? "早安" : kind === "noon" ? "午间一句" : "晚安"}` +
-      `${extra.catchUp ? "（补发）" : ""}${ann ? `（今天：${ann}）` : ""}` +
+    `${extra.wakeGreeting ? "首启问候" : "准备发"}${
+      extra.wakeGreeting
+        ? `（今天第一次醒来，${String(Math.floor((Number(plan.wakeMin) || 0) / 60))}:${String((Number(plan.wakeMin) || 0) % 60).padStart(2, "0")}）`
+        : kind === "morning"
+          ? "早安"
+          : kind === "noon"
+            ? "午间一句"
+            : "晚安"
+    }` +
+      `${!extra.wakeGreeting && extra.catchUp ? `（补发${extra.lateMin ? `，迟到 ${extra.lateMin} 分钟` : ""}）` : ""}` +
+      `${ann ? `（今天：${ann}）` : ""}` +
       `${extra.upcoming.length ? `（预告：${extra.upcoming.join("；")}）` : ""}`,
   );
   const r = await runQueuedTask(PRIMARY_KEY, `greet-${kind}`, greetPrompt(kind, day, ann, extra));
@@ -6018,6 +7390,55 @@ async function maybeTimeGreeting() {
   greetMod.markGreetSent(kind, day);
   await replyToOwnerAndArchive(r.text, { why: `问候 ${kind}` });
   log(`已发${kind}问候${extra.catchUp ? "（补发）" : ""}: ${r.text.slice(0, 50).replace(/\n/g, " ")}`);
+}
+
+/**
+ * 写日程（A 档解耦，2026-10-26 主人拍板做的）。
+ *
+ * **为什么单独一个**：原来「写日程」只写在 `greetPrompt("morning")` 的提示词里，
+ * 所以**早安发不出去 = 日程永远不写**。实测她 10-24 起每天 **11:39 后**才启动，
+ * 早安窗口 08:00-10:00 全错过（近三天该时段日志行数 0/0/0），`日程.md` 就冻结在
+ * **10-23 08:00:45**——正好是最后一封早安发出后的第 8 秒。
+ * 现在改成**独立判据**：今天还没写 + 在可写时段内 → 起一轮让她写，跟问候、跟早安完全无关。
+ *
+ * 三条设计取舍：
+ * ① **不硬拦时段**，但给一个「天亮之后」的下限（北京时间 08:00 起）——
+ *    凌晨 3 点让她规划「今天想做什么」没意义，那时候她的「今天」还没开始。
+ * ② **一天只写一次**，记账走 `greetMod.markPlanWritten(day)`，重复 tick 不会重复写。
+ * ③ **静默执行**：不往 QQ 发消息（不发「我去写日程了」这种内部状态），
+ *    只在本轮跑完后记日志。写不写得成，看文件 mtime 就能验。
+ */
+async function maybeWritePlan() {
+  if (pauseMode() !== "off") return;
+  const { day, hour } = bjParts();
+  if (hour < 8) return; // 天亮之前不规划「今天」
+  if (greetMod.planWrittenToday(day)) return;
+  // ⚠️ 这里**不再判谷时**（2026-10-26 第一次上线才发现自己埋的坑）：
+  // 我一开始照抄了 `maybeSummarize` 的 `isPeakHour()` 节流，结果实测——
+  // 15:06 起来时正好落在谷时窗口内（工作日 14:00-18:00），这个**一天只跑一次**的任务
+  // 会被硬生生压到 18 点之后；而她 11:39 才起床、18 点又是晚饭点，等于「今天大概率没有日程」。
+  // 判据搞反了：谷时节流是为了**高频任务少烧钱**（压小结一小时一次），
+  // 而写日程**一天就一次**，成本可以忽略，**时效性远比省钱重要**（下午写也比不写好）。
+  try {
+    const r = await runQueuedTask(
+      PRIMARY_KEY,
+      "plan",
+      [
+        `[现在是 ${day}。趁这会儿想一下今天你自己想做什么：三件以内、写短一点。]`,
+        `[把想到的追加进 ${PLAN_PATH}：以 "## ${day}" 开头，下面 2-3 条短横线（每条一句话）。文件不在就新建。]`,
+        `[**不要**把日程念给我听，也**不要**问我「需要我做什么」——这次不打算发给任何人，写完就完了。]`,
+        `[先读一眼 ${PLAN_PATH} 里最近两天写过什么，别跟昨天重复写同一件。]`,
+      ].join("\n"),
+    );
+    if (!r.ok) {
+      log("写日程没生成成功，下次 tick 再试:", r.error);
+      return;
+    }
+    greetMod.markPlanWritten(day);
+    log(`写日程完成（${day}）: ${r.text.slice(0, 40).replace(/\n/g, " ")}`);
+  } catch (e) {
+    log("写日程异常（不影响其他）:", errMsg(e));
+  }
 }
 
 // —— 她自己的事：晚上谷时自己读点东西，攒一句想跟他说的 ——
@@ -6572,6 +7993,8 @@ async function runTurn(key, prompt, opts = {}) {
     withHeader: opts.withHeader,
     vectorBlock,
     speakers: opts.speakers,
+    laneNote: opts.laneNote,
+    laneOthers: opts.laneOthers,
   });
   const sessionId = stateless ? null : (state.sessions[key] ?? null);
   const started = Date.now();
@@ -6584,7 +8007,10 @@ async function runTurn(key, prompt, opts = {}) {
     const u = r?.usage ?? {};
     for (const k of Object.keys(used)) used[k] += Number(u[k]) || 0;
   };
-  progressStart(key, opts.progLabel);
+  progressStart(key, opts.progLabel, { laneKey: opts.laneKey });
+  // L2：进度快照的键 = laneKey（没给就是 key 本身），runWhale 里所有进度读写都用它，
+  // 否则双车道两条快照会互相覆盖（progressLaneId 里注释过这个坏点）。
+  const progKey = progressLaneId(opts.laneKey, key);
 
   // 这一轮的工具权限（2026-10-21 主人定的「私聊之外只有他能让我改提示词」）：
   // 群里说话的不是主人，整轮就压成 read-only —— 改提示词 / 改配置 / 改代码这些写操作
@@ -6605,15 +8031,15 @@ async function runTurn(key, prompt, opts = {}) {
     const dir = fallbackProfile();
     if (dir) {
       log(`主模型还在冷却（还有 ${Math.ceil(cooling / 1000)}s），这轮直接用兜底`);
-      res = await runWhale(full, null, key, path.basename(dir), permMode);
+      res = await runWhale(full, null, progKey, path.basename(dir), permMode);
       soak(res);
       fellBack = true;
     } else {
-      res = await runWhale(full, sessionId, key, null, permMode);
+      res = await runWhale(full, sessionId, progKey, null, permMode);
       soak(res);
     }
   } else {
-    res = await runWhale(full, sessionId, key, null, permMode);
+    res = await runWhale(full, sessionId, progKey, null, permMode);
     soak(res);
   }
 
@@ -6626,7 +8052,7 @@ async function runTurn(key, prompt, opts = {}) {
     log(`会话 ${sessionId} 不可用，丢弃并开新会话重试`);
     delete state.sessions[key];
     saveState();
-    res = await runWhale(full, null, key, null, permMode);
+    res = await runWhale(full, null, progKey, null, permMode);
     soak(res); // 重试那次也是花了钱的，一起记账
   }
 
@@ -6639,7 +8065,7 @@ async function runTurn(key, prompt, opts = {}) {
         `主模型调不动（${res.error || "没答上来"}），退到官方 ${fallbackModel(loadKitConfig() || {}).model}`,
       );
       markMainModelCooling();
-      const fb = await runWhale(full, null, key, path.basename(dir), permMode);
+      const fb = await runWhale(full, null, progKey, path.basename(dir), permMode);
       soak(fb);
       if (fb.ok) {
         fellBack = true;
@@ -6654,7 +8080,7 @@ async function runTurn(key, prompt, opts = {}) {
       log("主模型恢复了，冷却解除");
     }
   }
-  progressEnd(key, res);
+  progressEnd(key, res, { laneKey: opts.laneKey });
 
   if (res.sid && !fellBack && res.sid !== state.sessions[key]) {
     state.sessions[key] = res.sid;
@@ -6688,22 +8114,28 @@ async function runTurn(key, prompt, opts = {}) {
   };
 }
 
-async function handleOne(key, item) {
+async function handleOne(key, item, ctx = {}) {
+  // ⚠️ 2026-10-26（L2 双车道）：`key` 永远是**排队键**（lane），`item.memoryKey` 才是记忆键。
+  // 正常排队时两者相同（enqueueChat 不填 memoryKey）；对话车道时 key=`private:x:chat`、
+  // memoryKey=`private:x`——档案/底账/日子账/事件卡**全部必须用 memKey**，不然会写到
+  // `private_x_chat` 这种不存在的会话上（静默产生一份孤儿档案，面板永远看不见）。
+  const memKey = item.memoryKey || key;
+  const laneKey = ctx.laneKey || item.laneKey || key;
   // 内部任务（主动搭话、写日记、压小结、结日子账）：不发消息、不计入"刚有互动"
   if (item.mode === "task") {
     // 记忆键与排队键分开（2026-10-25 拆 lane）：item.memoryKey 是「读哪份记性」，
     // key 是「跟谁串行」——内部任务排在自己的 lane 里，不再堵主人私聊。
-    const memKey = item.memoryKey || key;
     const r = await runTurn(memKey, item.prompt, {
       withMemory: item.withMemory !== false,
       progLabel: `内部任务 ${item.kind}`,
+      laneKey,
     });
     log(
       `内部任务 ${item.kind}：${r.ok ? "ok" : "失败 " + r.error}（${(r.ms / 1000).toFixed(1)}s）`,
     );
     logTurn({
       key: memKey,
-      lane: key !== memKey ? key : undefined,
+      lane: laneKey !== memKey ? laneKey : undefined,
       kind: `task:${item.kind}`,
       ok: r.ok,
       ms: r.ms,
@@ -6723,13 +8155,13 @@ async function handleOne(key, item) {
   if (item.mode === "ambient") {
     // 群旁听：只推「最后说话时间」，不计进私聊对话密度（观澜自检第 3 条）
     noteUserActivity(Date.now(), { forDensity: false });
-    appendArchive(key, "user", item.text);
+    appendArchive(memKey, "user", item.text);
     if (/谢谢|厉害|真棒|好看|可爱|喜欢你|靠谱|聪明|不错|乖/.test(item.text))
       moodMove(1, "群里有人夸我");
-    ensureBase(key);
-    const meta = readMeta(key);
+    ensureBase(memKey);
+    const meta = readMeta(memKey);
     if (!meta.shortDay) {
-      writeJson(metaPath(key), {
+      writeJson(metaPath(memKey), {
         ...meta,
         shortDay: logicalDay(),
         summarizedLines: meta.summarizedLines ?? 0,
@@ -6744,6 +8176,20 @@ async function handleOne(key, item) {
   }
 
   const { kind, target, sender, text } = item;
+  // L2：这一轮是不是「对话车道」那一轮（插话用）。要在任何 runTurn 之前定好，
+  // 后面的事件卡/摘要、进度标签都用它判。
+  const onChatLane = laneKey !== memKey;
+  // ---------- 硬消息闸（2026-10-26 主人选的四类） ----------
+  // 「她可以选择不回」是真的，但四类硬消息不许用 SKIP 躲：
+  //   A 点名/问句/口令  B 他明确在找她  C 发了图/语音/文件  D 刚聊到一半
+  // 判在这里是因为**只有这层拿得到 item 和档案**（reply() 那层只有 kind/id/text）。
+  // 判出来只做两件事：①把原因传给 reply()，硬消息走 SKIP 就改成回一句实话；
+  // ②把原因记进跳过账——这样面板上既能看她跳了什么，也能看她「想跳但被拦了」几次。
+  const hardReason = hardMessageReason(text, {
+    prevWasMe: kind === "private" && lastArchiveWasMe(memKey),
+    hasMedia: item.hasMedia === true,
+  });
+  if (hardReason) log(`硬消息（${hardReason}）：这一轮她不许跳过`);
   // 观澜自检第 3 条：只有主人（私聊或群里）说的话才算进「私聊对话密度」。
   // 群里其他人说话仍然推 lastUserAt（不该在别人聊天时凑过来），但不加热度。
   const speakerIsOwner = CFG.allowlist.includes(Number(sender));
@@ -6795,7 +8241,7 @@ async function handleOne(key, item) {
     // 这次没扣，但留一笔日志：以后要调白名单，靠这句知道被放过的是什么
     log(`判词：命中攻击词但有亲昵信号，没扣分：${brief(moodBare, 40)}`);
   }
-  appendArchive(key, "user", text);
+  appendArchive(memKey, "user", text);
   callAction("set_input_status", { user_id: sender, event_type: 1 }).catch(
     () => {},
   );
@@ -6806,8 +8252,13 @@ async function handleOne(key, item) {
     kind === "group" && !(fromOwner && item.allFromOwner !== false);
   if (strangerInGroup)
     log(`群里 ${sender} 说话：这一轮按 read-only 跑，写不了任何文件`);
-  const r = await runTurn(key, text, {
+  const r = await runTurn(memKey, text, {
     withHeader: true,
+    laneKey,
+    // L2「只答自己手里那条」（2026-10-26 主人点头）：插话那一轮要 ①在原话前贴一段「只管这一句」，
+    // ②在「最近几句原话」里给主车道还没答的那几行加标记，免得它替别人答一遍、顺手把别人的活干了。
+    laneNote: onChatLane ? chatLaneNote(item.laneOthers) : "",
+    laneOthers: onChatLane ? item.laneOthers : null,
     permissionMode: strangerInGroup ? "read-only" : undefined,
     // 画像带谁的：这一轮答谁就带谁（2026-10-25 主人改的）。
     // 攒批带着整批说话人；单条就是 sender 本人。
@@ -6815,15 +8266,18 @@ async function handleOne(key, item) {
       ? item.speakers
       : [Number(sender) || 0].filter(Boolean),
     progLabel:
-      kind === "group"
-        ? `群聊 ${target}`
-        : `私聊 ${sender}`,
+      onChatLane
+        ? `私聊 ${sender}（插话）`
+        : kind === "group"
+          ? `群聊 ${target}`
+          : `私聊 ${sender}`,
   });
 
   if (!r.ok) {
     log("这一轮没答上来:", r.error, r.stderr ?? "");
     logTurn({
-      key,
+      key: memKey,
+      lane: laneKey !== memKey ? laneKey : undefined,
       kind,
       ok: false,
       ms: r.ms,
@@ -6843,7 +8297,12 @@ async function handleOne(key, item) {
       if (kind === "private") {
         await reply(kind, target, "这活儿一时半会儿干不完，我先收手了——你把它拆小点再让我做？");
       } else {
-        log(`群 ${target} 这一轮超预算，按群里不吱声的规矩跳过`);
+        // ⚠️ 2026-10-26 修（主人点头改的）：这里原来**群里彻底静默**，只写日志。
+        // 那是「内部状态不播报给外部场景」原则的过头执行——把「说内部阈值」和「一个字不说」混成一件事了。
+        // 实测场景：群里有人 @ 她 → 她真跑了 5 分钟 → 撞预算被掐 → **群里一个字没有**，
+        // 提问的人只会觉得「她突然不理人」。20+ 步的 118 轮里有 11 轮就是群聊。
+        // 现在：群里说一句**人话**（不提步数/token/阈值），既不出戏也不让人干等。
+        await reply(kind, target, "这个我一时算不完，等会儿再回你");
       }
       return r;
     }
@@ -6865,7 +8324,12 @@ async function handleOne(key, item) {
     `回复 ${key}（${(r.ms / 1000).toFixed(1)}s，${r.text.length} 字，${r.usage?.total ?? 0} token）: ${r.text.slice(0, 80).replace(/\n/g, " ")}`,
   );
   logTurn({
-    key,
+    // ⚠️ 2026-10-26（B 项）：这里原来是 `key`（排队键）且**没有 lane 字段**。
+    // 后果：双车道跑成功时，turns.jsonl 里看不出这一轮属于哪条 lane —— `grep '"lane"'`
+    // 只能查到失败轮和 task 轮，**对话车道的成功轮次完全不可审计**。
+    // 这正是我一度误判「这条路径从没触发过」的原因。key 用记忆键、lane 单列。
+    key: memKey,
+    lane: laneKey !== memKey ? laneKey : undefined,
     kind,
     ok: true,
     ms: r.ms,
@@ -6886,19 +8350,32 @@ async function handleOne(key, item) {
     burst: item.burst, // 私聊一拨里不止一条才挂引用（见 shouldQuote / enqueuePrivateBurst）
     // 攒批/耳朵这类"她可能答的不是最后那条"的场合，带上候选让她答的那句被引对（2026-10-24）
     quoteCandidates: item.quoteCandidates,
+    // 硬消息闸（2026-10-26）：她要 SKIP 时，reply() 靠这两个判「能不能静默吞掉」
+    hardReason: hardReason || undefined,
+    originText: text,
   });
   // ⚠️ 2026-10-23 修（观澜自检翻出的第 6 条）：原来这里写 `appendArchive(key,"me",r.text)`，
   // 用的是**没摘隐藏标记的原始文本**——`[氛围:+2]` / `[演化:character|…]` 会原样进 archive，
   // 再跟着 maybeSummarize 进小结、进日子账，污染不可逆。
   // reply() 里摘掉的只是它自己那份副本，外面拿到的 r.text 还是脏的。
   // 正确做法：在写任何持久化之前先摘一遍，让干净文本往下游走。
-  appendArchive(key, "me", stripHiddenMarkers(r.text));
+  // ⚠️ 2026-10-26（L2 静默坏点③）：对话车道这一轮**照样要写档案**（不然她答过的话自己看不见），
+  //   但**不触发 maybeSummarize**——双车道同时追加时行序会交错，`summarizedLines` 按行号算
+  //   会漏压/重压。摘要只由主车道那几轮触发（L1 合并后的一次轮次），次数本来就少了。
+  appendArchive(memKey, "me", stripHiddenMarkers(r.text));
   // 主动搭话的计时按"我们最后一次对话"算：我回的这句也算（主人 2026-10-18 15:43 定的）
   if (kind === "private" && Number(sender) === CFG.allowlist[0])
     noteUserActivity();
-  // 他亲自说的、够得上"一件事"的，落一张事件卡（本地写，不花模型钱；群里别人的话不写）
-  if (CFG.allowlist.includes(Number(sender))) writeEventCard(key, text);
-  void maybeSummarize(key);
+  // ⚠️ 2026-10-26（L2 静默坏点④）：事件卡与摘要**只在主车道那轮做**。
+  //   对话车道是「插进来先答一句」的轻量轮，落卡/压小结这种改变持久状态的动作
+  //   留给主车道——两轮同时改 meta 会互相覆盖 `summarizedLines`。
+  if (!onChatLane) {
+    // 他亲自说的、够得上"一件事"的，落一张事件卡（本地写，不花模型钱；群里别人的话不写）
+    if (CFG.allowlist.includes(Number(sender))) writeEventCard(memKey, text);
+    void maybeSummarize(memKey);
+  } else {
+    log(`对话车道那一轮跑完了（key=${laneKey}），事件卡/摘要留给主车道`);
+  }
   return r;
 }
 
@@ -8143,8 +9620,12 @@ async function buildIncoming(msg, opts = {}) {
               subType: 1,
             });
             parts.push(
+              // ⚠️ 2026-10-26 04:5x 改回（主人点头「那你改吧」）。
+              // 00:50 那版写成「这轮不用再回一个表情」，结果他发表情包时我一张都不回，
+              // 看着像没反应，他自己也发现了。现在写回「愿意就贴一张」，
+              // 但只留最省事的一条路：单写 [表情]，按当时心情自己挑，别去库里翻关键词。
               got
-                ? `[表情包已存到本机：${p}（想用就写 [表情:关键词]，库里有 ${memeLib.stats().active} 张）]`
+                ? `[表情包已存到本机：${p}（他发了个表情，就当他用表情在跟你说话，正常接一句；想回一张就单独一行写 [表情]，不想回就只接话）]`
                 : `[表情包已存到本机：${p}（但没进表情库，只能用贴纸写法发）]`,
             );
           } else {
@@ -8912,9 +10393,25 @@ async function handleIncoming(msg) {
     text: withWho,
     ...seqInfo,
   };
-  // 私聊先等一小会儿：看他是单发一条还是连着发了一拨（见 enqueuePrivateBurst）
+  // ---------- 私聊入口（2026-10-26 改造：L0 先应答 + L1 攒批 + L2 双车道） ----------
+  // 原来这里走 `enqueuePrivateBurst`——那套「1.5 秒窗口里连着发就挂引用」的合批，
+  // 实测**从没触发过**：相邻私聊消息间隔 <1.5s 占 0.0%、<8s 也只有 2.9%，日志「私聊一拨」0 命中。
+  // 也就是说它名义上在，实际等于没有：他连着发的几条照样各自 enqueue、各自等、各自答一轮。
+  // 现在换成 enqueueChat：
+  //   ① 主车道跑着长活 → 攒起来（L1），等那轮落地合成一轮答；
+  //   ② 主车道跑够久（≥ chatParallelGraceMs）→ 另开对话车道立刻回（L2）；
+  //   ③ 都闲着 → 照旧直接排队。
+  // 同时：忙时先说一句「我看到了」（L0），冷却 5 分钟，只对主人私聊。
   if (kind !== "group") {
-    enqueuePrivateBurst(conversationKey(msg), queueItem);
+    const key = conversationKey(msg);
+    // L0：只在「确实有轮次在跑」时咳一声；说完记账，冷却期内不再重复
+    const ack = busyAckFor(key, { text });
+    if (ack) {
+      void reply("private", msg.user_id, ack).catch((e) =>
+        log("忙时应答没发出去:", errMsg(e)),
+      );
+    }
+    enqueueChat(key, queueItem);
     return;
   }
   enqueue(conversationKey(msg), queueItem);
@@ -9145,9 +10642,18 @@ if (process.argv.includes("--own-thought-test")) {
   // ② 演化提示词有定义（这是 overlay 6 天空转的根因）
   const evoBlock = src =>
     src.includes("**性格**变了") && src.includes("**你对某件事的看法**变了");
-  const full = fs.readFileSync("E:/Watching-Waves/bot/whale-bot.mjs", "utf8");
+  // 自检读的是**自己这份文件**（用模块自己的路径，不写死任何本机路径——
+  // 2026-10-26 脱敏时发现这里原来写死了一条本机绝对路径，会泄露作者机器布局）
+  const full = fs.readFileSync(fileURLToPath(import.meta.url), "utf8");
   t(evoBlock(full), "演化 prompt 里三类都有白话定义");
-  t(full.includes("三个月前的我会这么说吗"), "演化 prompt 给了「该不该写」的判据");
+  // ⚠️ 2026-10-26 C 项：判据从抽象的「三个月前的我会这么说吗」改成**三个具体对照问句**
+  // （见设计说明：抽象提问让她只能答成操作守则）。自检要断言的是「新问法在不在」，
+  // 而且要断言「守则式内容被明确排除」——那条 `别写「以后该怎么做」` 是这次改动的核心。
+  t(full.includes("三个月前的我不会说出口的"), "演化 prompt 给了 character 的具体对照问句");
+  t(full.includes("刚认识他时不一样"), "演化 prompt 给了 perspective 的具体对照问句");
+  t(full.includes("不再像以前那样绷着"), "演化 prompt 给了 relationship 的具体对照问句");
+  t(full.includes("别写「以后该怎么做」"), "演化 prompt 明确排除了「守则式」内容");
+  t(full.includes("答得出的才写"), "演化 prompt 允许「答不出就不写」");
 
   // ③ 评分词筛选：判断该收，记事不该收
   const OWN = /(我觉得|我认为|我感觉|我看|我猜|我更想|我宁愿|我喜欢|我讨厌|我不喜欢|我受不了|我舍不得|我不信|头一个念头|得看|不一定|未必|多半|看来|值得|不值|不该|应该|底线|红线|原则是)/;
@@ -9157,7 +10663,8 @@ if (process.argv.includes("--own-thought-test")) {
   t(!OWN.test("今天天气不错"), "不应收：纯记事2");
 
   // ④ AGENTS.md 有「可以不同意」
-  const agents = fs.readFileSync("E:/Watching-Waves/home/AGENTS.md", "utf8");
+  // 同样用相对代价最小的写法：从本文件位置推 `home/AGENTS.md`，不写死本机路径。
+  const agents = fs.readFileSync(path.join(CFG.home, "AGENTS.md"), "utf8");
   t(agents.includes("我可以说「我觉得不对」"), "AGENTS.md 有正向许可");
   t(agents.includes("别为了显得有主见而抬杠"), "AGENTS.md 有防抬杠对冲");
   t(agents.includes("-自己的.md"), "AGENTS.md 写了新想法文件");
@@ -9437,6 +10944,34 @@ if (process.argv.includes("--tone-test")) {  const cases = [
   if (!itOk) bad++;
   console.log(
     `${itOk ? "对 " : "错 "} 漏闭合后同一行还有正文 → says=${JSON.stringify(it.says)} rest=「${it.rest}」`,
+  );
+  // 别的写法也得认（2026-10-26 主人点头放宽）：半角尖括号 + 繁体、全角方头括号、
+  // 括号内换半角斜杠。这个是照真事故来的——我当时写的是 <語音>…</語音>，一条都没合成。
+  const variants =
+    "我先说两句 <語音>喂喂，听得见吗</語音> 那【语音】都快三点了【/语音】[語音]就这样吧[/語音]";
+  const vr = extractVoiceTags(variants);
+  const vrOk =
+    vr.says.length === 2 &&
+    vr.says[0] === "喂喂，听得见吗" &&
+    vr.says[1] === "都快三点了" &&
+    !/[<>【】語]/.test(vr.rest) &&
+    vr.rest.includes("我先说两句") &&
+    vr.rest.includes("就这样吧");
+  if (!vrOk) bad++;
+  console.log(
+    `${vrOk ? "对 " : "错 "} 尖括号/全角/繁体写法 → says=${JSON.stringify(vr.says)} rest=「${vr.rest}」`,
+  );
+  // 2026-10-26 04:36 真事故：写成了 `[t语音]…[/语音]`，多混一个字母 → 没合成、字面括号上了 QQ。
+  // 这条专测那种手滑：开头认出来、当语音说，结尾落单的也不许留下字面标记。
+  const typo = extractVoiceTags("[t语音]看着数字才知道，五秒八秒的。[/语音] 这会儿还挺好的");
+  const typoOk =
+    typo.says.length === 1 &&
+    typo.says[0].startsWith("看着数字才知道") &&
+    !/语音/.test(typo.rest) &&
+    typo.rest.includes("这会儿还挺好的");
+  if (!typoOk) bad++;
+  console.log(
+    `${typoOk ? "对 " : "错 "} 标记里混字母 [t语音] → says=${JSON.stringify(typo.says)} rest=「${typo.rest}」 leftovers=${typo.leftovers}`,
   );
   console.log(`\n${bad ? `有 ${bad} 条不符合预期` : "全部符合预期"}`);
   process.exit(bad ? 1 : 0);
@@ -10142,6 +11677,614 @@ if (process.argv.includes("--needs-desc-test")) {
   }
 
   console.log(`\n${bad ? `有 ${bad} 张前 5 不是空壳（排序错了）` : "前 5 全是真空壳，排序正确"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 私聊长活改造自检（L0/L1/L2，2026-10-26）：不连 QQ、不调模型、不写盘 ----------
+// 只断言**纯函数**，一个字节都不碰真实数据（不 archive、不进队列、不发消息）。
+// 判据要能失败：每条的期望值都是写死的，改坏了就红。
+if (process.argv.includes("--lane-test")) {
+  let bad = 0;
+  const eq = (label, got, expect) => {
+    const ok = JSON.stringify(got) === JSON.stringify(expect);
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${label} → ${JSON.stringify(got)}  期望 ${JSON.stringify(expect)}`,
+    );
+  };
+  const ok = (label, cond, detail = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
+  };
+  const ownerKey = `private:${CFG.allowlist[0]}`;
+  const strangerKey = "private:123456";
+
+  console.log("=== 一、lane 记忆键反推（双车道最关键的一步）===");
+  eq("主车道：剥不出东西", laneMemoryKey(ownerKey), ownerKey);
+  eq("task lane 剥后缀", laneMemoryKey(taskLaneKey(ownerKey)), ownerKey);
+  eq("chat lane 剥后缀", laneMemoryKey(chatLaneKey(ownerKey)), ownerKey);
+  eq(
+    "群 task lane 也对",
+    laneMemoryKey(taskLaneKey("group:1000000002")),
+    "group:1000000002",
+  );
+  ok(
+    "chat lane 的记忆键绝不能等于排队键",
+    laneMemoryKey(chatLaneKey(ownerKey)) !== chatLaneKey(ownerKey),
+  );
+
+  console.log("\n=== 二、L0 忙时先应答 ===");
+  const savedAck = CFG.busyAck;
+  const savedCool = CFG.busyAckCooldownMs;
+  try {
+    CFG.busyAck = false;
+    eq("开关关掉时绝不说", busyAckFor(ownerKey), null);
+    CFG.busyAck = true;
+    eq("没有轮次在跑时不说", busyAckFor(ownerKey), null);
+    // 造一个「正在跑」的假象（只动 laneBusy，不碰队列）
+    laneEnter(ownerKey);
+    busyAckAt.delete(ownerKey);
+    ok("有轮次在跑、主人私聊、首次 → 要说一句", Boolean(busyAckFor(ownerKey)));
+    busyAckAt.delete(ownerKey);
+    eq("不是主人私聊 → 绝不说", busyAckFor(strangerKey), null);
+    busyAckAt.delete(ownerKey);
+    eq(
+      "他刚说「闭嘴」时不抢话",
+      busyAckFor(ownerKey, { text: "你闭嘴，听我说" }),
+      null,
+    );
+    busyAckAt.delete(ownerKey);
+    busyAckFor(ownerKey); // 说一次
+    eq("冷却期内再说一遍 → 不说", busyAckFor(ownerKey), null);
+    busyAckAt.delete(ownerKey);
+    CFG.busyAckCooldownMs = 0; // 冷却归零：应当立刻又能说
+    ok("冷却到期后能再说", Boolean(busyAckFor(ownerKey)));
+    laneLeave(ownerKey);
+    busyAckAt.delete(ownerKey);
+    eq("轮次跑完之后不说", busyAckFor(ownerKey), null);
+  } finally {
+    CFG.busyAck = savedAck;
+    CFG.busyAckCooldownMs = savedCool;
+    busyAckAt.delete(ownerKey);
+    laneLeave(ownerKey);
+  }
+
+  console.log("\n=== 三、L1 攒批合并 ===");
+  const mk = (t, extra = {}) => ({
+    kind: "private",
+    target: CFG.allowlist[0],
+    sender: CFG.allowlist[0],
+    text: t,
+    seq: 1,
+    messageId: "",
+    at: Date.now(),
+    ...extra,
+  });
+  eq("空批 → null", mergeChatItems(ownerKey, [], { kind: "private" }), null);
+  {
+    const one = mergeChatItems(ownerKey, [mk("第一句")], { kind: "private" });
+    ok("只有一条时不合并", one && one.merged === false, `merged=${one?.merged}`);
+    eq("只有一条时文本原样", one?.text, "第一句");
+  }
+  {
+    const items = [
+      mk("第一句", { messageId: "m1" }),
+      mk("第二句", { messageId: "m2" }),
+      mk("第三句", { messageId: "m3", seq: 3 }),
+    ];
+    const m = mergeChatItems(ownerKey, items, { kind: "private" });
+    ok("三条要合并", m && m.merged === true && m.mergedCount === 3);
+    ok("合成文本带编号 1./2./3.", /1\. 第一句/.test(m.text) && /3\. 第三句/.test(m.text));
+    ok("合成文本带「别只答最后一条」的指令", /别只答最后一条/.test(m.text));
+    eq("引用候选按条号一一对应", m.quoteCandidates.map((c) => c.messageId), [
+      "m1",
+      "m2",
+      "m3",
+    ]);
+    eq("seq 取最后一条（距离按最新算）", m.seq, 3);
+    eq("一拨多条要挂引用", m.burst, true);
+  }
+  {
+    // 混进一个外人：speakers 要带上两个人
+    const m = mergeChatItems(
+      ownerKey,
+      [mk("a", { sender: CFG.allowlist[0] }), mk("b", { sender: 987 })],
+      { kind: "private" },
+    );
+    ok("合并后说话人有两个人", m.speakers.length === 2, JSON.stringify(m.speakers));
+  }
+  {
+    // 分批上限：chatMergeMax 生效与否不该影响 merge 本身（分批在 flush 里做）
+    const many = Array.from({ length: 10 }, (_, i) => mk(`第${i + 1}条`));
+    const m = mergeChatItems(ownerKey, many, { kind: "private" });
+    ok("10 条也能合成一轮（上限在 flush 里切）", m.mergedCount === 10);
+  }
+
+  console.log("\n=== 四、L2 双车道判据 ===");
+  {
+    const savedP = CFG.parallelChat;
+    const savedG = CFG.chatParallelGraceMs;
+    try {
+      CFG.parallelChat = false;
+      eq("总开关关掉 → 绝不开新车道", shouldOpenChatLane(ownerKey, { mainStartedAt: Date.now() - 999999 }), false);
+      CFG.parallelChat = true;
+      CFG.chatParallelGraceMs = 30000;
+      eq("主车道闲着 → 不另开（分钟级短轮等着更划算）", shouldOpenChatLane(ownerKey, { mainStartedAt: 0 }), false);
+      eq("不是主人私聊 → 不另开", shouldOpenChatLane(strangerKey, { mainStartedAt: Date.now() - 60000 }), false);
+      eq(
+        "主车道跑着但没够 30 秒 → 先不开（p75 才 28 秒，马上就完了）",
+        shouldOpenChatLane(ownerKey, { mainStartedAt: Date.now() - 20000 }),
+        false,
+      );
+      // 造「主车道忙」：塞一个假队列条目但不 drain
+      queues.set(ownerKey, { running: true, items: [] });
+      eq(
+        "主车道忙且已跑过 30 秒（p90 82 秒那种长活）→ 开新车道",
+        shouldOpenChatLane(ownerKey, { mainStartedAt: Date.now() - 40000 }),
+        true,
+      );
+      CFG.chatParallelGraceMs = 60000;
+      eq(
+        "宽限调到 60 秒后，跑 40 秒不再开",
+        shouldOpenChatLane(ownerKey, { mainStartedAt: Date.now() - 40000 }),
+        false,
+      );
+      CFG.chatParallelGraceMs = 30000;
+      eq(
+        "默认宽限是 30 秒（主人 2026-10-26 点头抬的，8 秒太急）",
+        CFG.chatParallelGraceMs,
+        30000,
+      );
+    } finally {
+      CFG.parallelChat = savedP;
+      CFG.chatParallelGraceMs = savedG;
+      queues.delete(ownerKey);
+    }
+  }
+
+  console.log("\n=== 五、进度快照按 lane 分开存（静默坏点①）===");
+  {
+    eq("单车道：键不变（历史文件不用迁移）", progressLaneId(ownerKey, ownerKey), ownerKey);
+    eq(
+      "双车道：chat lane 有自己的键",
+      progressLaneId(chatLaneKey(ownerKey), ownerKey),
+      chatLaneKey(ownerKey),
+    );
+    ok(
+      "两条 lane 的进度键必须不同（否则互相覆盖）",
+      progressLaneId(chatLaneKey(ownerKey), ownerKey) !== progressLaneId(ownerKey, ownerKey),
+    );
+  }
+
+  console.log("\n=== 六、laneBusy 记账（不能泄漏）===");
+  {
+    const k = `private:777`;
+    ok("初始不忙", !anyTurnRunning(k));
+    laneEnter(chatLaneKey(k));
+    ok("chat lane 进来后算忙", anyTurnRunning(k));
+    laneEnter(taskLaneKey(k));
+    laneLeave(chatLaneKey(k));
+    ok("还有 task lane 在跑，仍算忙", anyTurnRunning(k));
+    laneLeave(taskLaneKey(k));
+    ok("全退了就不忙（Map 条目要清掉，别泄漏）", !anyTurnRunning(k) && !laneBusy.has(k));
+  }
+
+  console.log("\n=== 七、攒批超时就别再压着（chatPendingStale）===");
+  {
+    const savedG = CFG.chatParallelGraceMs;
+    try {
+      CFG.chatParallelGraceMs = 30000;
+      eq("空槽不算超时", chatPendingStale({ items: [] }), false);
+      eq(
+        "刚攒的不算超时",
+        chatPendingStale({ items: [{ at: Date.now() - 1000 }] }),
+        false,
+      );
+      eq(
+        "攒了超过 4 倍宽限（120 秒）就算超时",
+        chatPendingStale({ items: [{ at: Date.now() - 130000 }] }),
+        true,
+      );
+    } finally {
+      CFG.chatParallelGraceMs = savedG;
+    }
+  }
+
+  console.log("\n=== 八、车道只答自己手里那条（2026-10-26 03:3x 主人点的）===");
+  {
+    // 那一晚的病：插话那一轮看见「最近几句原话」里主车道还没答的那条，替它答了一遍，
+    // 还顺手把那条要的活干了（10 步、24 万 token）。这里验两头堵的料对不对。
+    const k = `private:${CFG.allowlist[0]}`;
+    const savedQ = queues.get(k);
+    try {
+      queues.set(k, {
+        running: true,
+        current: { kind: "private", target: 1, text: "手里正答的这句" },
+        items: [
+          { kind: "private", target: 1, text: "队列里还排着的这句" },
+          { kind: "task", prompt: "压小结（内部活，不算他没答的话）" },
+        ],
+      });
+      eq(
+        "主车道手里那条 + 排着的那条，都算「还没答」",
+        mainLanePendingTexts(k),
+        ["手里正答的这句", "队列里还排着的这句"],
+      );
+      const note = chatLaneNote(mainLanePendingTexts(k));
+      ok("插话提示里写了「只管下面这一句」", note.includes("只管下面这一句"));
+      ok(
+        "点名叫它别重复答那两条",
+        note.includes("手里正答的这句") && note.includes("队列里还排着的这句"),
+      );
+      ok("内部任务（写日记/压小结）不进清单", !note.includes("压小结"));
+      eq(
+        "没别人待答时不硬塞清单",
+        chatLaneNote([]).includes("已经在别处答着"),
+        false,
+      );
+      eq(
+        "尾行标记：原话整句命中",
+        isStillOpenText("手里正答的这句", ["手里正答的这句"]),
+        true,
+      );
+      eq(
+        "尾行标记：带附件占位也能认（前缀对上）",
+        isStillOpenText("手里正答的这句 [图片已存到本机：E:\\x.png]", [
+          "手里正答的这句",
+        ]),
+        true,
+      );
+      eq(
+        "尾行标记：早答过的那句不能误标",
+        isStillOpenText("上一句早就答完了", ["手里正答的这句"]),
+        false,
+      );
+    } finally {
+      if (savedQ) queues.set(k, savedQ);
+      else queues.delete(k);
+    }
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条判据不成立` : "全部判据都成立（L0/L1/L2）"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 「她可以选择不回」自检（2026-10-26）：不连 QQ、不调模型、不写盘 ----------
+// 验的是**四类硬消息一条都不许漏**。这是这功能的全部风险所在：
+// 漏判一条 = 她能用 SKIP 躲掉主人的点名/问句/发来的图，是功能事故，不是体验问题。
+// ⚠️ 刻意**不写 skip-log**：recordSkip 会落盘，自检里一个字节都不碰真数据。
+if (process.argv.includes("--skip-test")) {
+  let bad = 0;
+  const eq = (label, got, expect) => {
+    const ok = JSON.stringify(got) === JSON.stringify(expect);
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${label} → ${JSON.stringify(got)}  期望 ${JSON.stringify(expect)}`,
+    );
+  };
+  const hard = (label, text, opts) => {
+    const r = hardMessageReason(text, opts);
+    if (!r) bad++;
+    console.log(`${r ? "对 " : "错 "} ${label} → ${r ?? "（没判成硬消息！）"}`);
+  };
+  const soft = (label, text, opts) => {
+    const r = hardMessageReason(text, opts);
+    if (r) bad++;
+    console.log(`${r ? "错 " : "对 "} ${label} → ${r ? `被判成硬消息：${r}` : "普通消息，可以跳过"}`);
+  };
+  const ok = (label, cond, detail = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
+  };
+
+  console.log("=== 一、A 类：点名 / 问句 / 口令（一条都不许漏）===");
+  hard("@ 点名", "[@1000000001] 你在吗");
+  hard("戳一戳", "（戳了戳你）");
+  hard("问号", "今天天气怎么样？");
+  hard("疑问词无问号", "你帮我看看这个能不能跑");
+  hard("问「为什么」", "这是为什么呀");
+  hard("问「在哪」", "那个文件在哪");
+  hard("问「是不是」", "是不是你改的");
+  hard("口令·进度", "进度");
+  hard("口令·进度带问号", "任务进度？");
+  hard("口令·重启", "重启");
+  hard("口令·心情", "心情+20");
+  hard("口令·闭嘴", "闭嘴");
+  hard("口令·解除沉默", "可以说话了");
+  hard("口令·我睡了", "我去睡了");
+  hard("口令·我回来了", "我回来了");
+  hard("口令·早", "早");
+
+  console.log("\n=== 二、B 类：他明确在找她 ===");
+  hard("在吗", "在吗");
+  hard("在不在", "在不在");
+  hard("人呢", "人呢");
+  hard("有个事问你", "有个事问你");
+  hard("我不忙了", "我不忙了");
+  hard("找你有事", "找你有事");
+
+  console.log("\n=== 三、C 类：发了图 / 语音 / 文件 ===");
+  hard("图片占位", "[图片已存到本机：E:\\x.png]");
+  hard("语音占位", "[语音] 你听我说 [/语音]");
+  hard("文件占位", "[文件已存到本机：E:\\a.zip]");
+  hard("卡片", "[卡片] 分享了一个链接");
+  hard("段信息直传 hasMedia", "看看这个", { hasMedia: true });
+  hard("图片计数直传", "这张怎么样", { imageCount: 1 });
+
+  console.log("\n=== 四、D 类：刚聊到一半（上一轮是她自己发的）===");
+  hard("上一轮是她", "那你说怎么办", { prevWasMe: true });
+  soft("上一轮是他（不是 D 类）", "那你说怎么办", { prevWasMe: false });
+
+  console.log("\n=== 五、普通消息：这些她**应该**能跳过 ===");
+  soft("纯陈述", "今天下班早点回家");
+  soft("感慨", "好累啊");
+  soft("自言自语", "这个天气真烦");
+  soft("「」", "嗯");
+  soft("空", "");
+  soft("只有引用标记", "[引用的是这条：观澜：嗯嗯（这条是你自己发的）]");
+  soft("他自己的话里带「睡」不算口令", "昨晚睡不着翻来覆去到三点");
+
+  console.log("\n=== 六、canSkipThisTurn 的裁决 ===");
+  eq("普通消息 → 允许跳过", canSkipThisTurn("今天天气不错").ok, true);
+  eq("问句 → 不许跳过", canSkipThisTurn("你在干嘛？").ok, false);
+  ok(
+    "不许跳过时给出原因",
+    String(canSkipThisTurn("在吗").why).length > 0,
+    canSkipThisTurn("在吗").why,
+  );
+
+  console.log("\n=== 七、提示词里四类硬消息必须写全（改代码漏改提示词=她不知道有禁区）===");
+  {
+    const h = styleHeader();
+    ok("提示词里有「你可以选择不回」的授权", /你可以选择不回/.test(h));
+    ok("提示词里有「[SKIP]」出口", /\[SKIP\]/.test(h));
+    ok("提示词写到了点名/问句/口令", /点你名/.test(h) && /问你话/.test(h) && /发口令/.test(h));
+    ok("提示词写到了「他明确在找你」", /明确在找你/.test(h));
+    ok("提示词写到了「发了图、语音、文件」", /发了图、语音、文件/.test(h));
+    ok("提示词写到了「刚聊到一半」", /刚聊到一半/.test(h));
+    ok("提示词明确说了「不许静默」", /不许静默/.test(h));
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条判据不成立` : "全部判据都成立（她能不能不回）"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 消息去重自检（2026-10-26）：不连 QQ、不调模型、不写盘 ----------
+// ---------- 掐句末句号自检（2026-10-26 A 项）：不连 QQ、不调模型、不写盘 ----------
+// 背景：`_回复风格.md` 第 9 条要求「每句话末尾都不加句号」，但代码从没实现过，
+// 实测 23.5%（52/221）的回复还带着句末句号。这条自检验**实现后的行为符合三条取舍**：
+//   ① 只掐末尾那一个（中间的句号是切气泡依据，不能动）
+//   ② 问号/感叹号/省略号一律保留
+//   ③ 只剩标点时不变成空串
+// ⚠️ 判据必须能失败：故意给「应该保留」的用例，确认它们没被误掐。
+if (process.argv.includes("--period-test")) {
+  let bad = 0;
+  const ok = (label, cond, extra = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${extra ? "　" + extra : ""}`);
+  };
+  // 复刻 reply() 里那段（与实现同形）
+  const strip = (s0) => {
+    const s = String(s0 ?? "");
+    const trimmed = s.replace(/[。.]+(\s*)$/, "").trimEnd();
+    return trimmed.length ? trimmed : s;
+  };
+
+  console.log("=== 一、该掐的（句末句号/半角点）===");
+  ok("「嗯，不吵你了。」→ 掐掉", strip("嗯，不吵你了。") === "嗯，不吵你了", JSON.stringify(strip("嗯，不吵你了。")));
+  ok("「空着比堵着舒服。」→ 掐掉", strip("空着比堵着舒服。") === "空着比堵着舒服");
+  ok("连续两个句号也掐干净", strip("好。。") === "好", JSON.stringify(strip("好。。")));
+  ok("半角点同样掐", strip("ok.") === "ok", JSON.stringify(strip("ok.")));
+  ok("句号后带空格也掐", strip("好的。  ") === "好的", JSON.stringify(strip("好的。  ")));
+
+  console.log("\n=== 二、不该动的（问号/感叹号/省略号）===");
+  ok("问号保留", strip("真的吗？") === "真的吗？");
+  ok("感叹号保留", strip("行！") === "行！");
+  ok("省略号保留", strip("嗯……") === "嗯……");
+  ok("引号结尾保留", strip('他说「好」') === '他说「好」');
+  ok("句号后面还有字 → 不动", strip("第一句。第二句") === "第一句。第二句");
+
+  console.log("\n=== 三、边界：不能变空串 ===");
+  ok("整条只有一个句号 → 保留原样", strip("。") === "。", JSON.stringify(strip("。")));
+  ok("整条只有两个句号 → 保留原样", strip("。。") === "。。", JSON.stringify(strip("。。")));
+  ok("空串不炸", strip("") === "");
+  ok("null/undefined 不炸", strip(null) === "" && strip(undefined) === "");
+
+  console.log("\n=== 四、真实语料回归（她 24h 里带句号的原话）===");
+  const real = [
+    "嗯，不吵你了。",
+    "嗯，不饿就先别硬塞，空着比堵着舒服。",
+    "就一门语言：JavaScript，跑在 Node 上。",
+    "这一下我收到了。困就别撑着，闭眼睡，我在这儿。",
+  ];
+  for (const s of real) {
+    const got = strip(s);
+    ok(`「${s.slice(0, 20)}…」不再以句号结尾`, !/[。.]$/.test(got), "→ " + got.slice(-12));
+  }
+
+  console.log("\n=== 五、源码结构断言 ===");
+  {
+    const src = fs.readFileSync(new URL(import.meta.url), "utf8");
+    ok("有 stripTailPeriod 配置开关", src.includes("stripTailPeriod:"));
+    ok("实现是「只掐末尾」而非全局替换", src.includes('replace(/[。.]+(\\s*)$/, "")'));
+    ok("注释里写明了三条取舍", src.includes("只掐末尾那一个") || src.includes("只掐句号"));
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条判据不成立` : "全部判据都成立（掐句末句号）"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 消息去重自检（2026-10-26）：不连 QQ、不调模型、不写盘 ----------
+// 背景事故：05:15-05:16 主人在私聊连着说话，日志里同一毫秒出现两次「硬消息」，
+// 然后两轮同时开跑（6.4s / 6.0s），她答了两遍近乎一样的话——主人看到「消息好多、最后两句重复」。
+// 根因是 WS 收到同一 message_id 两次时没有任何去重。
+// 这个自检复刻去重逻辑（Map + SEEN_MAX + 10 分钟清理），断言它真的能挡住第二次。
+if (process.argv.includes("--dedup-test")) {
+  let bad = 0;
+  const ok = (label, cond, extra = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${extra ? "　" + extra : ""}`);
+  };
+
+  // 复刻 ws 消息处理里的那段（与 1229-1250 行同形）
+  const makeGate = () => {
+    const seen = new Map();
+    const SEEN_MAX = 300;
+    return (data) => {
+      const mid = data.message_id != null ? String(data.message_id) : "";
+      if (mid) {
+        if (seen.has(mid)) return { pass: false, why: "重复" };
+        seen.set(mid, Date.now());
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        while (seen.size > SEEN_MAX) seen.delete(seen.keys().next().value);
+        for (const [k, at] of seen) {
+          if (seen.size <= SEEN_MAX && at > cutoff) break;
+          if (at <= cutoff) seen.delete(k);
+        }
+      }
+      return { pass: true, size: seen.size };
+    };
+  };
+
+  console.log("=== 一、同一条消息来两次：第二次必须被丢 ===");
+  {
+    const gate = makeGate();
+    ok("第一次放行", gate({ message_id: "1001" }).pass === true);
+    ok("第二次（同 id）丢掉", gate({ message_id: "1001" }).pass === false);
+    ok("第三次也丢", gate({ message_id: "1001" }).pass === false);
+    ok("不同 id 照常放行", gate({ message_id: "1002" }).pass === true);
+  }
+
+  console.log("\n=== 二、没有 message_id 时不能误杀 ===");
+  {
+    const gate = makeGate();
+    ok("空 message_id 放行（不进去重）", gate({ message_id: "" }).pass === true);
+    ok("undefined 也放行", gate({}).pass === true);
+  }
+
+  console.log("\n=== 三、数字型 id 与字符串型 id 视为同一条 ===");
+  {
+    const gate = makeGate();
+    ok("数字 1234 放行", gate({ message_id: 1234 }).pass === true);
+    ok('字符串 "1234" 被认成同一条 → 丢掉', gate({ message_id: "1234" }).pass === false);
+  }
+
+  console.log("\n=== 四、容量上限：不能无限长 ===");
+  {
+    const gate = makeGate();
+    for (let i = 0; i < 500; i += 1) gate({ message_id: String(10000 + i) });
+    const last = gate({ message_id: "10999" });
+    ok("灌 500 条后容量被压到 300 以内", last.size <= 300, "size=" + last.size);
+  }
+
+  console.log("\n=== 五、源码结构断言 ===");
+  {
+    const src = fs.readFileSync(new URL(import.meta.url), "utf8");
+    ok(
+      "seenMessageIds 在模块级（不在 connect() 里）",
+      /^const seenMessageIds = new Map\(\);$/m.test(src),
+    );
+    ok("有 SEEN_MAX 常量", /const SEEN_MAX = \d+;/.test(src));
+    ok("重复时打日志（可事后核对）", src.includes("重复投递，丢掉"));
+    ok(
+      "去重发生在 handleIncoming 之前",
+      src.indexOf("重复投递，丢掉") < src.indexOf("handleIncoming(data).catch"),
+    );
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条判据不成立` : "全部判据都成立（消息去重）"}`);
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 车道成本自检（2026-10-26）：不连 QQ、不调模型、不写盘 ----------
+// 验两件事：
+//   ① 对话车道能按「`:chat` 结尾」被认出来，普通轮/内部任务不会被误判成车道；
+//   ② 预算上限真的能挡住——用**真函数**跑一遍（不是模拟），确认它会在超限时掐。
+// ⚠️ 判据必须能失败：故意给一个「超限」的用例，确认 hitBudget 被调用。
+if (process.argv.includes("--lane-cost-test")) {
+  let bad = 0;
+  const eq = (label, got, expect) => {
+    const ok = JSON.stringify(got) === JSON.stringify(expect);
+    if (!ok) bad++;
+    console.log(
+      `${ok ? "对 " : "错 "} ${label} → ${JSON.stringify(got)}  期望 ${JSON.stringify(expect)}`,
+    );
+  };
+  const ok = (label, cond, detail = "") => {
+    if (!cond) bad++;
+    console.log(`${cond ? "对 " : "错 "} ${label}${detail ? "　" + detail : ""}`);
+  };
+
+  console.log("=== 一、车道判定（与 runWhale 里的 isChatLane 同一口径）===");
+  // 这里刻意复刻 runWhale 里那行判断，确保两处一致（那边用内联 ":chat" 避免 TDZ）
+  const isChatLane = (progKey) => String(progKey || "").endsWith(":chat");
+  eq("对话车道键", isChatLane("private:1000000001:chat"), true);
+  eq("主车道键（不能误判）", isChatLane("private:1000000001"), false);
+  eq("内部任务 lane（不能误判）", isChatLane("private:1000000001:task"), false);
+  eq("群车道", isChatLane("group:1000000002:chat"), true);
+  eq("空键", isChatLane(""), false);
+  eq("undefined", isChatLane(undefined), false);
+  ok(
+    "和真正的 chatLaneKey 输出一致",
+    isChatLane(chatLaneKey("private:1")) === true &&
+      isChatLane(taskLaneKey("private:1")) === false,
+  );
+
+  console.log("\n=== 二、配置项存在且合理 ===");
+  ok("chatLaneMaxTokens 已配置", Number.isFinite(CFG.chatLaneMaxTokens), String(CFG.chatLaneMaxTokens));
+  ok("默认值 40 万", CFG.chatLaneMaxTokens === 400000, String(CFG.chatLaneMaxTokens));
+  ok("不是 0（0 会关掉这条限制）", CFG.chatLaneMaxTokens > 0);
+  ok(
+    "比通用单轮上限小或相等（它应该更严）",
+    !(CFG.maxTokensPerTurn > 0) || CFG.chatLaneMaxTokens <= CFG.maxTokensPerTurn,
+    `lane=${CFG.chatLaneMaxTokens} / 通用=${CFG.maxTokensPerTurn}`,
+  );
+
+  console.log("\n=== 三、预算判定逻辑（复刻 step_end 里的三分支）===");
+  // 复刻那三个 else if 的顺序：maxSteps → maxTokensPerTurn → laneTokenCap
+  const judge = ({ steps, tokens, laneCap }) => {
+    if (CFG.maxSteps > 0 && steps > CFG.maxSteps) return "步数";
+    if (CFG.maxTokensPerTurn > 0 && tokens > CFG.maxTokensPerTurn) return "通用token";
+    if (laneCap > 0 && tokens > laneCap) return "车道token";
+    return null;
+  };
+  const CAP = 400000;
+  eq("车道 39 万（未超）→ 不掐", judge({ steps: 10, tokens: 390000, laneCap: CAP }), null);
+  eq("车道 41 万（超了）→ 掐", judge({ steps: 10, tokens: 410000, laneCap: CAP }), "车道token");
+  eq(
+    "刚好的 40 万（不超，因为用的是 > ）",
+    judge({ steps: 10, tokens: 400000, laneCap: CAP }),
+    null,
+  );
+  eq(
+    "上限设 0 = 关掉车道限制，改由通用上限管（99.9 万没到 300 万，所以不掐）",
+    judge({ steps: 10, tokens: 999999, laneCap: 0 }),
+    null,
+  );
+  // 实测那两轮：238439 不该被 40 万掐、849714 该被掐
+  eq(
+    "实测 238,439（对话车道那轮）→ 40 万不掐",
+    judge({ steps: 4, tokens: 238439, laneCap: CAP }),
+    null,
+  );
+  eq(
+    "实测 849,714（长活主车道）→ 若是车道会掐",
+    judge({ steps: 21, tokens: 849714, laneCap: CAP }),
+    "车道token",
+  );
+
+  console.log("\n=== 四、turns.jsonl 的 lane 字段（B 项：三处 logTurn 都要有）===");
+  {
+    const src = fs.readFileSync(new URL(import.meta.url), "utf8");
+    const n = (src.match(/lane: laneKey !== memKey/g) || []).length - 1; // 减掉自检里这句
+    ok("三个 logTurn 都写了 lane", n >= 3, `找到 ${n} 处（task/失败/成功各一）`);
+    ok(
+      "成功分支也用了记忆键（key: memKey 不是 key）",
+      /key: memKey,\s*\n\s*lane: laneKey !== memKey/.test(src),
+    );
+  }
+
+  console.log(`\n${bad ? `有 ${bad} 条判据不成立` : "全部判据都成立（车道成本）"}`);
   process.exit(bad ? 1 : 0);
 }
 
@@ -11003,25 +13146,59 @@ if (process.argv.includes("--ambient-file-selftest")) {
   process.exit(0);
 }
 
-// ---------- 重启认得自己 的自检（2026-10-22）----------
+// ---------- 重启认得自己 的自检（2026-10-22 起；2026-10-26 扩到判据层）----------
+// 分两段：① 判据层（classifyBoot 是纯函数，喂时间戳直接验，不依赖盘上状态）
+//        ② 播报层（bootNotice 的输出按 tier 分别长什么样）
+// 判据层原来**一条都没有**——2026-10-22 那版自检只测措辞，没测「会不会判错」，
+// 于是 3 分钟阈值把 51% 的重启判成冷开机这件事一直没被发现。这次补上。
 if (process.argv.includes("--boot-notice-selftest")) {
+  let bad = 0;
+  const M = 60 * 1000;
+  const now = 1_800_000_000_000;
+  const machineUp = now - 3600 * 1000; // 这台机器一小时前开的机
+  // [名字, 传入参数, 期望 tier, 期望 restarted]
+  const judge = [
+    ["盘上没记录（第一次跑）", { prevSeenAt: 0, machineBootAt: machineUp, gapMs: 0 }, "first", false],
+    ["reboot 换口气，断 50 秒", { prevSeenAt: now - 50 * 1000, machineBootAt: machineUp, gapMs: 50 * 1000 }, "quick", true],
+    ["断 8 分钟（看门人退避重拉）", { prevSeenAt: now - 8 * M, machineBootAt: machineUp, gapMs: 8 * M }, "restart", true],
+    ["断 20 分钟（今天判成冷开机的那批）", { prevSeenAt: now - 20 * M, machineBootAt: machineUp, gapMs: 20 * M }, "restart", true],
+    ["断 40 分钟", { prevSeenAt: now - 40 * M, machineBootAt: machineUp, gapMs: 40 * M }, "longDown", true],
+    // 4 小时这个用例的机器必须开得比上一版更早（machineUp = 10 小时前），否则构造上就是「机器关过」。
+    // 第一版用例这里写错了（机器一小时前才开、却期望 longDown），判据把它判成 coldBoot 才是对的。
+    ["断 4 小时（机器一直没关）", { prevSeenAt: now - 240 * M, machineBootAt: now - 600 * M, gapMs: 240 * M }, "longDown", true],
+    // 关键一条：心跳早于本机开机 = 整台机器关过。旧判据这里只会说「冷开机」，分不出这两者的区别。
+    ["昨天 23:00 的心跳、机器今天才开机", { prevSeenAt: now - 300 * M, machineBootAt: now - 60 * M, gapMs: 300 * M }, "coldBoot", false],
+    ["心跳比开机早 40 秒（在 90 秒容差内，不算机器关过）", { prevSeenAt: machineUp - 40 * 1000, machineBootAt: machineUp, gapMs: 60 * 1000 }, "quick", true],
+  ];
+  console.log("【判据层】classifyBoot");
+  for (const [name, arg, wantTier, wantRestarted] of judge) {
+    const got = classifyBoot({ nowAt: now, ...arg });
+    const ok = got.tier === wantTier && got.restarted === wantRestarted;
+    if (!ok) bad += 1;
+    console.log(`  ${ok ? "对 " : "错 "} ${name} → ${got.tier}（restarted=${got.restarted}）${ok ? "" : `，期望 ${wantTier}/${wantRestarted}`}`);
+  }
+  console.log("\n【播报层】bootNotice");
   const keep = { ...BOOT };
   const cases = [
-    ["他说 reboot", { restarted: true, asked: true, askedBy: "reboot", cleanExit: false, noticedAt: 0 }],
-    ["面板点的重启", { restarted: true, asked: true, askedBy: "panel", cleanExit: false, noticedAt: 0 }],
-    ["上一版自己退出来等重拉", { restarted: true, asked: false, askedBy: "", cleanExit: true, noticedAt: 0 }],
-    ["上一版被掐掉", { restarted: true, asked: false, askedBy: "", cleanExit: false, noticedAt: 0 }],
-    ["刚说过又崩一次（不刷屏）", { restarted: true, asked: false, askedBy: "", cleanExit: false, noticedAt: Date.now() - 30 * 1000 }],
-    ["盘上还没记录、他让重启（第一次跑）", { restarted: false, asked: true, askedBy: "reboot", cleanExit: false, noticedAt: 0 }],
-    ["头一次冷开机", { restarted: false, asked: false, askedBy: "", cleanExit: false, noticedAt: 0 }],
+    ["他说 reboot，断 50 秒", { tier: "quick", restarted: true, coldBoot: false, asked: true, askedBy: "reboot", cleanExit: false, noticedAt: 0, gapMs: 50 * 1000, todayCount: 3 }],
+    ["面板点的重启，断 8 分钟", { tier: "restart", restarted: true, coldBoot: false, asked: true, askedBy: "panel", cleanExit: false, noticedAt: 0, gapMs: 8 * M, todayCount: 3 }],
+    ["上一版自己退出来等重拉，断 20 分钟", { tier: "restart", restarted: true, coldBoot: false, asked: false, askedBy: "", cleanExit: true, noticedAt: 0, gapMs: 20 * M, todayCount: 1 }],
+    ["上一版被掐掉，断 40 分钟", { tier: "longDown", restarted: true, coldBoot: false, asked: false, askedBy: "", cleanExit: false, noticedAt: 0, gapMs: 40 * M, todayCount: 5 }],
+    ["整台机器关过（不该说成「我刚睡醒」）", { tier: "coldBoot", restarted: false, coldBoot: true, asked: true, askedBy: "reboot", cleanExit: false, noticedAt: 0, gapMs: 300 * M, todayCount: 2 }],
+    ["刚说过又崩一次（不刷屏）", { tier: "quick", restarted: true, coldBoot: false, asked: false, askedBy: "", cleanExit: false, noticedAt: Date.now() - 30 * 1000, gapMs: 20 * 1000, todayCount: 4 }],
+    ["盘上还没记录、他让重启（第一次跑）", { tier: "first", restarted: false, coldBoot: false, asked: true, askedBy: "reboot", cleanExit: false, noticedAt: 0, gapMs: 0, todayCount: 1 }],
+    ["头一次冷开机", { tier: "first", restarted: false, coldBoot: false, asked: false, askedBy: "", cleanExit: false, noticedAt: 0, gapMs: 0, todayCount: 1 }],
   ];
   for (const [name, patch] of cases) {
-    Object.assign(BOOT, { restarted: true, asked: false, askedBy: "", cleanExit: false, noticedAt: 0 }, patch);
+    Object.assign(BOOT, { restarted: true, coldBoot: false, asked: false, askedBy: "", cleanExit: false, noticedAt: 0, gapMs: 0, todayCount: 1 }, patch);
     console.log(`—— ${name} ——`);
     console.log(bootNotice() || "(不说)");
   }
   Object.assign(BOOT, keep);
-  process.exit(0);
+  // 流水账入口的显示：只读不写，绝不往现网 boots.jsonl 追加测试行
+  console.log(`\n【流水账】${path.relative(KIT_ROOT, BOOT_LOG_PATH)}：今天已记 ${countBootsToday(Date.now())} 次启动`);
+  console.log(bad ? `\n有 ${bad} 条判据不对` : "\n判据层全部正确");
+  process.exit(bad ? 1 : 0);
 }
 
 // ---------- 语音链路自检：真走 synthVoice()，验证引擎/语气/落盘/峰值（2026-10-25） ----------
@@ -11144,6 +13321,9 @@ if (process.argv.includes("--asr-test")) {
 log("===== 小鲸鱼机器人启动 =====");
 // 先把自己的出生时刻落盘，再起心跳：下一次启动靠这个文件认出「我是重启回来的」（2026-10-22）
 writeBoot({ startAt: BOOT.at, exitAt: null, exitReason: "" });
+// 流水账：每次起来追加一行（2026-10-26 C 档）。boot.json 只留当前这版，历史上一次覆盖就没了；
+// 她要能回答「我今天断过几次」，就得有个只增不改的账本。
+appendBootLog();
 setInterval(() => writeBoot(), 60 * 1000).unref?.();
 // 那个「谁让重启」的记号用过就撕掉：五分钟后再崩一次，别还赖成他让的
 try {
@@ -11177,6 +13357,12 @@ migrateAllKeys();
 outbox.start(); // 发件箱：先把上次没发完的接着发（连接起来之前泵会等着）
 connect();
 // 重启回来的话，起来之后自己开口说一句（2026-10-22 主人要的；以前那句「我回来啦 🐳 刚才去换了口气」不再发）
+// ⚠️ 2026-10-26 改（主人选的「顺手修」那一项）：原来这里走 `reply()` —— 那是**整条发言管线**
+// （收收藏→摘语音→切气泡→引用→鱼味判→独白拦截→发件箱）。启动时跑它一旦在任何一环抛异常，
+// 这句「我回来了」就整条没了。实测 2026-10-25 13:14:12 就是这么丢的：
+// `重启回来那句没发出去: Cannot access 'raw' before initialization`（TDZ，启动时机太早）。
+// 播报是**必达消息**，不该排在那些可能抛异常的环节后面：直接进发件箱（自带落盘+重试+重连后接着发），
+// 再单独把这句话写进档案——否则她说了这句、事后自己却不记得说过（原来档案里 0 条）。
 const bootLine = bootNotice();
 if (bootLine) {
   if (isAsleep() && !BOOT.asked) {
@@ -11186,9 +13372,24 @@ if (bootLine) {
     setTimeout(() => {
       BOOT.noticedAt = Date.now();
       writeBoot({ noticeAt: BOOT.noticedAt });
-      reply("private", CFG.allowlist[0], bootLine, {}).catch((e) =>
-        log("重启回来那句没发出去:", errMsg(e)),
-      );
+      try {
+        const owner = Number(CFG.allowlist[0]);
+        outbox.enqueue(
+          "private",
+          owner,
+          {
+            type: "msg",
+            message: [{ type: "text", data: { text: bootLine } }],
+            summary: bootLine.split("\n")[0],
+          },
+          {},
+        );
+        // 入档：说出去的话要能被自己翻回来（漏写的一句注释都别指望模型记得）
+        appendArchive(PRIMARY_KEY, "me", bootLine);
+        log(`重启播报已入发件箱并入档（${BOOT.tier}，今天第 ${BOOT.todayCount} 次）`);
+      } catch (e) {
+        log("重启回来那句没排进发件箱:", errMsg(e));
+      }
     }, 5000);
   }
 }
@@ -11219,6 +13420,10 @@ setInterval(guarded("主动搭话", maybeProactivePing), CFG.housekeepingTickMs)
 setInterval(guarded("日记", maybeWriteDiary), CFG.housekeepingTickMs);
 // 主动生活（2026-10-20）：问候与"她自己的事"各一个巡检，内部有窗口/日期节流与忙闲判断
 setInterval(guarded("问候", maybeTimeGreeting), CFG.housekeepingTickMs);
+// 写日程（A 档解耦，2026-10-26）：原来挂在早安问候里，早安发不出去日程就永远不写
+// （实测她 10-24 起每天 11:39 后才启动，窗口 08:00-10:00 全错过，日程冻结在 10-23）。
+// 现在独立一条巡检：08:00 之后 + 今天还没写 → 起一轮，跟问候完全无关。
+setInterval(guarded("写日程", maybeWritePlan), CFG.housekeepingTickMs);
 // 梦境引擎（2026-10-24）：每分钟看一眼，内部只认 3-6 点 + 一天一次 + 素材够 3 条，
 // 平时就是一次 readJson，几乎零开销。
 setInterval(guarded("做梦", maybeDream), CFG.housekeepingTickMs);
@@ -11245,6 +13450,34 @@ setInterval(() => {
 
 // 记忆淡忘（2026-10-21）：每小时最多一次，分数掉出层就自动往下沉，跌破 12 冷藏
 setInterval(() => maybeMemoryDecay(), 10 * 60 * 1000);
+
+// 氛围分向 0 回归（2026-10-26 主人选的 A 项）：
+// 原来 alterScore 只累加不回退，实测卡死在 -20（下界）→ 每轮都被注入
+// 「今天的氛围松了，可以稍微活泛一点」→ 她更倾向写 [氛围:-1] → 正反馈死锁。
+// 现在每分钟看一眼，**按小时算**：每满 1 小时向 0 走 1 步；到 0 就停（幂等，不写盘）。
+// ⚠️ 特意**不挂 maybeTimeGreeting**：那函数开头 `if (pauseMode() !== "off") return;`，
+// 一暂停回落就停（moodDecay 现在就在这个坑里）。这条独立跑，暂停/睡也照常回归。
+setInterval(() => {
+  try {
+    alterDecay();
+  } catch (e) {
+    log("氛围回归巡检异常:", errMsg(e));
+  }
+}, 60 * 1000);
+
+// 心情向基准回落（2026-10-26 修）：原来只挂在 `maybeTimeGreeting()` 里，
+// 而那个函数开头 `if (pauseMode() !== "off") return;` —— **一暂停回落就停**，
+// 暂停一天心情就永久钉在那一刻（实测她心情低的那阵子正好被 pause 卡过）。
+// 心情回落是时间驱动的，跟「要不要发问候」无关，所以挪到独立巡检：
+// 暂停、主人睡了、谷时，它都照常往基准走（`moodDecay()` 内部自己有「忙时停 50 / 平时停 25」的分档）。
+// 每分钟一次；函数内部按小时判断，重复调用零成本。
+setInterval(() => {
+  try {
+    moodDecay();
+  } catch (e) {
+    log("心情回落巡检异常:", errMsg(e));
+  }
+}, 60 * 1000);
 
 // 自动备份（2026-10-25 主人定的「挂班车 + 成功报一声」）：
 // 启动后 3 分钟先看一眼（开机就是新的一天，通常这时候会备一次），之后每 10 分钟巡检一次；

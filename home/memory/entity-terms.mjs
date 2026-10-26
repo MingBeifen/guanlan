@@ -36,14 +36,12 @@ const BASE = [
   // 规矩与约定
   "口令", "规矩", "承诺", "答应", "欠着", "作息", "问候", "晚安", "睡觉", "起床",
   // 具体物
-  "白色风车", "小鲸", "耳机", "屏幕", "桌面壁纸",
-];
+  "白色风车", "小鲸", "耳机", "屏幕", "桌面壁纸"];
 
 const STOP_EN = new Set([
   "the", "and", "for", "with", "that", "this", "you", "are", "was", "not", "but", "can",
   "has", "have", "had", "will", "would", "should", "could", "from", "they", "them",
-  "好", "对", "是", "了", "的",
-]);
+  "好", "对", "是", "了", "的"]);
 
 let cache = { terms: BASE, set: new Set(BASE), extraMtime: 0 };
 let extraPath = "";

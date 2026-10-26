@@ -22,6 +22,80 @@ const LOGS = path.join(ROOT, 'logs');
 fs.mkdirSync(RUNTIME, { recursive: true });
 memStore.initMemoryStore(path.join(ROOT, 'home'));
 
+// ---------- 她「选择不回」的账本（2026-10-26 主人要的面板新页面） ----------
+// 数据由机器人写：home\state\skip-log.jsonl，一行一条。面板只读 + 聚合。
+// **分两类看**：「她主动跳过」是她的自由度；「想跳但被硬消息闸拦下」是她的判断错误。
+// 两类混在一起就看不出问题——所以 bucketed 分开统计，不合并成「今天跳过 N 次」。
+const SKIP_LOG = path.join(ROOT, 'home', 'state', 'skip-log.jsonl');
+
+function skipData({ days = 7, limit = 300 } = {}) {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(SKIP_LOG, 'utf8').trim().split('\n').filter(Boolean);
+  } catch {
+    return { ok: true, exists: false, days, total: 0, skipped: 0, blocked: 0, ownerSkips: 0, byDay: [], reasons: [], items: [], truncated: 0 };
+  }
+  const since = Date.now() - Math.max(1, days) * 86400000;
+  const items = [];
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      const o = JSON.parse(lines[i]);
+      if (o.ts >= since) items.push(o);
+    } catch {
+      /* 坏行跳过 */
+    }
+  }
+  items.reverse();
+  const truncated = Math.max(0, items.length - limit);
+  const view = truncated ? items.slice(-limit) : items;
+
+  // 按天分桶：北京时间，与机器人的 logicalDay 凌晨四点线一致
+  const dayOf = (ts) => {
+    const d = new Date(ts + 8 * 3600 * 1000 - 4 * 3600 * 1000);
+    return d.toISOString().slice(0, 10);
+  };
+  const byDayMap = new Map();
+  const reasonMap = new Map();
+  let blocked = 0;
+  let ownerSkips = 0;
+  for (const o of items) {
+    const day = dayOf(o.ts);
+    const b = byDayMap.get(day) || { day, skip: 0, blocked: 0, owner: 0, group: 0 };
+    if (o.blocked) {
+      b.blocked += 1;
+      blocked += 1;
+    } else {
+      b.skip += 1;
+      if (o.owner) {
+        b.owner += 1;
+        ownerSkips += 1;
+      } else b.group += 1;
+    }
+    byDayMap.set(day, b);
+    // 原因归并：去掉括号补充，只留主类，免得几十个近义条目糊成一片
+    const reason =
+      String(o.reason || '未注明').replace(/[（(].*?[）)]/g, '').trim() || '未注明';
+    const r = reasonMap.get(reason) || { reason, n: 0, blocked: 0 };
+    r.n += 1;
+    if (o.blocked) r.blocked += 1;
+    reasonMap.set(reason, r);
+  }
+  return {
+    ok: true,
+    exists: true,
+    now: Date.now(),
+    days,
+    total: items.length,
+    skipped: items.length - blocked,
+    blocked,
+    ownerSkips,
+    byDay: [...byDayMap.values()].sort((a, b) => (a.day < b.day ? 1 : -1)),
+    reasons: [...reasonMap.values()].sort((a, b) => b.n - a.n),
+    items: view.slice().reverse(),
+    truncated,
+  };
+}
+
 // 工作记忆：机器人每轮把实际拼进提示词的几块写在 runtime\memory-last.json
 function memoryLast() {
   try {
@@ -102,6 +176,40 @@ function tailLog(file, n) {
 /** 机器人 pid 文件的 mtime ≈ 这轮启动时间。 */
 function botSince() {
   try { return fs.statSync(path.join(RUNTIME, 'bot.pid')).mtimeMs; } catch { return null; }
+}
+
+// 重启流水账（2026-10-26 主人拍板的 C 档：面板补一页）。
+// 机器人每次起来往 home\state\boots.jsonl 追加一行，这里只读。
+// 为什么要它：面板原来对 boot 零命中——「她今天断过几次、最长断了多久、跑的是哪版代码」
+// 在主人在的界面上一个字都看不到，只能翻日志。机器人那边有同一份数据，两边不能长得不一样。
+const BOOT_LOG = path.join(ROOT, 'home', 'state', 'boots.jsonl');
+function bootHistory(limit = 60) {
+  let rows = [];
+  try {
+    rows = fs.readFileSync(BOOT_LOG, 'utf8')
+      .split('\n')
+      .filter((x) => x.trim())
+      .map((x) => { try { return JSON.parse(x); } catch { return null; } })
+      .filter(Boolean);
+  } catch { /* 还没有流水账 = 改造上线后还没重启过 */ }
+  const all = rows.slice(-Math.max(1, limit)).slice().reverse(); // 新→旧
+  const today = new Date().toLocaleDateString('sv-SE'); // yyyy-mm-dd，跟机器人同一时区口径
+  const todayRows = rows.filter((r) => {
+    try { return new Date(r.at).toLocaleDateString('sv-SE') === today; } catch { return false; }
+  });
+  const gaps = rows.map((r) => Number(r.gapMin) || 0);
+  return {
+    ok: true,
+    file: path.relative(ROOT, BOOT_LOG),
+    exists: rows.length > 0,
+    total: rows.length,
+    todayCount: todayRows.length,
+    maxGapMin: gaps.length ? Math.max(...gaps) : 0,
+    // 「今天最长断了多久」比「一共断过几次」更接近主人真正想知道的
+    todayMaxGapMin: todayRows.length ? Math.max(...todayRows.map((r) => Number(r.gapMin) || 0)) : 0,
+    coldBoots: rows.filter((r) => r.tier === 'coldBoot').length,
+    rows: all,
+  };
 }
 
 // 主人睡（2026-10-20 的老功能）：机器人把状态写进 home\state\proactive.json，
@@ -357,6 +465,12 @@ function status() {
     dsh: cfg.dsh || {},
     sleep: sleepState(),
     halt: readHalt(),
+    // 概览页那一小条「今天断过几次」（2026-10-26）：整页在「重启」页看，这里只给两个数，
+    // 免得他每次都要点进去才知道今天稳不稳。
+    boot: (() => {
+      const b = bootHistory(1);
+      return { todayCount: b.todayCount, todayMaxGapMin: b.todayMaxGapMin, total: b.total, exists: b.exists };
+    })(),
     log: tailLog('supervisor.log', 80),
     botLog: tailLog('whale-bot.log', 40),
   };
@@ -443,6 +557,108 @@ function stopBot() {
 }
 
 const PROGRESS = path.join(RUNTIME, 'progress');
+
+// ---------- 车道成本（2026-10-26 主人选的 C 项） ----------
+// 为什么要这一块：双车道上线后实测「对话车道一轮 4 步吃 238,439 token」「长活 21 步 849,714」，
+// 而平时一轮才 2–3 万。这些东西只有事后 grep turns.jsonl 才看得见，等于管不住。
+// 这里把「今天开了几次车道、各吃了多少、新增占多少」直接摆在面板上。
+//
+// ⚠️ 三个口径必须一次说清，否则看到的数字会骗人：
+//   ① `total` **已含 cache**（实测 input+output+cache == total），所以「新增」= input+output；
+//   ② cache 单价约为新增的 1/10，**别把 total 当钱**——`新增占比` 才是判断「贵不贵」的关键；
+//   ③ `steps` 是成本的第一乘数（41 步那轮单轮吃 2.02M），所以要显示平均步数。
+function laneCost({ days = 7 } = {}) {
+  const since = Date.now() - Math.max(1, days) * 86400000;
+  let lines = [];
+  try {
+    lines = fs.readFileSync(path.join(LOGS, 'turns.jsonl'), 'utf8').trim().split('\n');
+  } catch {
+    return { ok: true, exists: false, days };
+  }
+  const rows = [];
+  for (const l of lines.slice(-20000)) {
+    try {
+      const o = JSON.parse(l);
+      if (o.ts >= since) rows.push(o);
+    } catch { /* 坏行跳过 */ }
+  }
+  // 只看「跑过模型的轮」（tokens.total > 0）；被掐断的 0 token 轮也留在 items 里但不算进均价
+  const withLane = rows.filter((r) => r.lane);
+  const chatLane = rows.filter((r) => r.lane && String(r.lane).endsWith(':chat'));
+  const taskLane = rows.filter((r) => r.lane && String(r.lane).endsWith(':task'));
+  const main = rows.filter((r) => !r.lane);
+
+  const sum = (arr, f) => arr.reduce((a, b) => a + (Number(f(b)) || 0), 0);
+  const stats = (arr) => {
+    const paid = arr.filter((r) => Number(r.tokens && r.tokens.total) > 0);
+    const total = sum(paid, (r) => r.tokens.total);
+    const fresh = sum(paid, (r) => (r.tokens.input || 0) + (r.tokens.output || 0));
+    const steps = sum(paid, (r) => r.steps);
+    return {
+      count: arr.length,
+      paidTurns: paid.length,
+      total,
+      fresh,
+      cache: sum(paid, (r) => r.tokens.cache),
+      steps,
+      avgTotal: paid.length ? Math.round(total / paid.length) : 0,
+      avgSteps: paid.length ? +(steps / paid.length).toFixed(1) : 0,
+      avgPerStep: steps ? Math.round(total / steps) : 0,
+      freshPct: total ? +((fresh / total) * 100).toFixed(1) : 0,
+      maxTotal: paid.length ? Math.max(...paid.map((r) => Number(r.tokens.total) || 0)) : 0,
+      maxSteps: paid.length ? Math.max(...paid.map((r) => Number(r.steps) || 0)) : 0,
+    };
+  };
+
+  // 按天分桶（北京时间 + 凌晨四点线，与机器人 logicalDay 一致）
+  const dayOf = (ts) => {
+    const d = new Date(ts + 8 * 3600 * 1000 - 4 * 3600 * 1000);
+    return d.toISOString().slice(0, 10);
+  };
+  const dayMap = new Map();
+  for (const r of rows) {
+    const day = dayOf(r.ts);
+    const b = dayMap.get(day) || { day, chat: 0, chatTokens: 0, task: 0, taskTokens: 0, mainTokens: 0 };
+    const tk = Number(r.tokens && r.tokens.total) || 0;
+    if (r.lane && String(r.lane).endsWith(':chat')) {
+      b.chat += 1;
+      b.chatTokens += tk;
+    } else if (r.lane) {
+      b.task += 1;
+      b.taskTokens += tk;
+    } else b.mainTokens += tk;
+    dayMap.set(day, b);
+  }
+  const byDay = [...dayMap.values()].sort((a, b) => (a.day < b.day ? 1 : -1));
+
+  return {
+    ok: true,
+    exists: true,
+    days,
+    now: Date.now(),
+    main: stats(main),
+    chat: stats(chatLane),
+    task: stats(taskLane),
+    byDay,
+    // 明细：只给最近车道轮次（最多 40），让人能点开看具体哪一轮贵
+    items: withLane
+      .filter((r) => String(r.lane).endsWith(':chat'))
+      .slice(-40)
+      .reverse()
+      .map((r) => ({
+        ts: r.ts,
+        ok: r.ok,
+        ms: r.ms,
+        steps: r.steps || 0,
+        total: Number(r.tokens && r.tokens.total) || 0,
+        fresh: (r.tokens && (r.tokens.input || 0) + (r.tokens.output || 0)) || 0,
+        cache: Number(r.tokens && r.tokens.cache) || 0,
+        chars: r.chars || 0,
+        reason: r.reason || '',
+        budget: r.budget || null,
+      })),
+  };
+}
 
 // 任务进度（2026-10-20 方案 A）：机器人每跑一轮会写一份快照在这里，面板只读文件，不跟机器人进程打交道。
 function progressData() {
@@ -784,6 +1000,21 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/memory/reindex' && req.method === 'POST') {
       return json(res, 200, { ok: true, building: spawnVectorSync(true), vector: vectorStats() });
     }
+    // 她「选择不回」的账本（2026-10-26）：?days=7 看几天内，?limit= 限制条数
+    if (url.pathname === '/api/skips') {
+      return json(
+        res,
+        200,
+        skipData({
+          days: Number(url.searchParams.get('days')) || 7,
+          limit: Number(url.searchParams.get('limit')) || 300,
+        }),
+      );
+    }
+    // 车道成本（2026-10-26）：主车道 / 对话车道 / 内部任务各花了多少，新增占比多少
+    if (url.pathname === '/api/lanecost') {
+      return json(res, 200, laneCost({ days: Number(url.searchParams.get('days')) || 7 }));
+    }
     // ---- 画像 / 提醒 / 梦 / 质量门留档（2026-10-25 主人要的四个盲区）----
     // 这四样数据本来就在盘上、也一直在长，只是面板没有入口，主人只能靠我口头汇报。
     if (url.pathname === '/api/profiles') return json(res, 200, { ok: true, ...profileList() });
@@ -796,6 +1027,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/dreams') return json(res, 200, { ok: true, ...dreamList(Number(url.searchParams.get('limit')) || 20) });
     if (url.pathname === '/api/rejected') return json(res, 200, { ok: true, ...rejectedList(Number(url.searchParams.get('limit')) || 50) });
     if (url.pathname === '/api/sessions') return json(res, 200, { now: Date.now(), sessions: listSessions(25) });
+    if (url.pathname === '/api/boots') return json(res, 200, bootHistory(Number(url.searchParams.get('limit')) || 60));
     if (url.pathname === '/api/session') {
       const file = sessionFile(url.searchParams.get('ws'), url.searchParams.get('sid'));
       if (!file) return json(res, 404, { ok: false, msg: '找不到这个会话' });

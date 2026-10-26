@@ -539,6 +539,15 @@
         font-family: var(--mono);
         color: var(--dim);
       }
+      /* 重启流水账那一页（2026-10-26）：列多、窄屏下「断了多久 / 今天第几次」会被挤成两行，
+         所以这一页改成不换行 + 允许横向滚；性质那列给个下限宽度，不然「换口气」会被挤成两行。 */
+      .turns.boots th,
+      .turns.boots td {
+        white-space: nowrap;
+      }
+      .turns.boots td:nth-child(2) .chip {
+        white-space: nowrap;
+      }
       .turns .ok {
         color: var(--ok);
       }
@@ -1361,6 +1370,105 @@
         font-size: 11px;
         color: var(--dim2);
       }
+      /* 沉默页（2026-10-26）：跳过明细。被硬消息闸拦下的用红色左边框区分——
+         那是「判断出错」，跟「她行使自由」不是一类事，视觉上必须一眼分开。 */
+      .skip-list {
+        max-height: 52vh;
+        overflow-y: auto;
+      }
+      .skip-item {
+        border: 1px solid var(--line);
+        border-left: 3px solid #2f6f5b;
+        border-radius: 8px;
+        padding: 9px 12px;
+        margin-bottom: 7px;
+        background: #0e141c;
+      }
+      .skip-item.blocked {
+        border-left-color: #a5392f;
+        background: #150e10;
+      }
+      .skip-item .sh {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        font-size: 12px;
+      }
+      .skip-item .st {
+        margin-top: 6px;
+        color: var(--dim);
+        font-size: 12.5px;
+        line-height: 1.5;
+        word-break: break-word;
+      }
+      .skip-reason-t {
+        color: var(--dim);
+      }
+      /* 车道成本（2026-10-26）：要让「新增占比低」和「被预算掐断」两种情况一眼看见颜色差别 */
+      .lane-sub {
+        font-size: 11.5px;
+        color: var(--dim);
+        line-height: 1.7;
+        margin-top: 4px;
+        font-weight: 400;
+      }
+      .lane-warn {
+        color: #d8b262;
+      }
+      .lane-chat {
+        color: #6aa9e0;
+      }
+      .lane-list {
+        margin-top: 6px;
+        max-height: 34vh;
+        overflow-y: auto;
+      }
+      .lane-item {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        padding: 6px 8px;
+        border-bottom: 1px dashed var(--line);
+      }
+      .lane-item.lane-bad {
+        background: rgba(165, 57, 47, 0.08);
+      }
+      .lane-reason {
+        color: var(--dim);
+        font-size: 11.5px;
+      }
+      .skip-reason {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 7px 0;
+        border-bottom: 1px dashed var(--line);
+        font-size: 13px;
+      }
+      .skip-reason:last-child {
+        border-bottom: none;
+      }
+      .chip.warn {
+        border-color: #6b5424;
+        color: #d8b262;
+      }
+      .chip.bad {
+        border-color: #6b2a24;
+        color: #e0756a;
+      }
+      /* 重启流水账的性质色（2026-10-26）：主人一贯要求分类要一眼分得开，
+         所以四档用四种颜色——换口气(青) / 重启(灰) / 断久了(琥珀) / 整机关过(红)。 */
+      .chip.ok {
+        border-color: #23564a;
+        color: #62d6b4;
+      }
+      .chip.dim {
+        color: var(--dim);
+      }
       .dream-item {
         border: 1px solid var(--line);
         border-radius: 10px;
@@ -1542,8 +1650,7 @@
             </svg>
             会话记录</a
           >
-          <a class="navi" href="#memory" data-view="memory">
-            <svg
+          <a class="navi" href="#memory" data-view="memory">            <svg
               class="ic"
               viewBox="0 0 24 24"
               fill="none"
@@ -1605,6 +1712,37 @@
             </svg>
             梦与留档</a
           >
+          <a class="navi" href="#skip" data-view="skip">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M4 6h16M4 12h10M4 18h7" />
+              <path d="M18 14l3 3-3 3" />
+            </svg>
+            沉默</a
+          >
+          <a class="navi" href="#boots" data-view="boots">
+            <svg
+              class="ic"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" />
+              <path d="M12 7.5V12l3 2" />
+              <path d="M17.5 3.5l2 2-2 2" />
+            </svg>
+            重启</a
+          >
           <a class="navi" href="#logs" data-view="logs">
             <svg
               class="ic"
@@ -1664,6 +1802,7 @@
             <b>看门人停手了</b>
             <span id="haltText"></span>
           </div>
+          <p class="hint" id="bootNote" style="margin: 0 0 10px">重启流水账：读取中…</p>
           <div class="grid3">
             <div class="kv"><span>能指挥它的人</span><b id="owners">-</b></div>
             <div class="kv"><span>群聊</span><b id="group">-</b></div>
@@ -1838,6 +1977,72 @@
                 </tr>
               </tbody>
             </table>
+          </div>
+          <!-- 车道成本（2026-10-26）：双车道上线后最大的盲区——只有事后 grep turns.jsonl 才看得见
+               哪条车道贵。这里把三个口径直接摆出来：新增(token)/缓存读/步数。
+               ⚠️ total 已含 cache，所以「新增占比」才是判断贵不贵的关键，不是 total 的大小。 -->
+          <div class="card">
+            <div class="card-h">
+              <b>车道成本</b>
+              <span class="hint" id="laneHint">读取中…</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+              <select id="laneDaysRange" class="sel">
+                <option value="1">今天</option>
+                <option value="3">3 天</option>
+                <option value="7" selected>7 天</option>
+                <option value="30">30 天</option>
+              </select>
+              <button class="btn" onclick="loadLaneCost()">刷新</button>
+            </div>
+            <div class="grid3" id="laneCards"><div class="empty">读取中…</div></div>
+            <p class="hint" style="margin:10px 0 0">
+              <b>新增</b> = input+output，真正按原价计费的那部分；<b>缓存读</b>单价约为新增的 1/10。
+              所以看贵不贵要盯「新增占比」和「每步均价」，别只看 total——它已经把缓存算进去了。
+              <b>步数</b>是成本的第一个乘数：实测 41 步那轮单独吃 2.02M。
+            </p>
+            <div id="laneItems" class="lane-list"><div class="empty">读取中…</div></div>
+          </div>
+        </section>
+
+        <!-- 她选择不回（2026-10-26）：硬消息不许跳过，其余场合她有权沉默 -->
+        <section class="view scrolly" id="view-skip">
+          <div class="card">
+            <div class="card-h">
+              <b>她跳过的话</b>
+              <span class="hint">来自 home\state\skip-log.jsonl</span>
+            </div>
+            <div class="skip-sum" id="skipSum">
+              <div class="empty">读取中…</div>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px">
+              <label class="toggle"><input type="checkbox" id="skipOnlyBlocked" />只看被拦下的</label>
+              <select id="skipDaysRange" class="sel">
+                <option value="1">今天</option>
+                <option value="3">3 天</option>
+                <option value="7" selected>7 天</option>
+                <option value="30">30 天</option>
+              </select>
+              <button class="btn" onclick="loadSkips()">刷新</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>按天</b><span class="hint">主动跳过 / 被硬消息闸拦下，分开算</span>
+            </div>
+            <div id="skipDayRows"><div class="empty">读取中…</div></div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>原因分布</b><span class="hint">她为什么选择不回</span>
+            </div>
+            <div id="skipReasonRows"><div class="empty">读取中…</div></div>
+          </div>
+          <div class="card">
+            <div class="card-h">
+              <b>明细</b><span class="hint">最近 300 条</span>
+            </div>
+            <div id="skipItems" class="skip-list"><div class="empty">读取中…</div></div>
           </div>
         </section>
 
@@ -2101,6 +2306,30 @@
           </div>
         </section>
 
+        <!-- 重启流水账（2026-10-26 C 档） -->
+        <section class="view" id="view-boots">
+          <div class="card">
+            <div class="card-h">
+              <b>重启流水账</b
+              ><span class="hint" id="btStats">读取中…</span>
+            </div>
+          <div class="chip-legend" style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 10px">
+            <span class="chip ok">换口气 · ≤3 分钟</span>
+            <span class="chip">重启 · 3–30 分钟</span>
+            <span class="chip warn">断久了 · &gt;30 分钟</span>
+            <span class="chip bad">整机关过 · 那段时间她真的不存在</span>
+          </div>
+          <p class="hint" style="margin: 0 0 10px">
+            机器人每次起来往 <code>home\state\boots.jsonl</code> 追加一行（只留最近 200 行），这里只读。
+            <b>整机关过</b>不是「睡了一觉」——那段时间她是真的不存在，提示词里也会这样告她。
+            她自己的提示词里会被指到这同一份文件，两边看到的是同一件事。
+          </p>
+            <div class="scroller" id="btList" style="max-height: 64vh">
+              <div class="empty" style="padding: 8px">正在读 boots.jsonl…</div>
+            </div>
+          </div>
+        </section>
+
         <!-- 日志 -->
         <section class="view" id="view-logs">
           <div class="card" style="display: flex; flex-direction: column">
@@ -2124,6 +2353,8 @@
         people: ["画像", "她给每个人攒的笔记本；每晚模型归纳一次，回答谁就带谁。"],
         remind: ["提醒", "她自己写进去的提醒，到点由机器人发给你。"],
         dream: ["梦与留档", "她做的梦（不进记忆库）和质量门拦下的条目（审计留档）。"],
+        skip: ["沉默", "她选择不回的那些话；硬消息不许跳过，被拦下的单独记一类。"],
+        boots: ["重启", "她每次起来的流水账：断了多久、今天第几次、跑的是哪版代码。"],
         logs: ["日志", "看门人最近写了什么。"],
       };
       let view = "overview";
@@ -2184,12 +2415,14 @@
         $("vTitle").textContent = VIEWS[name][0];
         $("vSub").textContent = VIEWS[name][1];
         if (name === "sessions") loadSessions(true);
-        if (name === "progress") loadProgress();
+        if (name === "progress") { loadProgress(); loadLaneCost(); }
         if (name === "memory") loadMemory();
         if (name === "model") loadGateway();
         if (name === "people") loadProfiles();
         if (name === "remind") loadReminders();
         if (name === "dream") loadDreams();
+        if (name === "skip") loadSkips();
+        if (name === "boots") loadBoots();
         if (name === "overview") load();
       }
       function route() {
@@ -2203,6 +2436,18 @@
         showView(name);
       }
       window.addEventListener("hashchange", route);
+      // 沉默页的筛选：改了立刻重读（勾「只看被拦下的」时不重复请求，前端过滤）
+      document.addEventListener("change", (e) => {
+        if (e.target?.id === "skipOnlyBlocked") {
+          if (view === "skip") loadSkips();
+        }
+        if (e.target?.id === "skipDaysRange") {
+          if (view === "skip") loadSkips();
+        }
+        if (e.target?.id === "laneDaysRange") {
+          if (view === "progress") loadLaneCost();
+        }
+      });
 
       async function load() {
         try {
@@ -2254,6 +2499,18 @@
           }
           $("uptime").textContent =
             d.running && d.since ? fmt(Date.now() - d.since) : "-";
+          // 今天断过几次（2026-10-26）：概览左上角那行小字，点进去看整页。
+          // 没有这一条时他要知道「今天稳不稳」得翻日志——机器人那边本来就有这个数。
+          if ($("bootNote")) {
+            const b = d.boot || {};
+            $("bootNote").innerHTML = !b.exists
+              ? "重启流水账：<b>还没记录</b>（改造上线后重启一次就有了）"
+              : `今天起来 <b>${b.todayCount ?? 0}</b> 次${
+                  b.todayMaxGapMin
+                    ? `，最长断了 <b>${b.todayMaxGapMin}</b> 分钟`
+                    : ""
+                } · 累计 ${b.total ?? 0} 次 · <a href="#boots">看流水账</a>`;
+          }
           $("footUp").textContent =
             d.running && d.since ? "已运行 " + fmt(Date.now() - d.since) : "—";
           $("pids").textContent = d.running
@@ -2321,7 +2578,16 @@
           }
           if ($("alterVal")) {
             const a = Number(sl.alterScore) || 0;
-            const label = a <= -3 ? "有点闷" : a >= 3 ? "轻快些" : "没什么起伏";
+            // ⚠️ 2026-10-26 修（主人发现的真误判）：这里原来写 `a <= -3 ? "有点闷"` —— **语义反了**。
+            // alterScore 的定义（mood.mjs / 提示词原文）是：
+            //   **正 = 这轮更严肃/拘着；负 = 更轻松/开玩笑**（HDS 那套 Alter 的原定义）。
+            // 所以 -20 是「氛围一直很松/很随意」，不是「闷」。
+            // 更糟的是「有点闷」这个词**和 mood 的档位同名**（mood 30-44 也叫「有点闷」），
+            // 同一个屏上两个「有点闷」指着两个完全不同的量 → 主人以为氛围被误判了（他报的就是这个）。
+            // 现在按正负说方向，用「偏放松 / 偏正式」这两个不会被 mood 占用的词。
+            const label = a <= -3 ? "偏放松" : a >= 3 ? "偏正式" : "没什么起伏";
+            $("alterVal").title =
+              "正 = 这轮聊得更严肃/拘着；负 = 更轻松/开玩笑。它和上面的「心情」是两个独立的量。";
             $("alterVal").textContent = `${a.toFixed(1)}　${label}`;
           }
           if ($("greetVal")) {
@@ -3106,6 +3372,202 @@
 
       // ---- 梦 + 质量门留档 ----
       let rjState = { items: [], pick: "all" };
+
+      // ---------- 沉默：她选择不回的那些话（2026-10-26 主人要的新页面） ----------
+      // 三类信息一眼要看到：
+      //   ① 她今天/这几天跳过几次，其中几次是躲主人、几次是群里没接话；
+      //   ② 她「想跳但被硬消息闸拦下」几次——这是**判断错误**，和上一条不是一回事；
+      //   ③ 明细里能看到她跳过的究竟是什么话，不然这页没法复盘。
+      function skipState() {
+        const only = $("skipOnlyBlocked")?.checked;
+        const days = Number($("skipDaysRange")?.value) || 7;
+        return { only, days };
+      }
+      // ---------- 车道成本（2026-10-26）：主车道 / 对话车道 / 内部任务各花多少 ----------
+      // 三种口径分开显示，因为混在一起看不出问题：
+      //   新增 = 真正按原价计费的（input+output）；缓存读 = 约为新增价 1/10；
+      //   total 是两者之和——**别拿 total 当账单**，要盯「新增占比」和「每步均价」。
+      async function loadLaneCost() {
+        const days = Number($("laneDaysRange")?.value) || 7;
+        try {
+          const d = await apiGet(`/api/lanecost?days=${days}`);
+          if (!d.exists) {
+            $("laneHint").textContent = "还没有记账文件";
+            $("laneCards").innerHTML = '<div class="empty">没有数据</div>';
+            $("laneItems").innerHTML = "";
+            return;
+          }
+          const kfmt = (n) => {
+            const v = Number(n) || 0;
+            if (v >= 1e8) return (v / 1e8).toFixed(2) + " 亿";
+            if (v >= 1e4) return (v / 1e4).toFixed(1) + " 万";
+            return String(v);
+          };
+          const card = (title, s, tone) => {
+            if (!s || !s.count)
+              return `<div class="kv"><span>${esc(title)}</span><b style="color:#5f6b7d">没跑过</b></div>`;
+            return `<div class="kv"><span>${esc(title)}</span><b class="${tone || ""}">${kfmt(s.total)}</b>
+              <div class="lane-sub">
+                ${s.count} 轮 · 平均 ${kfmt(s.avgTotal)}/轮 · 平均 ${s.avgSteps} 步 · 每步 ${kfmt(s.avgPerStep)}
+                <br />新增占比 <b class="${s.freshPct < 25 ? "lane-warn" : ""}">${s.freshPct}%</b>
+                · 最贵一轮 ${kfmt(s.maxTotal)}（${s.maxSteps} 步）
+              </div></div>`;
+          };
+          $("laneHint").textContent = `最近 ${d.days} 天 · 点「任务进度」进来会刷新`;
+          $("laneCards").innerHTML =
+            card("主车道（对话轮）", d.main) +
+            card("对话车道（插话）", d.chat, d.chat.count ? "lane-chat" : "") +
+            card("内部任务", d.task);
+
+          $("laneItems").innerHTML = d.items.length
+            ? `<div class="card-h" style="margin-top:10px"><b>最近的车道轮次</b><span class="hint">最多 40 条</span></div>` +
+              d.items
+                .map((x) => {
+                  const pct = x.total ? ((x.fresh / x.total) * 100).toFixed(0) : "0";
+                  return `<div class="lane-item${x.budget ? " lane-bad" : ""}">
+                    <span class="n">${fmtStamp(x.ts)}</span>
+                    <span class="chip">${x.steps} 步</span>
+                    <span class="chip">${kfmt(x.total)}</span>
+                    <span class="chip ${Number(pct) < 25 ? "bad" : ""}">新增 ${pct}%</span>
+                    <span class="chip">${x.chars} 字</span>
+                    ${x.budget ? `<span class="chip bad">被预算掐断：${esc(x.budget)}</span>` : ""}
+                    <span class="lane-reason">${esc(x.reason || "")}</span>
+                  </div>`;
+                })
+                .join("")
+            : '<div class="empty" style="padding:8px">还没有对话车道的轮次（或这一版上线前的轮次没记 lane）</div>';
+        } catch (e) {
+          $("laneHint").textContent = "读不到：" + (e.message || e);
+          $("laneCards").innerHTML = '<div class="empty">读取失败</div>';
+        }
+      }
+      async function loadSkips() {
+        const st = skipState();
+        try {
+          const d = await apiGet(`/api/skips?days=${st.days}`);
+          if (!d.exists) {
+            $("skipSum").innerHTML =
+              '<div class="empty">还没有记录。她还没跳过任何一句话——或者这个功能刚上线不久。</div>';
+            $("skipDayRows").innerHTML = '<div class="empty">没有数据</div>';
+            $("skipReasonRows").innerHTML = '<div class="empty">没有数据</div>';
+            $("skipItems").innerHTML = '<div class="empty">没有数据</div>';
+            return;
+          }
+          const chip = (t, cls = "") =>
+            `<span class="chip ${cls}">${esc(t)}</span>`;
+          $("skipSum").innerHTML = `
+            <div class="chips" style="gap:10px;flex-wrap:wrap">
+              ${chip(`跳过 ${d.skipped} 次`)}
+              ${chip(`躲主人 ${d.ownerSkips} 次`, d.ownerSkips ? "warn" : "")}
+              ${chip(`群里没接 ${d.skipped - d.ownerSkips} 次`)}
+              ${chip(`被硬消息闸拦下 ${d.blocked} 次`, d.blocked ? "bad" : "")}
+            </div>
+            <p class="hint" style="margin:8px 0 0">
+              最近 ${d.days} 天。<b>跳过</b>是她行使自由；<b>被拦下</b>是她的判断出错——硬消息（点名/问句/口令、你明确在找她、发了图或语音、刚聊到一半）她不许沉默，代码会把那句改成一句实话。
+            </p>`;
+
+          $("skipDayRows").innerHTML = d.byDay.length
+            ? `<table class="turns"><thead><tr><th>日期</th><th>跳过</th><th>其中躲主人</th><th>群里没接</th><th>被拦下</th></tr></thead><tbody>
+              ${d.byDay
+                .map(
+                  (b) =>
+                    `<tr><td class="n">${esc(b.day)}</td><td class="n">${b.skip}</td><td class="n ${b.owner ? "warn" : ""}">${b.owner}</td><td class="n">${b.group}</td><td class="n ${b.blocked ? "bad" : ""}">${b.blocked}</td></tr>`,
+                )
+                .join("")}
+            </tbody></table>`
+            : '<div class="empty">没有数据</div>';
+
+          $("skipReasonRows").innerHTML = d.reasons.length
+            ? d.reasons
+                .map(
+                  (r) => `<div class="skip-reason">
+                    <span>${esc(r.reason)}</span>
+                    ${chip(`${r.n} 次`, r.blocked ? "bad" : "")}
+                  </div>`,
+                )
+                .join("")
+            : '<div class="empty">没有数据</div>';
+
+          const list = st.only ? d.items.filter((x) => x.blocked) : d.items;
+          $("skipItems").innerHTML = list.length
+            ? list
+                .map((x) => {
+                  const who = x.owner ? "主人" : `群 ${x.target}`;
+                  return `<div class="skip-item ${x.blocked ? "blocked" : ""}">
+                    <div class="sh">
+                      <span class="n">${fmtStamp(x.ts)}</span>
+                      ${chip(who)}
+                      ${x.blocked ? chip("被拦下 · 判断出错", "bad") : chip("主动跳过")}
+                      <span class="skip-reason-t">${esc(x.reason || "未注明")}</span>
+                    </div>
+                    ${x.text ? `<div class="st">${esc(x.text)}</div>` : ""}
+                  </div>`;
+                })
+                .join("")
+            : '<div class="empty">这段时间没有记录</div>';
+        } catch (e) {
+          $("skipSum").innerHTML = `<div class="empty">读取失败：${esc(e.message || e)}</div>`;
+        }
+      }
+
+      // 重启流水账（2026-10-26）：只读 boots.jsonl，不碰机器人进程。
+      async function loadBoots() {
+        try {
+          const d = await apiGet("/api/boots");
+          $("btStats").textContent = d.exists
+            ? `今天 ${d.todayCount} 次${d.todayMaxGapMin ? ` · 今天最长断开 ${d.todayMaxGapMin} 分` : ""} · 累计 ${d.total} 次${d.coldBoots ? ` · 整机关过 ${d.coldBoots} 次` : ""}`
+            : `还没有流水账（读 ${d.file}）`;
+          const tierCls = (t) =>
+            t === "coldBoot"
+              ? "bad"
+              : t === "longDown"
+                ? "warn"
+                : t === "restart"
+                  ? ""
+                  : "ok";
+          const tierName = (t) =>
+            ({ quick: "换口气", restart: "重启", longDown: "断久了", coldBoot: "整机关过", first: "头一次" })[t] || t || "-";
+          $("btList").innerHTML = d.exists
+            ? `<table class="turns boots"><thead><tr>
+                <th>起来于</th><th>性质</th><th>断了多久</th><th>今天第几次</th><th>代码版本</th><th>谁让退的</th><th>上一版</th>
+              </tr></thead><tbody>
+              ${d.rows
+                .map((r) => {
+                  const at = new Date(r.at).toLocaleString("zh-CN", {
+                    hour12: false,
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  });
+                  const prev = r.prevSeenAt
+                    ? new Date(r.prevSeenAt).toLocaleTimeString("zh-CN", {
+                        hour12: false,
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : "—";
+                  const who = r.askedBy === "panel" ? "面板" : r.askedBy ? esc(r.askedBy) : r.cleanExit ? "自己退的" : "被掐掉";
+                  return `<tr>
+                    <td class="n">${esc(at)}</td>
+                    <td><span class="chip ${tierCls(r.tier)}">${esc(tierName(r.tier))}</span></td>
+                    <td class="n">${r.gapMin || 0} 分${r.machineRebooted ? "（整机）" : ""}</td>
+                    <td class="n">${r.todayCount ?? "-"}</td>
+                    <td class="n">${esc(r.gitHead || "-")}</td>
+                    <td>${esc(who)}</td>
+                    <td class="n">${esc(prev)}</td>
+                  </tr>`;
+                })
+                .join("")}
+            </tbody></table>`
+            : `<div class="empty" style="padding: 8px">
+                还没有 <code>${esc(d.file)}</code>。这次改动上线后<b>重启一次</b>，第一行就会出现在这里。
+              </div>`;
+        } catch (e) {
+          $("btStats").textContent = "读不到：" + e.message;
+        }
+      }
 
       async function loadDreams() {
         try {

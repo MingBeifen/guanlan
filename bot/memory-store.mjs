@@ -249,7 +249,7 @@ function numbersIn(t) {
 // 认得的人名：这里加名字就行；称呼（爸爸、小宝、〔昵称甲〕）不算人名，别加——
 // 那是同一个人，加进来反而会把该并的挡住。
 // 懒办法：home\memory\names.json 写成 ["新名字"]，启动时并进来，不用改代码。
-let NAMES = []; // 开源版留空：真实人名请写 home\memory\names.json（见 loadNames）
+let NAMES = ["萤", "〔群友乙〕", "〔群友甲〕", "〔群友丙〕", "〔群友己〕", "林", "〔群友戊〕", "月", "〔群友丁〕"];
 
 function loadNames() {
   try {
@@ -1010,7 +1010,16 @@ function whereOf(itemKey, key) {
 // 排序照样先按分数，所以本会话和共用块自然排在前面，别的群、私聊的排在后面。
 export function buildBlocks(key, opts = {}) {
   // 每条前面多了个十来字的时间戳，上限相应放宽一点（不至于把内容挤掉）
-  const caps = { core: 1200, long: 850, mid: 750, short: 500, ...(opts.caps || {}) };
+  //
+  // 【2026-10-26 主人拍的 B 档：mid 750→1500、short 500→1500】
+  // 为什么不是改分配算法——实测过，**上限由 cap 决定，不由 take() 的分配策略决定**：
+  //   · 试「每条最多占层容量 1/3、1/2」的截断策略：short 由 1 条变 2 条、总字数反而 −161，
+  //     合计只多 1 条（39→40）；因为 short 那两条当天小结各 1200 字，怎么也塞不进 500。
+  //   · 提 cap 到 1500：mid 7→15 条（+734 字）、short 1→2 条（+1000 字），
+  //     合计 **多进 11 条 / 1884 字**。
+  // 成本实测：+1225 tok/次拼装 ≈ 日成本 +7.9%（按每轮 3.52 步、缓存命中 88% 折算）。
+  // core/long 不动：core 只用 419/1200（装得下），long 848/850 是刚好压满，提到 1000 只多 2 条。
+  const caps = { core: 1200, long: 850, mid: 1500, short: 1500, ...(opts.caps || {}) };
   const store = readStore();
   const mine = store.items
     .map(normalize)

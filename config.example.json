@@ -11,15 +11,22 @@
     ],
     "maxSteps": 40,
     "maxTokensPerTurn": 3000000,
-    "longTailTokens": 2000000,
     "dreamEnabled": true,
-    "voiceEnabled": true,
-    "voiceDailyLimit": 40,
-    "voiceInMaxSeconds": 90,
-    "voiceAsrPython": "",
-    "voiceAsrScript": "",
-    "voiceAsrModels": "",
-    "autoFallback": false
+    "maxStickersPerReply": 2,
+    "syncFavorites": true,
+    "syncFavoritesEveryMs": 86400000,
+    "maxFavUploadPerDay": 3,
+    "parallelChat": true,
+    "busyAck": true,
+    "chatMergeMax": 8,
+    "chatParallelGraceMs": 8000,
+    "busyAckCooldownMs": 300000,
+    "chatLaneMaxTokens": 400000,
+    "rawTailMsgs": 20,
+    "groupRawTailMsgs": 20,
+    "stripTailPeriod": true,
+    "fishRewrite": false,
+    "summaryEveryMsgs": 30
   },
   "napcat": {
     "wsHost": "ws://127.0.0.1:3001",
@@ -28,10 +35,7 @@
   "group": {
     "enabled": false,
     "allow": [],
-    "talkAllow": [],
-    "images": "all",
-    "speakGapMs": 30000,
-    "maxBubbles": 3
+    "talkAllow": []
   },
   "dsh": {
     "exe": "",

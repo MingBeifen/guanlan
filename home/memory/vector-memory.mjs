@@ -34,6 +34,13 @@ const DAYS_DIR = path.join(ARCHIVE_DIR, "days");
 // bge 官方建议：短查询前面加这句，检索更准；存进索引的正文不加。
 const QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章：";
 const CHUNK_CHARS = 260;
+// 2026-10-26 加：库条目（尤其「当天小结」那种）超过这个字数就切开再编码。
+// 原因：库里最长的一千二百字，一个人一天几十件事全挤在一个向量里，
+// 问其中一件，相似度被另外几十件平均掉——实测问「key 尾号」捞不到那条自己，
+// 反倒捞上来一句只谈 key 露出来的闲话。
+const SPLIT_MAX = 320;
+// 文字块合并的天花板（原来写 CHUNK_CHARS*2=520，太肥，一段话能塞三四件事）
+const CHUNK_MERGE = 360;
 const MAX_ITEMS_PER_SOURCE = 4000;
 
 // 实体表的加载（2026-10-23）：第一次用到时读一次，读不到也不拦检索
@@ -93,6 +100,48 @@ const dot = (a, b) => {
 
 // ---------- 切块 ----------
 
+// 大字块切开（2026-10-26 加的）：库条目不是切出来的、是整条塞进来的，
+// 「当天小结」动辄一千二百字，一块里几十件事，向量被平均成一锅粥。
+// 切法：先按行分，行太长再按句子分，小段并回去凑到接近 max，不留二十字一句的碎片。
+// 注意**不加前缀、不做重叠**：这些块正文里本来就带时间和「〔源：…〕」，够它自己说明白。
+function splitLongText(text, max = SPLIT_MAX) {
+  const t = String(text ?? "").trim();
+  if (t.length <= max) return t ? [t] : [];
+  const units = [];
+  for (const line of t.split(/\n+/)) {
+    const s = line.trim();
+    if (!s) continue;
+    if (s.length <= max) {
+      units.push(s);
+      continue;
+    }
+    let buf = "";
+    for (const sent of s.split(/(?<=[。！？；!?;])/)) {
+      if (!sent) continue;
+      if (buf && (buf + sent).length > max) {
+        units.push(buf);
+        buf = "";
+      }
+      buf = buf ? buf + sent : sent;
+    }
+    if (buf.trim()) units.push(buf.trim());
+  }
+  const out = [];
+  let cur = "";
+  for (const u of units) {
+    if (!cur) {
+      cur = u;
+    } else if (cur.length + 1 + u.length <= max) {
+      cur = cur + "\n" + u;
+    } else {
+      out.push(cur);
+      cur = u;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 // markdown：按空行和标题切开，再攒到 200~400 字一块，别把一句话劈两半
 function chunkMarkdown(raw) {
   const lines = String(raw).replace(/\r/g, "").split("\n");
@@ -119,8 +168,8 @@ function chunkMarkdown(raw) {
     cur = "";
   };
   for (const b of blocks.filter(Boolean)) {
-    if (cur && (cur + "\n" + b).length > CHUNK_CHARS * 2) flush();
-    if (b.length <= CHUNK_CHARS * 2) {
+    if (cur && (cur + "\n" + b).length > CHUNK_MERGE) flush();
+    if (b.length <= CHUNK_MERGE) {
       cur = cur ? cur + "\n" + b : b;
       continue;
     }
@@ -131,7 +180,16 @@ function chunkMarkdown(raw) {
     }
   }
   flush();
-  return chunks;
+  // 碎块并回去：几十字一块单独编码，向量跟谁都不像，却容易跟随便什么问句凑个中等分（纯噪声）
+  const merged = [];
+  for (const c of chunks) {
+    if (merged.length && c.length < 60 && merged[merged.length - 1].length + c.length + 1 <= CHUNK_MERGE) {
+      merged[merged.length - 1] = merged[merged.length - 1] + "\n" + c;
+    } else {
+      merged.push(c);
+    }
+  }
+  return merged;
 }
 
 function readText(p) {
@@ -190,6 +248,7 @@ function collectDayCards(key) {
 }
 
 // 原话底账：两三句并成一块（块太大就被无关的话稀释，查不准），带日期
+const RAW_TALK_GAP_MS = 20 * 60 * 1000; // 话题断了二十分钟以上就另起一块
 function collectRawTalk(key, step = 3, maxChars = 240) {
   const file = path.join(
     ARCHIVE_DIR,
@@ -215,6 +274,7 @@ function collectRawTalk(key, step = 3, maxChars = 240) {
   let cur = [];
   let curDay = "";
   let size = 0;
+  let curLastTs = 0;
   const flush = () => {
     if (!cur.length) return;
     out.push({
@@ -223,18 +283,27 @@ function collectRawTalk(key, step = 3, maxChars = 240) {
     });
     cur = [];
     size = 0;
+    curLastTs = 0;
   };
   for (const r of recs) {
     const day = r.ts
       ? new Date(r.ts + 8 * 3600 * 1000).toISOString().slice(0, 10)
       : "";
     const line = `${r.role === "me" ? "我" : "对方"}：${String(r.text).slice(0, 300)}`;
-    // 换天、块满、句数到上限，都断开
-    if (cur.length && (day !== curDay || size + line.length > maxChars || cur.length >= step))
+    // 2026-10-26 加：中间断了二十分钟以上就断开，别把上一场和这一场拼进同一块。
+    // 实测私聊连着的两句话有 4% 隔了二十分钟以上（最长十一小时），
+    // 拼一起的那几十块问什么都会被另一半拖着。
+    const gapMs = cur.length && curLastTs ? r.ts - curLastTs : 0;
+    // 换天、话题断了、块满、句数到上限，都断开
+    if (
+      cur.length &&
+      (day !== curDay || gapMs > RAW_TALK_GAP_MS || size + line.length > maxChars || cur.length >= step)
+    )
       flush();
     if (!cur.length) curDay = day;
     cur.push(line);
     size += line.length;
+    curLastTs = r.ts || 0;
   }
   flush();
   return out.slice(-MAX_ITEMS_PER_SOURCE);
@@ -295,15 +364,21 @@ function collectStore() {
     // 被顶掉的旧版正文后面缀一句「（已过时）」——不光是标签，正文里也让人一眼看出
     // 这是老说法。检索命中这类块时，模型看到这行就不会把它当现状回答。
     const isSuper = it.status === "superseded";
-    out.push({
-      id: "store:" + it.id,
-      sid: it.id,
-      scope,
-      st: isSuper ? "superseded" : "active",
-      src: `${where}记忆/${LAYER_LABEL[it.layer] ?? it.layer ?? "记忆"}`,
-      day: it.day || "",
-      text,
-      hash: hashText(text),
+    // 2026-10-26：整条大字块切开再进索引（见 splitLongText 上面那段注释）。
+    // id 加 #pN 后缀保证唯一；sid 仍然是**原条目 id**，
+    // 检索侧的 superseded / links / 记忆分全靠 sid 回查 store.json，切开不影响。
+    const parts = splitLongText(text);
+    parts.forEach((part, i) => {
+      out.push({
+        id: "store:" + it.id + (parts.length > 1 ? "#p" + (i + 1) : ""),
+        sid: it.id,
+        scope,
+        st: isSuper ? "superseded" : "active",
+        src: `${where}记忆/${LAYER_LABEL[it.layer] ?? it.layer ?? "记忆"}`,
+        day: it.day || "",
+        text: part,
+        hash: hashText(part),
+      });
     });
   }
   return out;
@@ -693,6 +768,12 @@ const SIM_W = 0.6; // 有实体路时，向量余弦占 0.6
 const KW_W = 0.2; // 有实体路时，词面占 0.2
 const SIM_W2 = 0.75; // 无实体路时，向量余弦占 0.75
 const KW_W2 = 0.25; // 无实体路时，词面占 0.25
+// 2026-10-26 加：末尾三路并列时的权重也提成可调（默认值跟原来一模一样，没改行为）。
+// 为什么：原来写死在公式里，想试「新近是不是压过了相关」就得改代码再重建，
+// 现在能用环境变量扫一遍、同一份索引比高低。0.6/0.25/0.15 → 文字/新近/记忆分。
+const FUSE_TEXT = Number(process.env.WW_FUSE_TEXT ?? 0.6);
+const FUSE_REC = Number(process.env.WW_FUSE_REC ?? 0.25);
+const FUSE_IMP = Number(process.env.WW_FUSE_IMP ?? 0.15);
 // 2026-10-24 加（B8）：问句里只有人名/高频词（df > ENT_DF_MAX）时，实体路的权重打折。
 // 人名 df 天然极高（主人 530 / 〔主人名〕 850），不能当"锁"，但也不该完全不用。
 const ENT_WEAK_RATIO = Number(process.env.WW_ENT_WEAK_RATIO ?? 0.5);
@@ -760,6 +841,64 @@ function detectHistoryIntent(q) {
   return HISTORY_WORDS.some((w) => s.includes(w));
 }
 
+// ---------- 时间推理二级：asOf 快照（2026-10-26 补，原注释写「先只识别不实现」） ----------
+// 一级 wantsHistory 解决的是「要不要放行旧版本」；二级 asOf 解决的是「**要哪一天的**」。
+// 场景实测：问「前天晚上我说了什么」——一级只会把 superseded 放行，但排出来的仍是**最近**的块，
+// 前天那批可能排在 20 名开外，等于没答到点上。
+//
+// 判据：从问句里解析出**相对日期**，得到目标日期；然后把「日期离目标明显更远」的块降权。
+// 只做相对词（昨天/前天/大前天/N天前/上周X/上个月），**不解析绝对日期**——
+// 绝对日期（"10月23日"）在她语料里极少出现，做了也是低频路径，不如先把高频的做对。
+// 三条保守设计：
+//   ① **只降权、不排除**——解析错了顶多排序没变好，不会把正确答案完全踢出去；
+//   ② **降权幅度有限**（0.55），保证它仍可能被选中；
+//   ③ **解析不出就返回 null**，整条逻辑不生效（零行为变化）。
+const AS_OF_REL = [
+  [/(?:大前天)/, 3],
+  [/(?:前天)/, 2],
+  [/(?:昨天|昨日)/, 1],
+  [/(\d{1,2})\s*天前/, 0], // 特殊：用捕获的数字
+  [/(?:今天|今日|刚才|刚刚)/, 0],
+];
+/**
+ * 解析问句里的「相对日期」，返回 YYYY-MM-DD；解析不出返回 null。
+ * @param {string} q 用户问句
+ * @param {number} nowMs 当前时间戳（默认现在）
+ */
+export function parseAsOf(q, nowMs = Date.now()) {
+  const s = String(q ?? "");
+  if (!s) return null;
+  const dayOf = (ts) => {
+    const d = new Date(ts + 8 * 3600 * 1000 - 4 * 3600 * 1000); // 与换日线（凌晨四点）一致
+    return d.toISOString().slice(0, 10);
+  };
+  // 先把「今天/刚才」这类排掉——它们没有历史意义，不该触发日期过滤
+  if (/(?:今天|今日|刚才|刚刚|现在)/.test(s)) return null;
+  let backDays = null;
+  const m = s.match(/(\d{1,2})\s*天前/);
+  if (m) backDays = Number(m[1]);
+  if (backDays === null) {
+    for (const [re, n] of AS_OF_REL) {
+      if (n === 0) continue;
+      if (re.test(s)) {
+        backDays = n;
+        break;
+      }
+    }
+  }
+  if (backDays === null || !Number.isFinite(backDays) || backDays <= 0) return null;
+  if (backDays > 30) return null; // 太远的不做（语料里 30 天前的块本来就少）
+  return dayOf(nowMs - backDays * 86400 * 1000);
+}
+/** 某个块的日期离目标日差几天（块没日期就返回 Infinity = 不做降权）。 */
+function dayGapOf(blockDay, targetDay) {
+  if (!blockDay || !targetDay) return 0;
+  const a = Date.parse(`${blockDay}T12:00:00+08:00`);
+  const b = Date.parse(`${targetDay}T12:00:00+08:00`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.round(Math.abs(a - b) / 86400000);
+}
+
 export async function search(
   query,
   // ⚠️ 2026-10-24（B5 配套）：默认 minScore 从 **0.45 改成 0.26**。
@@ -800,6 +939,9 @@ export async function search(
   //     输出时带「【某个日期的说法，现已改为…】」前缀。
   //   ③冷藏的永远扔——它是分数掉下去的东西，跟"历史版本"是两码事。
   const wantsHistory = detectHistoryIntent(q);
+  // asOf 二级（2026-10-26 补）：解析「昨天/前天/3天前」得到目标日，把离目标远的块降权。
+  // 解析不出 → null，整条不生效。只降权不排除（解析错顶多排序不变，不会踢掉对的）。
+  const asOfDay = parseAsOf(q);
   const live = pool.filter((it) => {
     if (!it.sid) return true;
     const st = info.get(it.sid);
@@ -915,10 +1057,17 @@ export async function search(
     // 实测就是这样被挤出 top10 的。问历史时"新"不是优点。
     const rec = wantsHistory ? 1.0 : recencyOf(it.day, layerOfSrc(it.src));
     const imp = st ? Math.min(1, Math.max(0, Number(st.score ?? 40) / 100)) : 0.5;
-    let fused = Math.min(1, 0.6 * textSim + 0.25 * rec + 0.15 * imp);
+    let fused = Math.min(1, FUSE_TEXT * textSim + FUSE_REC * rec + FUSE_IMP * imp);
     // 被顶掉的旧说法降权 15%，让它排在现状答案后面（问过去时也留这一刀，
     // 但 rec 已经封顶成 1.0 了，实际只挨这一刀，不再双重惩罚）。
     if (isSup) fused *= 0.85;
+    // asOf 二级（2026-10-26）：问句带了「昨天/前天/N天前」时，**离目标日越远越降权**。
+    // 只降不排除：间隔 ≤1 天不罚；2-3 天 ×0.8；>3 天 ×0.55。解析不出（asOfDay=null）则整条跳过。
+    if (asOfDay) {
+      const gap = dayGapOf(it.day, asOfDay);
+      if (gap > 3) fused *= 0.55;
+      else if (gap > 1) fused *= 0.8;
+    }
     scored.push({ it, fused, sim, textSim, rec, imp, kw, ent, superseded: isSup });
   }
   if (!scored.length) {

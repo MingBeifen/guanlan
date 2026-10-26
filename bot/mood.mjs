@@ -85,6 +85,64 @@ const ALTER_INJECT_THRESHOLD = 8;
 const ALTER_MIN = -20;
 const ALTER_MAX = 20;
 
+// ===========================================================================
+// 氛围分的「向 0 回归」（2026-10-26 主人选的 A：只做日间回落，不做每日清零）
+// ===========================================================================
+// **修的是什么**：`alterScore` 原来只有「累加 + 夹边界」，**没有任何回落**。
+// 实测 2026-10-26 15:13 它卡在 **-20（下界）**，而且日志里一路都是
+//   `氛围分撞边界：-20 + -1 = -21 → 夹到 -20`（10-25 21:03 到 10-26 07:12 连续十几次）。
+// 后果不只是"数字难看"：`alterLine()` 在 |a| >= 8 时**每轮都注入**
+//   「今天的氛围松了，可以稍微活泛一点（累积 -20）」→ 她读到这句就更倾向写 `[氛围:-1]`
+//   → 继续撞边界 → **正反馈死锁**，永远出不来。
+//
+// **两个必须避开的坑（写之前就核实过）**：
+//  ① **不能照抄 `moodDecay` 的方向**：mood 是 0-100 的"高低"，回落就是单调往下；
+//     而 `alterScore` 是 **-20~+20 的偏移量**，回落必须**朝 0 走**（正负都向中性靠）。
+//     方向搞反会从"永远 -20"变成"永远负"，等于没修。
+//  ② **不能挂在 `maybeTimeGreeting()` 里**（那是 `moodDecay()` 现在的挂载点）：
+//     那个函数开头有 `if (pauseMode() !== "off") return;`，**一暂停连回落都停了**，
+//     会重现"暂停一天就永久锁死"。所以这条挂在**独立的 minutes 级巡检**（见 whale-bot 的
+//     `setInterval(guarded("氛围回归", alterDecay), CFG.housekeepingTickMs)`），不受暂停影响。
+//
+// **速率**：每小时向 0 靠近 **1 步**（`ALTER_DECAY_PER_HOUR`）。
+//   · 从 -20 回到 0 需要 20 小时 —— 慢，但语义正确：她要"真的聊得轻松起来"才该爬回来，
+//     不是被系统一键洗白。
+//   · 距离 0 越近，步长不变（不是比例回归）——简单、可解释、面板上看得懂。
+//   · 只动**整数步**，不产生小数；已经在 0 就直接返回，不写盘（省掉每分钟一次无谓 IO）。
+const ALTER_DECAY_PER_HOUR = 1;
+
+/**
+ * 按「距上次变动过了多久」把 alterScore 往 0 拉。纯时间驱动，可被任意巡检调用。
+ * 返回拉完后的值。**幂等**：时间没走够就原样返回、不写盘。
+ */
+export function alterDecay(now = Date.now()) {
+  const s = raw();
+  const cur = Number(s.alterScore ?? 0);
+  if (!cur) return 0; // 已经是 0，没事可做
+  const last = Number(s.alterAt ?? 0);
+  if (!last) {
+    // 没有 alterAt（老数据/从没动过）→ 记一次时间戳，从下一轮开始算，避免一上来就跳
+    s.alterAt = now;
+    writeState();
+    return cur;
+  }
+  const hrs = (now - last) / 3600000;
+  // 每满 1 小时走 1 步；最多一次走完这段积压（长时间没跑也别一步跳回 0 之外）
+  const steps = Math.floor(hrs * ALTER_DECAY_PER_HOUR);
+  if (steps <= 0) return cur;
+  // 朝 0 走：正数减、负数加；不越过 0（`Math.sign` 保证方向）
+  const next = Math.abs(cur) <= steps ? 0 : cur - Math.sign(cur) * steps;
+  if (next === cur) return cur;
+  s.alterScore = next;
+  s.alterAt = now;
+  s.alterNoteSign = Math.sign(next) || 0;
+  writeState();
+  logger(
+    `氛围分回归：${cur} -> ${next}（${hrs.toFixed(1)} 小时没变动，每 ${(1 / ALTER_DECAY_PER_HOUR).toFixed(0)} 小时向 0 走 1）`,
+  );
+  return next;
+}
+
 /** 累积一次氛围分。返回累积后的值（调用方要判断是否越阈值）。 */
 export function alterAccumulate(n) {
   const s = raw();
@@ -110,8 +168,24 @@ export function alterAccumulate(n) {
 export function alterLine() {
   const a = alterScore();
   if (Math.abs(a) < ALTER_INJECT_THRESHOLD) return "";
+  // ⚠️ 2026-10-26 修（主人点头做的，Q2「低心情时不注入」）：
+  // 原来 a<0 一律注入「今天的氛围松了，**可以稍微活泛一点**」。实测后果——
+  // 她心情 33（有点闷）、话已经很少、只想窝着的时候，这句话**每轮都在推她活泼**，
+  // 而同一份提示词里 `moodLabel()` 那条写的是「心情低就话少一点、别撒娇别闹」。
+  // **两条提示词直接打架**，而且打了好几轮都没人发现（它不报错、只是让她说话更别扭）。
+  //
+  // 现在的口径：**心情低的时候，氛围那条只描述、不推动**。
+  //   · mood < 45（「有点闷」及以下）→ 用中性描述，去掉「可以稍微活泛一点」这个祈使句；
+  //   · 心情正常 → 保留原句（那是她真的活泛起来的场合）。
+  // 判据为什么取 45：`moodLabel()` 的档位是 78/60/45/30/15，45 正好是「还行」的下界，
+  // 低于它就是「有点闷 / 低落 / 很丧」三档——那三档里推她活泼都是反着来的。
+  const lowMood = moodOf() < 45;
   const expr =
-    a >= 0 ? "今天的氛围偏正式、绷得紧一些，说话别太闹" : "今天的氛围松了，可以稍微活泛一点";
+    a >= 0
+      ? "今天的氛围偏正式、绷得紧一些，说话别太闹"
+      : lowMood
+        ? "今天这几轮聊得比较松（只是描述，别勉强自己活泼）"
+        : "今天的氛围松了，可以稍微活泛一点";
   const note = String(get("alterNote", "") ?? "").trim();
   return `[当前氛围：${expr}${note ? `（${note}）` : ""}（累积 ${a > 0 ? "+" : ""}${a}）]`;
 }
