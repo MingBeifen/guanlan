@@ -29,9 +29,9 @@
     "parallelChat": true,
     "busyAck": true,
     "chatMergeMax": 8,
-    "chatParallelGraceMs": 8000,
+    "chatParallelGraceMs": 60000,
     "busyAckCooldownMs": 300000,
-    "chatLaneMaxTokens": 400000,
+    "chatLaneMaxTokens": 120000,
     "rawTailMsgs": 20,
     "groupRawTailMsgs": 20,
     "stripTailPeriod": true,
@@ -50,33 +50,26 @@
     "cardMaxPerDay": 80,
     "overlayMaxPerKind": 8,
     "overlayInjectPerKind": 2,
-    "idleStopSteps": 3,
-    "egressAudit": true,
-    "egressAuditDir": "",
-    "holdReply": true,
-    "holdQuietMs": 4000,
-    "holdMaxMs": 25000,
-    "holdMaxMsgs": 4,
-    "holdMaxChars": 300,
-    "continuationMs": 60000,
-    "continuationMaxChars": 12
+    "chatLaneMaxSteps": 8,
+    "chatLaneNoTools": true,
+    "oweReply": true,
+    "owePerTurn": 2,
+    "outboxPrivateMaxAgeMs": 21600000,
+    "outboxGroupMaxAgeMs": 1800000,
+    "livePreview": true,
+    "threadHalfChars": 80,
+    "threadKeepHours": 12,
+    "threadMaxKeys": 5
   },
   "onebot": {
     "wsHost": "ws://127.0.0.1:3001",
     "token": ""
   },
-  "snowluma": {
-    "webuiHost": "http://127.0.0.1:5099",
-    "user": "admin",
-    "password": "",
-    "botUin": 0
-  },
   "group": {
     "enabled": false,
     "allow": [],
     "talkAllow": [],
-    "blockUsers": [],
-    "followUpMs": 4000
+    "blockUsers": []
   },
   "dsh": {
     "exe": "",

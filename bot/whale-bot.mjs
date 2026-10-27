@@ -6,7 +6,7 @@
 //  - 备忘/提醒由鲸鱼自己写 home 下的 notes.json / reminders.json，本进程负责到点发提醒
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import os from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -19,6 +19,7 @@ import { createOutbox } from "./outbox.mjs";
 import { createEgressAudit } from "./egress-audit.mjs";
 // 活动流水（2026-10-27 主人选的 B1 项）：她做过的事一条一行落盘，别只活在内存和轮转日志里。
 import { createActivityLog } from "./activity-log.mjs";
+import { createPendingSay } from "./pending-say.mjs";
 // 记忆库（2026-10-21 主人要的五层 + 打分 + 淡忘）：永久/长期/中期/短期由分数决定，
 // 面板和机器人共用 home\memory\store.json，改完热生效，不用重启。
 import * as memStore from "./memory-store.mjs";
@@ -164,9 +165,12 @@ const CFG = {
   groupRawTailMsgs: Number(KIT.bot?.groupRawTailMsgs) > 0 ? Number(KIT.bot.groupRawTailMsgs) : 20,
   groupEarsKeep: 10,
   groupEarEveryMsgs: 3, // 2026-10-20 11:5x 主人要她"自己判断"：连着说 3 句就判断一次（原 6）
-  // 2026-10-21 03:4x 主人定：主动插话（读空气）5 分钟冷却一次，到点才从最近几句里挑一句想接的；
+  // 2026-10-21 03:4x 主人定：主动插话（读空气）冷却一次，到点才从最近几句里挑一句想接的；
   // 被 @、被 QQ"回复"、被叫名字/绰号（点名类）不看这个冷却，直接判断回不回。
-  groupEarCooldownMs: 300000,
+  // 2026-10-27 16:1x 主人把 5 分钟改成 1 分钟（原话「那就改1分钟吧」）；改成可调：config.json → group.earCooldownMs
+  groupEarCooldownMs: Number.isFinite(Number(KIT.group?.earCooldownMs))
+    ? Math.max(0, Number(KIT.group.earCooldownMs))
+    : 60000,
   // 群聊节奏（2026-10-20 23:40 定两分钟，23:45 主人改成半分钟）：半分钟才开口一次，一次最多三句；
   // 窗口里的话先攒着不回声、也不丢，到点合成一轮全答完，让模型压进三句。
   groupSpeakGapMs: Number(KIT.group?.speakGapMs) || 30000,
@@ -240,13 +244,25 @@ const CFG = {
   // 背景实测：对话车道一轮 **4 步就吃 238,439 token**（新增仅 16.4%，其余是缓存重读），
   // 而平时一轮才 2–3 万。车道的意义是「先答一句」，不该在两条线里同时跑长活。
   // 按钱（token）卡而不是按步数卡——步数只是代理指标，token 才是账单。
-  // 默认 40 万 ≈ 正常一轮的 13 倍，够它查一次资料、读一个文件，但不至于烧穿。
+  // 默认 12 万（2026-10-27 从 40 万收紧，观澜点头）：40 万那档等于「烧到 40 万才掐」，
+  // 前面那截钱已经花了；12 万 ≈ 正常一轮的 4 倍，够它把一句答话说完整。
   // 写 0 = 关闭这条限制（退回只受 maxTokensPerTurn 约束）。
   chatLaneMaxTokens: (() => {
     const n = Number(KIT.bot?.chatLaneMaxTokens);
-    if (KIT.bot?.chatLaneMaxTokens == null) return 400000;
-    return Number.isFinite(n) && n >= 0 ? n : 400000;
+    if (KIT.bot?.chatLaneMaxTokens == null) return 120000;
+    return Number.isFinite(n) && n >= 0 ? n : 120000;
   })(),
+  // 对话车道的步数上限（2026-10-27 加，观澜的话点中的要害）：
+  // 「一百万不是一轮吃出来的，是步数乘着上下文溢出来的」——只压总 token 等于事后止损，
+  // 所以再按步数卡一道：车道轮 6–8 步就该说完一句了。写 0 = 关闭。
+  chatLaneMaxSteps: (() => {
+    const n = Number(KIT.bot?.chatLaneMaxSteps);
+    if (KIT.bot?.chatLaneMaxSteps == null) return 8;
+    return Number.isFinite(n) && n >= 0 ? n : 8;
+  })(),
+  // 对话车道不许调工具（2026-10-27 加，默认开）：车道里一动手，步数就开始滚，
+  // 直接交回主车道——主车道本来就在干同一件事。写 false 才放开。
+  chatLaneNoTools: KIT.bot?.chatLaneNoTools !== false,
   voiceEnabled: KIT.bot?.voiceEnabled === true, // 语音开关：config.json → bot.voiceEnabled（默认关）
   // 鱼味警告（2026-10-25 D 方案）：config.json → bot.fishWarn，默认 **开**。
   // 成本约等于零（纯正则在主进程里跑，不 spawn、不联网、不调模型），
@@ -276,12 +292,54 @@ const CFG = {
   // 只记账、不拦：拿 SnowLuma 日志里真正发出去的消息和发件箱的账对，
   // 抓「她直连 OneBot HTTP 口发消息」（那条路绕过发件箱/档案/白名单/频率闸）。
   egressAudit: KIT.bot?.egressAudit !== false,
+  // 审计去哪个目录读 SnowLuma 日志（默认 E:\SnowLuma\logs；换部署就改 config 里这一格）
   // 审计去哪个目录读 SnowLuma 日志。
   // 开源版：SnowLuma 装在哪由你决定——先看环境变量 WW_SNOWLUMA，再退回 C:\SnowLuma；
   // 也可以直接在 config.json 里写 bot.egressAuditDir。
   egressAuditDir: String(
     KIT.bot?.egressAuditDir ?? path.join(process.env.WW_SNOWLUMA || "C:\\SnowLuma", "logs"),
   ),
+  // 欠话台账（2026-10-27 主人选的 C 档「攒话」）：config.json → bot.oweReply，默认 **开**。
+  // 起因是她自己要的：「我想说的话先存在自己这儿，等你回来一口气说给你」。
+  // 关掉 = 不记也不补（她照旧散在半路上），不用改代码。
+  oweReply: KIT.bot?.oweReply !== false,
+  // 一次最多补几件（主人定 2）：一开口就倒一大段会变成报流水账。
+  owePerTurn: (() => {
+    const n = Number(KIT.bot?.owePerTurn);
+    if (KIT.bot?.owePerTurn == null) return 2;
+    return Number.isFinite(n) && n >= 1 ? Math.min(5, Math.floor(n)) : 2;
+  })(),
+  // 断点线程（2026-10-27 她本人拍的口径）：只记「停在哪句话 / 什么时候 / 跟谁说」，别的先别加。
+  // 半句靠流式预览（bin/live-patch.mjs 给子进程挂 NODE_OPTIONS --import），所以被打断也留得下。
+  livePreview: KIT.bot?.livePreview !== false,
+  threadHalfChars: (() => {
+    const n = Number(KIT.bot?.threadHalfChars);
+    if (KIT.bot?.threadHalfChars == null) return 80;
+    return Number.isFinite(n) && n >= 20 ? Math.min(200, Math.floor(n)) : 80;
+  })(),
+  threadKeepHours: (() => {
+    const n = Number(KIT.bot?.threadKeepHours);
+    if (KIT.bot?.threadKeepHours == null) return 12;
+    return Number.isFinite(n) && n > 0 ? Math.min(168, n) : 12;
+  })(),
+  threadMaxKeys: (() => {
+    const n = Number(KIT.bot?.threadMaxKeys);
+    if (KIT.bot?.threadMaxKeys == null) return 5;
+    return Number.isFinite(n) && n >= 1 ? Math.min(20, Math.floor(n)) : 5;
+  })(),
+  // 发件箱按类判过期（同日「攒话」B 档）：原来是**一刀切 10 分钟**，断网两小时回来
+  // 攒的私聊全被判过期丢掉。现在私聊主人 6 小时、群聊 30 分钟、内部播报仍是 10 分钟。
+  // config.json → bot.outboxPrivateMaxAgeMs / bot.outboxGroupMaxAgeMs 可覆盖（毫秒）。
+  outboxPrivateMaxAgeMs: (() => {
+    const n = Number(KIT.bot?.outboxPrivateMaxAgeMs);
+    if (KIT.bot?.outboxPrivateMaxAgeMs == null) return 6 * 3600 * 1000;
+    return Number.isFinite(n) && n > 0 ? n : 6 * 3600 * 1000;
+  })(),
+  outboxGroupMaxAgeMs: (() => {
+    const n = Number(KIT.bot?.outboxGroupMaxAgeMs);
+    if (KIT.bot?.outboxGroupMaxAgeMs == null) return 30 * 60 * 1000;
+    return Number.isFinite(n) && n > 0 ? n : 30 * 60 * 1000;
+  })(),
   // 每日小结发不发（2026-10-27 主人拍板）：config.json → bot.dailySummarySend，默认 **开**。
   // 主人原话：「每日小结关闭的话就只是不把小结发出来」——所以关掉**不影响写**：
   // 晚上那档照常写复盘进 `复盘.md`，只是发到 QQ 的那条不再提今天做了什么，
@@ -975,6 +1033,29 @@ const readJson = (file, fallback) => readJsonBom(file, fallback);
 
 function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", "utf8");
+}
+
+/**
+ * 先写 .tmp 再改名（2026-10-27 观澜自检提的第 3 条）。
+ * 她的话：「被杀在写一半读不出来，而且是静默丢；改成先写 tmp 再改名就稳」。
+ * 普通 writeFileSync 是「先截断再写」，进程正好死在中间 → 文件变成半截 JSON，
+ * readJsonBom 静默回 null，等于白记一场。改名在同一个盘上是原子的，要么旧内容、要么新内容。
+ */
+function writeJsonAtomic(file, value) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", "utf8");
+  try {
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    // 极少见（被别的进程锁住/杀软占用）：退回直接写，至少这次别丢
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* ignore */
+    }
+    fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", "utf8");
+    log(`[写盘] ${path.basename(file)} 改名失败，已退回直接写：${e?.message ?? e}`);
+  }
 }
 
 // ---- 公共小工具（2026-10-22 精简：原来这几种写法在全文散着几十份）----
@@ -2690,7 +2771,7 @@ function mayDownloadMedia(msg) {
 // 2026-10-20 02:10 主人让放宽：有关联的也能回，可以适当插话；加了话题词和每 6 句一次的判断，仍受 2 分钟冷却。
 // 2026-10-21 03:4x 主人重定节奏（原话：「将她的主动发言频率设定为5分钟冷却，只有在冷却结束时才挑一个感兴趣的内容主动回复（类似读空气那种），当有人@她回复她，提到她的名字时才无视这个冷却，直接回复（也可以把两个回复方式独立开）」）：
 //   ① 点名类（@、QQ“回复”她、叫名字/绰号、骂她）——不看冷却，直接判断接不接；
-//   ② 读空气（话题擦边、连说几句、问句）——5 分钟冷却，到点才从最近几句里挑一句想接的；
+//   ② 读空气（话题擦边、连说几句、问句）——冷却一次（2026-10-27 从 5 分钟改成 1 分钟），到点才从最近几句里挑一句想接的；
 //   两条时间线分开（lastJudgeKey / lastProactiveAt），点名那一下不占读空气的冷却。自检：node bot\whale-bot.mjs --ear-test
 // 回：真要回就用回复里写 [@号] 的方式 @ 回去；不想回就让模型只吐 [SKIP]。
 const groupEars = new Map(); // groupId -> { lines, lastJudgeAt, lastJudgeKey, lastProactiveAt, sinceJudge, awaitingAnswerUntil }
@@ -2887,7 +2968,7 @@ function earCandidate(text, ear) {
 }
 
 // 纯函数：这句群消息要不要惊动模型（不包含 earCandidate 的前置筛选）
-// 2026-10-21 主人定的两套口径：点名类直通、读空气 5 分钟一次。
+// 2026-10-21 主人定的两套口径：点名类直通、读空气一次冷却（10-27 改成 1 分钟）。
 function earGate(msg, spoken, ear, now = Date.now()) {
   const nightQuiet = inNightQuiet(now);
   // 小夜窗里只认真 @ / QQ 回复 / 戳一戳；叫名字、带号码都不算（2026-10-24 主人要的）
@@ -2906,7 +2987,7 @@ function earGate(msg, spoken, ear, now = Date.now()) {
       return { direct: true, ok: false, why: "同一句刚判过，不重复" };
     return { direct: true, ok: true, why: "点名类（@/回复/叫名字），不看冷却" };
   }
-  const cd = CFG.groupEarCooldownMs ?? 300000;
+  const cd = CFG.groupEarCooldownMs ?? 60000;
   // 主动（读空气）单独一条时间线：被点名那一下不占这边的冷却，两种方式互不影响
   const last = ear?.lastProactiveAt ?? 0;
   if (now - last < cd)
@@ -3061,11 +3142,37 @@ const egressAudit = createEgressAudit({
   log,
   enabled: CFG.egressAudit,
 });
+// 欠话台账（2026-10-27 主人选的 C 档）：她本来想说、但没赶上的话记在这里，下次开口补。
+// 放在 outbox 前面——发件箱过期丢消息时要往这里记一笔。
+const pendingSay = createPendingSay({
+  file: path.join(CFG.home, "state", "pending-say.jsonl"),
+  log,
+});
 const outbox = createOutbox({
   dir: CFG.home,
   log,
   isReady: () => wsReady,
   maxAgeMs: 10 * 60 * 1000,
+  // 按类判过期（同日 B 档）：私聊主人 6h / 群聊 30min / 其他（内部播报）仍是 10 分钟。
+  // 依据：断网半小时到两小时是常态，10 分钟就把私聊攒的话判死太狠；群里消息攒太久再发像诈尸。
+  maxAgeFor: (item) => {
+    if (item?.kind === "private") return CFG.outboxPrivateMaxAgeMs;
+    if (item?.kind === "group") return CFG.outboxGroupMaxAgeMs;
+    return 10 * 60 * 1000;
+  },
+  // 真的被过期丢掉时，别只写死信：往欠话台账记一件，让她下次开口时知道「有句话没送到」。
+  onDead: (item, info) => {
+    try {
+      if (info?.reason !== "expired") return;
+      if (item?.kind !== "private" && item?.kind !== "group") return;
+      pendingSay.add("say", {
+        why: `有一条想说的没发出去（放了 ${info.detail || "太久"}）`,
+        note: String(item.summary ?? "").slice(0, 40),
+      });
+    } catch {
+      /* 台账坏了不影响发件箱 */
+    }
+  },
   onSent: (item, payload, data) => {
     try {
       egressAudit.noteSelfSend(item.kind, item.target);
@@ -3947,6 +4054,211 @@ function aliasNoteBlock() {
   return lines.join("\n");
 }
 
+// ---------- 欠话台账（2026-10-27 主人选的 C 档「攒话」） ----------
+// 她自己提的：「你断网、或者我重启的时候，我想说的话先存在自己这儿，等你回来一口气说给你」。
+// 记的是「本来想干什么、为什么没成」，**不存原文**（没生成的东西没有原文，存猜测更糟）；
+// 取走即删，所以只在真正开口的轮次调（内部任务不取，免得把话吃在没人看的那一轮里）。
+const SAY_KIND_LABEL = {
+  night: "睡前那句晚安",
+  morning: "早上那句问候",
+  noon: "中午那句招呼",
+  greet: "一句问候",
+  task: "想做的事",
+  restart: "重启前没说完的话",
+  say: "想跟你说的话",
+};
+function oweBlock() {
+  if (!CFG.oweReply) return "";
+  let items = [];
+  try {
+    items = pendingSay.take(CFG.owePerTurn);
+  } catch (e) {
+    log(`[欠话] 取台账失败（不影响这轮）：${e?.message ?? e}`);
+    return "";
+  }
+  if (!items.length) return "";
+  const lines = items.map(
+    (it) =>
+      `- ${SAY_KIND_LABEL[it.kind] ?? "没说完的话"}：${it.why || "当时没赶上"}${
+        it.note ? `（${String(it.note).slice(0, 40)}）` : ""
+      }`,
+  );
+  try {
+    log(`[欠话] 这轮补上 ${items.length} 件，台账还剩 ${pendingSay.count()} 件`);
+  } catch {
+    /* ignore */
+  }
+  return (
+    "[还有几句没说完的话 · 之前没赶上，这轮顺口补上，别硬插成一段、别道歉三遍]\n" +
+    lines.join("\n")
+  );
+}
+
+// ---------- 断点线程（2026-10-27 她本人拍的口径） ----------
+// 她只要三件事：停在哪句话、什么时候、当时在跟谁说。「别的先别加。」所以这里不存心情/不存打算，
+// 只存免费事实：谁最后说了什么、她最后说了什么（或说到一半）。
+// 半句从哪来：流式预览（bin/live-patch.mjs 给子进程挂 NODE_OPTIONS --import），模型吐一片写一片。
+// 注意「被打断那半句从来进不了档案」——档案只在回复成功后写，所以这文件是唯一记得半句的地方。
+// 注意：用 let 是为了自检能把它指到临时文件——她 2026-10-27 自检提的第 1 条：
+// 「自检会把我的真 thread.json 删掉」「两个自检还共用一个文件」。
+let THREAD_PATH = path.join(CFG.home, "state", "thread.json");
+const LIVE_PATCH_PATH = path.join(CFG.root, "bin", "live-patch.mjs");
+let threadDoc = { last: {}, live: null };
+let threadLiveWroteAt = 0;
+let threadLiveWroteLen = 0;
+const threadInjected = new Set(); // 启动后哪些会话已经念过断点（一个会话只念一次）
+
+function loadThreadDoc() {
+  const d = readJsonBom(THREAD_PATH, null);
+  if (d && typeof d === "object") {
+    threadDoc = {
+      last: d.last && typeof d.last === "object" ? d.last : {},
+      live: d.live && typeof d.live === "object" ? d.live : null,
+    };
+  }
+  return threadDoc;
+}
+function pruneThreadDoc() {
+  const rows = Object.entries(threadDoc.last ?? {}).sort(
+    (a, b) => (Number(b[1]?.at) || 0) - (Number(a[1]?.at) || 0),
+  );
+  threadDoc.last = Object.fromEntries(rows.slice(0, Math.max(1, CFG.threadMaxKeys)));
+}
+function saveThreadDoc() {
+  try {
+    pruneThreadDoc();
+    writeJsonAtomic(THREAD_PATH, threadDoc);
+  } catch (e) {
+    log(`[断点] 写不进 thread.json（不影响这轮）：${e?.message ?? e}`);
+  }
+}
+// 80 字上限，但不硬砍：往前退到最近的标点，让她一眼能读完一整句（她 2026-10-27 的原话）。
+// 另：她 2026-10-27 自检补了一条——「半句开头常从字中间咬断」。确实会（这是尾巴的 80 字），
+// 所以截短时在开头补一个省略号，读的人一眼就知道「前面还有」。
+const HALF_BREAK = "。！？；，、,.!?;:：";
+function trimHalf(text, max = CFG.threadHalfChars) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || t.length <= max) return t;
+  const tail = t.slice(-max);
+  for (let i = tail.length - 1; i > 0; i -= 1) {
+    if (HALF_BREAK.includes(tail[i])) return `…${tail.slice(0, i + 1).trim()}`;
+  }
+  return `…${tail.trim()}`;
+}
+function threadWithLabel(key) {
+  const k = String(key ?? "");
+  if (k.startsWith("group:")) return `群里 ${k.slice(6)}`;
+  return "私聊";
+}
+// 一轮开始：把这轮的「起点」落到 live 上（pid + 这轮起来的时间，她要的「自己这轮写的就跳过」）
+function beginLiveThread(key, startedAt = Date.now()) {
+  if (!CFG.livePreview) return;
+  threadDoc.live = {
+    key: String(key),
+    with: threadWithLabel(key),
+    pid: process.pid,
+    bootAt: BOOT.at,
+    startedAt,
+    writtenAt: startedAt,
+    text: "",
+  };
+  threadLiveWroteAt = Date.now();
+  threadLiveWroteLen = 0;
+}
+// 流式分片进来：只累积，按「800ms 或攒够 40 字」写盘（她说别每吐一个字写一次盘）
+function noteLiveText(key, piece) {
+  if (!CFG.livePreview) return;
+  const live = threadDoc.live;
+  if (!live || live.key !== String(key) || Number(live.pid) !== process.pid) return;
+  const s = String(piece ?? "");
+  if (!s) return;
+  live.text = (live.text + s).slice(-4000);
+  const now = Date.now();
+  if (live.text.length - threadLiveWroteLen >= 40 || now - threadLiveWroteAt >= 800) {
+    live.writtenAt = now;
+    threadLiveWroteAt = now;
+    threadLiveWroteLen = live.text.length;
+    saveThreadDoc();
+  }
+}
+// 一轮成功：整轮覆盖成「说完的」那条（永久留一条，整机停一天也还在）
+function noteThreadTurn(key, { kind, sender, hisLast, myLast, startedAt } = {}) {
+  const k = String(key ?? "");
+  if (!k) return;
+  const now = Date.now();
+  threadDoc.last[k] = {
+    with:
+      kind === "group"
+        ? `群里 ${sender}（群 ${String(key).replace(/^group:/, "")}）`
+        : CFG.allowlist.includes(Number(sender))
+          ? "跟主人私聊"
+          : `跟 ${sender} 私聊`,
+    at: now,
+    startedAt: Number(startedAt) || now,
+    hisLast: String(hisLast ?? "").replace(/\s+/g, " ").slice(0, 60),
+    myLast: String(myLast ?? "").slice(0, 200),
+  };
+  if (threadDoc.live && threadDoc.live.key === k) threadDoc.live = null;
+  saveThreadDoc();
+}
+// 一轮失败（报错/撞预算/被掐），但进程还活着（2026-10-27 观澜自检提的第 2 条）：
+// 她说「半句只在进程死掉的时候才算数；报错、预算掐这类失败但没死的轮，半句下一轮一开就被顶掉，
+// 而且 pid 还是我自己，所以也不会念出来」。—— 完全对，这是真漏洞。
+// 这里把 live 标成「孤儿」：pid 记 0（不等于任何活着的进程），下一轮装配提示词时就认得出这是半句。
+// 同时把它从「这个会话念过了」里去掉——那轮失败时可能已经念过一次（prompt 先装配、再跑），
+// 不删的话这条半句就永远没机会说。
+function noteThreadFailure(key, r) {
+  const k = String(key ?? "");
+  if (!k) return;
+  const live = threadDoc.live;
+  if (!live || live.key !== k) return;
+  if (Number(live.pid) !== process.pid) return; // 别人留下的，不动
+  if (!String(live.text ?? "").trim()) {
+    threadDoc.live = null; // 一个字都没吐出来，没什么可留的
+    saveThreadDoc();
+    return;
+  }
+  threadDoc.live = {
+    ...live,
+    pid: 0,
+    failedAt: Date.now(),
+    failure: String(r?.error ?? "没答上来").slice(0, 80),
+  };
+  threadInjected.delete(k);
+  saveThreadDoc();
+  log(`[断点] 这一轮没说完（${threadDoc.live.failure}），半句留成「${trimHalf(live.text).slice(0, 20)}」`);
+}
+
+// 拼进提示词的四行（她定的格式）：只在启动后、这个会话第一次开口时念一次；12 小时外不念。
+function threadBlock(key, now = Date.now()) {
+  const k = String(key ?? "");
+  if (threadInjected.has(k)) return "";
+  const rec = threadDoc.last?.[k];
+  const live = threadDoc.live && threadDoc.live.key === k ? threadDoc.live : null;
+  const half = live && Number(live.pid) !== process.pid ? trimHalf(live.text) : "";
+  if (!rec && !half) return "";
+  const src = half ? live : rec;
+  const at = Number(src?.writtenAt || src?.startedAt || src?.at) || 0;
+  const ago = at ? Math.max(0, now - at) : 0;
+  // 12 小时外就不念了（半句也一样：烂了一整天的半句比没有更误导）。文件里那条不动。
+  if (!at || ago > CFG.threadKeepHours * 3600 * 1000) return "";
+  const startedAt = Number(src?.startedAt) || at;
+  const head = `[上次停在这儿 · ${ago < 60000 ? "刚才" : `${gapText(ago)}前`} · ${String(src?.with ?? "私聊")}${
+    startedAt ? `（那轮是 ${clockText(startedAt)} 起的）` : ""
+  }]`;
+  const lines = [head];
+  const hisLast = String(rec?.hisLast ?? "").trim();
+  if (hisLast) lines.push(`他最后说的：「${hisLast}」`);
+  if (half) lines.push(`上一句说到一半：${half}`);
+  else if (rec?.myLast) lines.push(`你最后说完的：「${String(rec.myLast).slice(-120)}」`);
+  lines.push("心里接着这个话头说（别从「你好」重开），但嘴上要把话说完整，不要从半截往外吐。");
+  threadInjected.add(k);
+  log(
+    `[断点] 这轮把「上次停在哪」写进提示词：${half ? `说到一半「${half.slice(0, 24)}」` : `说完的「${String(rec?.myLast ?? "").slice(-24)}」`}`,
+  );
+  return lines.join("\n");
+}
+
 // ---------- 主模型冷却（退过兜底就先直接用兜底，过一阵再回来试） ----------
 const COOLING_PATH = path.join(KIT_ROOT, "runtime", "model-cooldown.json");
 const MAIN_COOLDOWN_MS = 5 * 60 * 1000;
@@ -3981,7 +4293,18 @@ function clearMainModelCooling() {
 
 // permOverride（2026-10-21 加）：这一轮单独指定权限档，不给就按项目根开关文件走。
 // 群里不是主人说话时用它压成 read-only —— 写操作在 DSH 沙箱那层就被拒，不靠嘴上说"我不改"。
-function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
+// 重启收尾（2026-10-27 主人选的 C 档）：这一轮开始前留个脚印，跑完删掉。
+// 下次启动如果脚印还在、且已经过了 60 秒，就说明上一轮是被重启打断的 ——
+// 记一条欠话，让她回头自己接上。（Windows 上 kill 进程收不到 SIGTERM，只能事后补。）
+const IN_FLIGHT_PATH = path.join(CFG.home, "state", "in-flight.json");
+function clearInFlight() {
+  try {
+    fs.rmSync(IN_FLIGHT_PATH, { force: true });
+  } catch {
+    /* 删不掉就算了，下次启动最多多补一条欠话 */
+  }
+}
+function runWhale(task, sessionId, progKey, profileOverride, permOverride, liveKey = null) {
   return new Promise((resolve) => {
     const args = [
       "--expose-internals",
@@ -3994,6 +4317,24 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     args.push(task);
 
     const t0 = Date.now();
+    // 脚印要落盘（进程被杀时内存里的东西全没，只有文件活得下来）
+    try {
+      writeJson(IN_FLIGHT_PATH, {
+        at: t0,
+        progKey: String(progKey ?? "-").slice(0, 60),
+        pid: process.pid,
+      });
+    } catch {
+      /* 写不进去就少一条线索，不影响这一轮 */
+    }
+    // 断点线程：记下「这一轮从几点起、是谁在说」，流式分片会往 live.text 里续
+    if (liveKey) {
+      try {
+        beginLiveThread(liveKey, t0);
+      } catch {
+        /* 记不下就少一条半句，不影响这一轮 */
+      }
+    }
     const child = spawn(CFG.dshExe, args, {
       cwd: CFG.root,
       // 别在这里覆盖 TEMP/TMP —— 两条独立的坑（2026-10-16 实测，注释原先只说对一半）：
@@ -4010,6 +4351,14 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
         DSH_PERMISSION_MODE: permOverride || readPermissionMode(),
+        // 流式预览（2026-10-27）：只给「会说话的那一轮」挂，内部任务不挂（没必要多这一步）。
+        // loader 在加载期包住 --json 的投影模块，把我们额外订阅的 agent/assistant-stream 分片
+        // 吐成 {"type":"text_live"}；投影模块形态一变它就打印提示并原样放行（响亮退化）。
+        ...(liveKey && CFG.livePreview
+          ? {
+              NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(LIVE_PATCH_PATH).href}`.trim(),
+            }
+          : {}),
       },
       windowsHide: true,
     });
@@ -4034,6 +4383,10 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     // 而且会被外层 try/catch 吞成「这轮没答上来」。改那边的后缀时记得同步这里。
     const isChatLane = String(progKey || "").endsWith(":chat");
     const laneTokenCap = isChatLane ? CFG.chatLaneMaxTokens : 0;
+    // 车道轮的两道额外闸（2026-10-27）：步数上限 + 不许动手。
+    // 总 token 只能事后止损，真正把成本滚起来的是「步数 × 上下文」，所以先卡这两条。
+    const laneStepCap = isChatLane ? CFG.chatLaneMaxSteps : 0;
+    const laneNoTools = isChatLane && CFG.chatLaneNoTools;
     let budgetHits = "";
     let budgetSteps = 0;
     let budgetTokens = 0;
@@ -4095,6 +4448,9 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
               `token 超上限（${(budgetTokens / 1000000).toFixed(2)}M > ${(CFG.maxTokensPerTurn / 1000000).toFixed(1)}M）`,
             );
           // 对话车道单独上限：先于上面的通用预算生效（它更严格，早掐早省钱）
+          // 顺序：步数 → token。步数在前，因为「8 步」是比「12 万 token」更早出现的信号。
+          else if (laneStepCap > 0 && budgetSteps >= laneStepCap)
+            hitBudget(`对话车道步数超上限（${budgetSteps} ≥ ${laneStepCap} 步）`);
           else if (laneTokenCap > 0 && budgetTokens > laneTokenCap)
             hitBudget(
               `对话车道 token 超上限（${(budgetTokens / 10000).toFixed(1)}万 > ${(laneTokenCap / 10000).toFixed(0)}万）`,
@@ -4129,6 +4485,11 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
           /* 探针坏了也不能影响主流程 */
         }
       }
+      if (e?.type === "text_live") {
+        // 流式预览分片：只往断点线程的 live 里续，不进进度、不进正文字段
+        if (liveKey) noteLiveText(liveKey, e.text);
+        return;
+      }
       if (!progKey) return;
       const typ = e?.type;
       if (typ === "status" && e.phase === "step_start") {
@@ -4150,6 +4511,13 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
           ) || "工具";
         // 给慢步探针用：记住「这一步在调什么」，下一步变慢时能对上号（B2）
         lastToolName = nm;
+        // 对话车道不许动手（2026-10-27，观澜提的）：车道存在的意义是「先答一句」，
+        // 一旦开始查东西，它就会步数乘着上下文往上滚——那正是烧掉 850K 的那 21 步。
+        // 所以车道轮里出现任何工具调用，直接交回主车道（掐掉这一轮，主车道本来就在干同一件事）。
+        if (laneNoTools && !budgetHits) {
+          hitBudget(`对话车道想动手查东西（${nm}），这轮交回主车道`);
+          return;
+        }
         const rawArgs = e.arguments ?? e.args ?? e.input ?? e.call?.arguments;
         let detail = "";
         try {
@@ -4221,6 +4589,7 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     child.stderr.on("data", (d) => (err += d.toString("utf8")));
     child.on("error", (e) => {
       clearTimeout(timer);
+      clearInFlight();
       resolve({
         ok: false,
         error: `启动失败: ${e.message}`,
@@ -4229,6 +4598,7 @@ function runWhale(task, sessionId, progKey, profileOverride, permOverride) {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      clearInFlight();
       if (budgetKillTimer) clearTimeout(budgetKillTimer);
       if (killed) {
         // 两种被杀原因要说清：预算超了 vs 跑太久。用户看到的措辞不一样——
@@ -6890,8 +7260,48 @@ function enqueueChat(key, item) {
   enqueue(key, item);
 }
 
-/** 这个会话主车道那一轮的起始时刻（没在跑就给 0）。 */
-function currentTurnStartedAt(key) {
+/**
+ * 对话车道被掐掉之后，把这条原话还回主车道（2026-10-27 她自检提的）。
+ * 为什么必须还：车道那条是**抄件**——主车道那一轮只答自己手上那条，不会替它答，
+ * 所以车道一被掐（步数闸 / 工具闸 / token 闸），他这句话就等于石沉大海。
+ * 回话也不能用「你把它拆小点」：他又不是来派活的，他问的可能就是「余额多少」。
+ * 所以：原话排回主车道队列，嘴上只说一句实话「我这边正忙，等会儿答你」。
+ */
+function requeueToMainLane(key, item, opts = {}) {
+  const main = item?.memoryKey ?? key;
+  if (!main || String(main).endsWith(":chat")) return false;
+  if (item?.requeued) return false; // 已经还过一次，别再套娃（否则掐一次还一次，能无限循环）
+  if (item?.mode && item.mode !== "chat") return false; // 旁听/内部任务这类不该重排
+  const again = {
+    ...item,
+    laneKey: main,
+    memoryKey: main,
+    ownLane: false,
+    requeued: true,
+    laneOthers: null,
+    target: item?.target ?? undefined,
+  };
+  // 自检专用（2026-10-27 她提的）：只算「要不要还、还成什么样」，不真排进队列——
+  // 排进去会立刻 drain 出一轮真回复，等于拿现网当试验场、还花 token。
+  if (opts.dryRun) return again;
+  enqueue(main, again);
+  log(`对话车道被掐：这条原话已排回主车道队列（${main}），一会儿接着答`);
+  return true;
+}
+
+/**
+ * 一条用户消息在 handleOne 里该不该产生「入档 / 算心情」这些副作用（2026-10-27）。
+ * 车道掐掉后还回来的那条，原话在车道那一轮已经记过一次、心情也动过一次，
+ * 再走一遍就是「同一句夸两次」「档案里两遍」——少一条话你当场会发现，多记一次得几天后才看得出来。
+ */
+function userSideEffects(item) {
+  const skip = item?.requeued === true;
+  // activity = 「记进私聊对话密度」那一步。还回来的那条也不该再记一次：
+  // 同一句话在 90 分钟密度采样里出现两遍，等于她以为"他刚发过两句"，实际只有一句。
+  return { archive: !skip, mood: !skip, activity: !skip };
+}
+
+/** 这个会话主车道那一轮的起始时刻（没在跑就给 0）。 */function currentTurnStartedAt(key) {
   const p = liveProgress.get(progressLaneId(key, key));
   if (!p || p.done) return 0;
   return Number(p.startedAt) || 0;
@@ -7217,6 +7627,12 @@ function buildTurnPrompt(key, text, opts = {}) {
         fix(mem.mid),
         fix(mem.short),
       );
+    // 欠话台账（2026-10-27）：只在真正开口的轮次取，取走即删。
+    const owe = oweBlock();
+    if (owe) parts.push(fix(owe));
+    // 断点（2026-10-27 她拍的）：上次停在哪句话——启动后这个会话第一次开口时念一次
+    const thread = threadBlock(key);
+    if (thread) parts.push(fix(thread));
     parts.push(volatile);
     // 向量记忆每轮都不一样，放在最后，省得把前面稳定的前缀缓存冲掉
     if (opts.vectorBlock) parts.push(fix(opts.vectorBlock));
@@ -8701,6 +9117,8 @@ async function runTurn(key, prompt, opts = {}) {
   // L2：进度快照的键 = laneKey（没给就是 key 本身），runWhale 里所有进度读写都用它，
   // 否则双车道两条快照会互相覆盖（progressLaneId 里注释过这个坏点）。
   const progKey = progressLaneId(opts.laneKey, key);
+  // 断点线程只认「会说话的那一轮」：内部任务（写日记/压小结）不写 live，免得把自己的半句当成对话
+  const liveKey = opts.withHeader === true ? key : null;
 
   // 这一轮的工具权限（2026-10-21 主人定的「私聊之外只有他能让我改提示词」）：
   // 群里说话的不是主人，整轮就压成 read-only —— 改提示词 / 改配置 / 改代码这些写操作
@@ -8721,15 +9139,15 @@ async function runTurn(key, prompt, opts = {}) {
     const dir = fallbackProfile();
     if (dir) {
       log(`主模型还在冷却（还有 ${Math.ceil(cooling / 1000)}s），这轮直接用兜底`);
-      res = await runWhale(full, null, progKey, path.basename(dir), permMode);
+      res = await runWhale(full, null, progKey, path.basename(dir), permMode, liveKey);
       soak(res);
       fellBack = true;
     } else {
-      res = await runWhale(full, sessionId, progKey, null, permMode);
+      res = await runWhale(full, sessionId, progKey, null, permMode, liveKey);
       soak(res);
     }
   } else {
-    res = await runWhale(full, sessionId, progKey, null, permMode);
+    res = await runWhale(full, sessionId, progKey, null, permMode, liveKey);
     soak(res);
   }
 
@@ -8742,7 +9160,7 @@ async function runTurn(key, prompt, opts = {}) {
     log(`会话 ${sessionId} 不可用，丢弃并开新会话重试`);
     delete state.sessions[key];
     saveState();
-    res = await runWhale(full, null, progKey, null, permMode);
+    res = await runWhale(full, null, progKey, null, permMode, liveKey);
     soak(res); // 重试那次也是花了钱的，一起记账
   }
 
@@ -8755,7 +9173,7 @@ async function runTurn(key, prompt, opts = {}) {
         `主模型调不动（${res.error || "没答上来"}），退到官方 ${fallbackModel(loadKitConfig() || {}).model}`,
       );
       markMainModelCooling();
-      const fb = await runWhale(full, null, progKey, path.basename(dir), permMode);
+      const fb = await runWhale(full, null, progKey, path.basename(dir), permMode, liveKey);
       soak(fb);
       if (fb.ok) {
         fellBack = true;
@@ -8823,6 +9241,29 @@ async function handleOne(key, item, ctx = {}) {
     log(
       `内部任务 ${item.kind}：${r.ok ? "ok" : "失败 " + r.error}（${(r.ms / 1000).toFixed(1)}s）`,
     );
+    // 2026-10-27 加（诊断）：失败时把 stderr 尾巴打出来，并落到 turns.jsonl。
+    // 原来只打 r.error —— 那是「我这次没答上来（error, exit 1）」这种废话，
+    // 真正的原因（子进程起来就 exit 1 / 模型 400 / 权限拒绝）只在 stderr 里，被丢掉了。
+    // 10-27 凌晨 greet-night 连败 7 次、7 个 session 全是空 header，就是这么「查不出来」的。
+    if (!r.ok) {
+      const tail = String(r.stderr ?? "").trim().slice(-300).replace(/\s+/g, " ");
+      if (tail) log(`内部任务 ${item.kind}：stderr 尾巴 ${tail}`);
+      // 欠话台账：她本来要说的这句没生成出来，记一件，下次真正开口时补。
+      const sayKind = /^greet-night/.test(item.kind)
+        ? "night"
+        : /^greet-morning/.test(item.kind)
+          ? "morning"
+          : /^greet-noon/.test(item.kind)
+            ? "noon"
+            : /^greet/.test(item.kind)
+              ? "greet"
+              : "task";
+      try {
+        pendingSay.add(sayKind, { why: `${item.kind} 没生成出来（${r.error || "未知原因"}）` });
+      } catch (e) {
+        log("[欠话] 记账失败（不影响这轮）：", e?.message ?? e);
+      }
+    }
     logTurn({
       key: memKey,
       lane: laneKey !== memKey ? laneKey : undefined,
@@ -8835,6 +9276,7 @@ async function handleOne(key, item, ctx = {}) {
       tokens: r.usage,
       reason: r.reason,
       error: r.ok ? undefined : r.error,
+      stderr: r.ok ? undefined : String(r.stderr ?? "").slice(0, 300) || undefined,
       sid: r.sid,
     });
     return r;
@@ -8886,12 +9328,16 @@ async function handleOne(key, item, ctx = {}) {
   //   原来的「群里其他人说话也推 lastUserAt，免得她在别人聊天时凑过来」听着有理，
   //   实际后果是群一整天有人说话，她就永远不主动来找主人——而主人是在私聊里等她。
   //   凑不凑过来由 isQuiet()/高峰/心情那几道闸管，不该拿冷场计时兜。
+  // 副作用开关（2026-10-27 观澜自检提的）：车道掐掉后还回来的那条，
+  // 原话在车道那一轮已经入过档、算过心情、记过密度了，这里全部跳过。
+  const fx = userSideEffects(item);
   const speakerIsOwner = CFG.allowlist.includes(Number(sender));
-  noteUserActivity(Date.now(), {
-    forDensity: speakerIsOwner,
-    touchIdle: kind === "private",
-    touchOwnerAnywhere: speakerIsOwner,
-  });
+  if (fx.activity)
+    noteUserActivity(Date.now(), {
+      forDensity: speakerIsOwner,
+      touchIdle: kind === "private",
+      touchOwnerAnywhere: speakerIsOwner,
+    });
   // 心情跟着话走（本地判词，不花模型钱）：被夸就涨，被骂就掉。
   // 群里别人夸也算（轻一点），挨骂只认主人——免得路人一句话把心情按下去。
   //
@@ -8926,7 +9372,9 @@ async function handleOne(key, item, ctx = {}) {
   const hate = /废物|烦死|滚开|垃圾|讨厌你|去死|恶心/;
   // 亲昵信号：同句出现就不判骂（「喜欢你才跟你聊呀，笨蛋」）
   const fond = /喜欢你|爱你|喜欢|抱抱|贴贴|亲亲|摸摸|乖|宝宝|小宝|傻鱼|小鲸|我的/;
-  if (praise.test(moodBare)) {
+  // 还回主车道的那条（2026-10-27）：原话在车道那一轮已经入过档、算过心情了，
+  // 再走一遍会「同一句夸两次 / 档案里出现两遍」，所以心情和入档这几步跳过去，只把这一轮答出来。
+  if (fx.mood && praise.test(moodBare)) {
     // 2026-10-26（主人拍板「三条全做」）：被夸 +3 → **+6**。
     // 依据：档位宽度 15 分、被夸只 +3 → 安慰永远推不过边界，标签卡一整天，
     // 每轮提示词都在说同一句话，她就每轮再复述一遍（实测 07:12→11:33 五次被夸
@@ -8934,17 +9382,17 @@ async function handleOne(key, item, ctx = {}) {
     // 档位已同时拆成约 11 分一档（见 mood.mjs 的 moodLabel），+6 正好一步能跨过去。
     if (fromOwner) moodMove(6, "被夸了");
     else if (kind === "group") moodMove(1, "群里有人夸我");
-  } else if (hate.test(moodBare) && fromOwner && !fond.test(moodBare)) {
+  } else if (fx.mood && hate.test(moodBare) && fromOwner && !fond.test(moodBare)) {
     // 低分保护：已经「低落」（<15）或「很丧」（<30）时只扣 2，别雪上加霜。
     // 依据：2026-10-25 那天 11 → 4 → 0，两笔各 -7，等于同一天被扣穿。
     const cur = moodOf();
     const dmg = cur < 15 ? -1 : cur < 30 ? -2 : -7;
     moodMove(dmg, `被骂了（心情 ${cur}，扣 ${dmg}）`);
-  } else if (hate.test(moodBare) && fromOwner && fond.test(moodBare)) {
+  } else if (fx.mood && hate.test(moodBare) && fromOwner && fond.test(moodBare)) {
     // 这次没扣，但留一笔日志：以后要调白名单，靠这句知道被放过的是什么
     log(`判词：命中攻击词但有亲昵信号，没扣分：${brief(moodBare, 40)}`);
   }
-  appendArchive(memKey, "user", text);
+  if (fx.archive) appendArchive(memKey, "user", text);
   callAction("set_input_status", { user_id: sender, event_type: 1 }).catch(
     () => {},
   );
@@ -8978,6 +9426,12 @@ async function handleOne(key, item, ctx = {}) {
 
   if (!r.ok) {
     log("这一轮没答上来:", r.error, r.stderr ?? "");
+    // 断点：没死透的失败也要留半句（2026-10-27 她自检提的第 2 条）
+    try {
+      noteThreadFailure(key, r);
+    } catch (e) {
+      log(`[断点] 记这轮失败时出错了（不影响别的）：${e?.message ?? e}`);
+    }
     logTurn({
       key: memKey,
       lane: laneKey !== memKey ? laneKey : undefined,
@@ -8991,12 +9445,32 @@ async function handleOne(key, item, ctx = {}) {
       error: r.error,
       budget: r.budget,
       longTail: r.longTail === true ? true : undefined,
+      stderr: String(r.stderr ?? "").trim().slice(-300) || undefined,
       sid: r.sid,
     });
     // 预算超了（2026-10-24）：这是"活太大"，不是"她坏了"，措辞要分开，
     // 而且**群里不吱声**——群里的场景本来就不该主动播报自己的内部状态，
     // 说一句"这轮活太大"给满群看既没意义又出戏。私聊才解释一句。
     if (r.budget) {
+      // 对话车道被掐（2026-10-27 她自检提的第 3 条）：这条是抄件，主车道不会替它答，
+      // 所以先把原话排回主车道，再回一句实话。措辞不能是「你把它拆小点」——他不是来派活的。
+      const onChatLane = String(laneKey ?? "").endsWith(":chat");
+      if (kind === "private" && onChatLane) {
+        // 她 2026-10-27 提的空档：主车道要是恰好空着，排进去会立刻开跑，
+        // 那句「我这边正忙」就成了假话——他先收到「正忙」，两秒后又收到真答案。
+        // 所以还之前先看一眼主车道在不在跑：空着就什么都不说，答案自己会来。
+        const mainKey = String(item?.memoryKey ?? key);
+        const mainBusy = !!queues.get(mainKey)?.running;
+        let queued = false;
+        try {
+          queued = requeueToMainLane(key, item);
+        } catch (e) {
+          log(`[预算] 想把这句排回主车道没成功：${e?.message ?? e}`);
+        }
+        if (!queued) await reply(kind, target, "我这边卡了一下，你再说一遍？");
+        else if (mainBusy) await reply(kind, target, "我这边正忙，等会儿答你");
+        return r;
+      }
       if (kind === "private") {
         await reply(kind, target, "这活儿一时半会儿干不完，我先收手了——你把它拆小点再让我做？");
       } else {
@@ -9015,6 +9489,26 @@ async function handleOne(key, item, ctx = {}) {
     // 7 天 33 次失败里 30 次都是这个 error, exit 1。108a867 只修了 budget 那条分支，
     // 这条一直漏着——群里发生时等于对着满群报自己的内部状态，还带 exit 码。
     // 现在：私聊说一句人话（不提 exit / 错误码），群里只记日志不吱声。
+    // 车道被「非预算」的原因掐掉（报错、超时、被外部杀掉）走的是这条分支——
+    // 观澜 2026-10-27 挑的最后一个洞：这时候原话还攥在手里，却直接回一句「你再说一遍」，
+    // 等于让他白打一遍字。所以这里同样还回主车道；`requeued` 标记会挡住第二次，不会来回循环。
+    const onChatLaneFail = String(laneKey ?? "").endsWith(":chat");
+    if (kind === "private" && onChatLaneFail) {
+      const mainKeyF = String(item?.memoryKey ?? key);
+      const mainBusyF = !!queues.get(mainKeyF)?.running;
+      let queuedF = false;
+      try {
+        queuedF = requeueToMainLane(key, item);
+      } catch (e) {
+        log(`[失败] 想把这句排回主车道没成功：${e?.message ?? e}`);
+      }
+      if (queuedF) {
+        if (mainBusyF) await reply(kind, target, "我这一下没接上，等会儿再答你");
+      } else {
+        await reply(kind, target, "我这一下没接上话，你再说一遍？");
+      }
+      return r;
+    }
     if (kind === "private") {
       await reply(kind, target, "我这一下没接上话，你再说一遍？");
     } else {
@@ -9027,6 +9521,18 @@ async function handleOne(key, item, ctx = {}) {
     `回复 ${key}（${(r.ms / 1000).toFixed(1)}s，${r.text.length} 字，${r.usage?.total ?? 0} token）: ${r.text.slice(0, 80).replace(/\n/g, " ")}`,
   );
   noteBotSpoke(key); // B2：记下「她答完」的时刻，他下一句短话会被认成接话而不是新话题
+  // 断点（2026-10-27）：整轮答完就覆盖成「说完的」那条，半句（live）随之清掉
+  try {
+    noteThreadTurn(key, {
+      kind,
+      sender,
+      hisLast: text,
+      myLast: r.text,
+      startedAt: Date.now() - (Number(r.ms) || 0),
+    });
+  } catch (e) {
+    log(`[断点] 记这轮失败了（不影响回复）：${e?.message ?? e}`);
+  }
   logTurn({
     // ⚠️ 2026-10-26（B 项）：这里原来是 `key`（排队键）且**没有 lane 字段**。
     // 后果：双车道跑成功时，turns.jsonl 里看不出这一轮属于哪条 lane —— `grep '"lane"'`
@@ -13127,14 +13633,154 @@ if (process.argv.includes("--lane-cost-test")) {
 
   console.log("\n=== 二、配置项存在且合理 ===");
   ok("chatLaneMaxTokens 已配置", Number.isFinite(CFG.chatLaneMaxTokens), String(CFG.chatLaneMaxTokens));
-  ok("默认值 40 万", CFG.chatLaneMaxTokens === 400000, String(CFG.chatLaneMaxTokens));
+  // 2026-10-27 收紧：不再钉死 40 万，改成「必须 ≤ 12 万」——她说的「真锁死就写 ≤12 万」；
+  // 20 万那档等于给以后悄悄松口留了缝，不留。自检负责守住「别又松回去」这条线。
+  ok("车道闸锁死在 12 万以内", CFG.chatLaneMaxTokens > 0 && CFG.chatLaneMaxTokens <= 120000, String(CFG.chatLaneMaxTokens));
   ok("不是 0（0 会关掉这条限制）", CFG.chatLaneMaxTokens > 0);
+  ok(
+    "车道步数闸已配（6–10 步之间）",
+    CFG.chatLaneMaxSteps >= 6 && CFG.chatLaneMaxSteps <= 10,
+    String(CFG.chatLaneMaxSteps),
+  );
+  ok("车道不许动手默认开着", CFG.chatLaneNoTools === true);
   ok(
     "比通用单轮上限小或相等（它应该更严）",
     !(CFG.maxTokensPerTurn > 0) || CFG.chatLaneMaxTokens <= CFG.maxTokensPerTurn,
     `lane=${CFG.chatLaneMaxTokens} / 通用=${CFG.maxTokensPerTurn}`,
   );
+  // 两道新闸只写在 CFG 里不算数，得确认它们真的接进了 runWhale（这里直接读自己的源码比对）。
+  {
+    const selfSrc = fs.readFileSync(new URL(import.meta.url), "utf8");
+    ok(
+      "两道车道闸都接在 runWhale 里（拿 isChatLane 判的）",
+      /const laneStepCap = isChatLane \? CFG\.chatLaneMaxSteps : 0;/.test(selfSrc) &&
+        /const laneNoTools = isChatLane && CFG\.chatLaneNoTools;/.test(selfSrc),
+    );
+    const iStep = selfSrc.indexOf("对话车道步数超上限");
+    const iTok = selfSrc.indexOf("对话车道 token 超上限");
+    ok("步数闸排在 token 闸前面（更早的信号先掐）", iStep > 0 && iTok > 0 && iStep < iTok);
+    ok(
+      "车道里一调工具就掐掉并 return（不再往下走 progressTouch）",
+      /hitBudget\(`对话车道想动手查东西[\s\S]{0,120}?return;/.test(selfSrc),
+    );
+    ok(
+      "掐掉之后把原话还回主车道（不是回一句「拆小点」）",
+      /requeueToMainLane\(key, item\)/.test(selfSrc) &&
+        /我这边正忙，等会儿答你/.test(selfSrc),
+    );
+    ok(
+      "还回主车道这件事接在「private + 车道」的分支里",
+      /onChatLane = String\(laneKey \?\? ""\)\.endsWith\(":chat"\)/.test(selfSrc),
+    );
+    ok(
+      "还回来的那条不再重复入档、不再重复算心情",
+      /if \(fx\.archive\) appendArchive/.test(selfSrc) && /if \(fx\.mood && praise\.test/.test(selfSrc),
+    );
+  }
+  // 还回主车道：一律走 dryRun（只算「要不要还、还成什么样」，不真排进队列）。
+  // 真排进去会立刻 drain 出一轮真回复——那是拿现网当试验场，还会花 token。
+  {
+    const K = "private:selftest-requeue";
+    const lane = chatLaneKey(K);
+    const fake = { kind: "private", target: "1000000001", text: "余额多少", memoryKey: K, laneKey: lane, mode: "chat" };
+    const p1 = requeueToMainLane(lane, fake, { dryRun: true });
+    eq("会还：排到主车道键上", p1 && p1.laneKey, K);
+    eq("记忆键也换成主车道", p1 && p1.memoryKey, K);
+    eq("原话一字不改地带过去", p1 && p1.text, "余额多少");
+    eq("打上 requeued 标记（防套娃靠它）", p1 && p1.requeued, true);
+    eq("第二次再还就被拦住（不套娃）", requeueToMainLane(lane, p1, { dryRun: true }), false);
+    eq(
+      "车道键本身不接（防自己排给自己）",
+      requeueToMainLane(lane, { ...fake, memoryKey: lane }, { dryRun: true }),
+      false,
+    );
+    eq("旁听的不还", requeueToMainLane(K, { ...fake, mode: "ambient" }, { dryRun: true }), false);
+    eq("内部任务不还", requeueToMainLane(K, { ...fake, mode: "task" }, { dryRun: true }), false);
+    const fxNormal = userSideEffects(fake);
+    eq("普通消息要入档", fxNormal.archive, true);
+    eq("普通消息要算心情", fxNormal.mood, true);
+    const fxBack = userSideEffects(p1);
+    eq("还回来的那条不重复入档", fxBack.archive, false);
+    eq("还回来的那条不重复算心情", fxBack.mood, false);
+    const src2 = fs.readFileSync(new URL(import.meta.url), "utf8");
+    ok(
+      "dryRun 提前返回，不碰现网队列",
+      src2.indexOf("if (opts.dryRun) return again;") > 0 &&
+        src2.indexOf("if (opts.dryRun) return again;") < src2.indexOf("enqueue(main, again);"),
+    );
+  }
 
+
+  // 不带 dryRun 真走一遍 enqueue（观澜 2026-10-27 提的）：
+  // 先占住那个键、把 running 设成 true，drain 就起不来——于是能看清 enqueue 到底塞了什么进去，
+  // 又不花一个 token、不碰现网（这里是自检进程，队列只活在内存里）。
+  console.log("\n=== 还回主车道：真走一遍 enqueue（不 dryRun）===");
+  {
+    const K2 = "private:selftest-real";
+    const lane2 = chatLaneKey(K2);
+    queues.set(K2, { running: true, items: [] });
+    try {
+      const ok2 = requeueToMainLane(lane2, {
+        kind: "private",
+        target: "1000000001",
+        text: "余额多少",
+        memoryKey: K2,
+        laneKey: lane2,
+        mode: "chat",
+      });
+      eq("enqueue 那行真的走过了（返回 true）", ok2, true);
+      const q = queues.get(K2);
+      eq("队列里正好一条（没多排、没漏排）", q && q.items.length, 1);
+      eq("排进去的还是那句原话", q && q.items[0] && q.items[0].text, "余额多少");
+      eq("排进去的带着 requeued 标记", q && q.items[0] && q.items[0].requeued, true);
+      eq("排进去的键换成了主车道", q && q.items[0] && q.items[0].laneKey, K2);
+    } finally {
+      queues.delete(K2);
+    }
+    eq("测完把临时键删干净", queues.has(K2), false);
+  }
+
+  // 密度采样也得挡住（她提的第三处副作用）：同一句话别在 90 分钟密度里算两遍。
+  {
+    const src3 = fs.readFileSync(new URL(import.meta.url), "utf8");
+    eq("普通消息照常记密度", userSideEffects({}).activity, true);
+    eq("还回来的那条不重复记密度", userSideEffects({ requeued: true }).activity, false);
+    ok("handleOne 里真的用 if (fx.activity) 挡住了", /if \(fx\.activity\)/.test(src3));
+  }
+
+  // 最后那个洞（观澜 2026-10-27 提的）：车道被报错/超时掐掉时也要还回主车道，
+  // 否则原话还攥在手里却让主人「再说一遍」。
+  {
+    const src4 = fs.readFileSync(new URL(import.meta.url), "utf8");
+    // ⚠️ 2026-10-27 观澜第三次挑：上一版这两条只匹配字符串，而
+    //   「[失败] 想把这句排回主车道没成功」这串就写在 catch 里、`mainBusyF` 也是随便哪儿有就行——
+    //   把 try 里那行 requeue 删掉，它照样绿。现在改成**结构断言**：从 onChatLaneFail
+    //   到 return r 之间必须夹着 requeueToMainLane(key, item)，而且「先取 mainBusyF 再还」的顺序也锁住。
+    const iF = src4.indexOf("const onChatLaneFail");
+    const iReq = src4.indexOf("requeueToMainLane(key, item)", iF);
+    const iRet = src4.indexOf("return r;", iF);
+    const iBusy = src4.indexOf("const mainBusyF", iF);
+    ok("失败分支里有 onChatLaneFail 这个判据", iF >= 0);
+    ok(
+      "onChatLaneFail → return r 之间真的夹着 requeueToMainLane(key, item)",
+      iF >= 0 && iReq > iF && iRet > iReq,
+    );
+    ok("先取 mainBusyF（看主车道忙不忙）再还", iBusy > iF && iBusy < iReq);
+    // ⚠️ 2026-10-27 观澜第四次挑（方向反过来的同一个毛病）：
+    //   只要求「夹在 onChatLaneFail 和 return r 之间」的话，把 requeue 挪进 catch 也算夹着——
+    //   照样绿，可正常走完 try 的时候根本没还，只回一句「你再说一遍」。
+    //   所以再锁一层：requeue 必须落在 try { 之后、} catch 之前。
+    const iTry = src4.indexOf("try {", iF);
+    const iCatch = src4.indexOf("} catch", iTry);
+    ok(
+      "requeue 落在 try { 里面（不是躲进 catch）",
+      iTry > iF && iCatch > iTry && iReq > iTry && iReq < iCatch,
+    );
+    ok(
+      "排不回去才让他再说一遍（有兜底）",
+      /我这一下没接上话，你再说一遍？/.test(src4),
+    );
+  }
   console.log("\n=== 三、预算判定逻辑（复刻 step_end 里的三分支）===");
   // 复刻那三个 else if 的顺序：maxSteps → maxTokensPerTurn → laneTokenCap
   const judge = ({ steps, tokens, laneCap }) => {
@@ -13143,12 +13789,12 @@ if (process.argv.includes("--lane-cost-test")) {
     if (laneCap > 0 && tokens > laneCap) return "车道token";
     return null;
   };
-  const CAP = 400000;
-  eq("车道 39 万（未超）→ 不掐", judge({ steps: 10, tokens: 390000, laneCap: CAP }), null);
-  eq("车道 41 万（超了）→ 掐", judge({ steps: 10, tokens: 410000, laneCap: CAP }), "车道token");
+  const CAP = CFG.chatLaneMaxTokens;
+  eq("差 1 token 没到上限 → 不掐", judge({ steps: 10, tokens: CAP - 1, laneCap: CAP }), null);
+  eq("超上限 1 token → 掐", judge({ steps: 10, tokens: CAP + 1, laneCap: CAP }), "车道token");
   eq(
-    "刚好的 40 万（不超，因为用的是 > ）",
-    judge({ steps: 10, tokens: 400000, laneCap: CAP }),
+    "正好等于上限（不超，因为用的是 > ）",
+    judge({ steps: 10, tokens: CAP, laneCap: CAP }),
     null,
   );
   eq(
@@ -13156,11 +13802,11 @@ if (process.argv.includes("--lane-cost-test")) {
     judge({ steps: 10, tokens: 999999, laneCap: 0 }),
     null,
   );
-  // 实测那两轮：238439 不该被 40 万掐、849714 该被掐
+  // 实测那两轮：238439 现在会被 12 万掐（这正是收紧的目的）、849714 更该掐
   eq(
-    "实测 238,439（对话车道那轮）→ 40 万不掐",
+    "实测 238,439（对话车道那轮，4 步）→ 12 万闸会掐",
     judge({ steps: 4, tokens: 238439, laneCap: CAP }),
-    null,
+    "车道token",
   );
   eq(
     "实测 849,714（长活主车道）→ 若是车道会掐",
@@ -13454,6 +14100,7 @@ if (process.argv.includes("--profile-test")) {
 
 // ---------- 提示预览（只拼、不发、不花模型钱）：看下一轮开口的完整顺序 ----------
 if (process.argv.includes("--prompt-preview")) {
+  loadThreadDoc(); // 预演也要能看见「上次停在哪」（2026-10-27）
   const i = process.argv.indexOf("--prompt-preview");
   const t = process.argv[i + 1] || "(预览：这句话不会发出去)";
   // 第二个参数可选：private:... 或 group:...，用来分别看两套提示头
@@ -13702,7 +14349,7 @@ if (process.argv.includes("--busy-test")) {
 }
 
 // ---------- 群耳朵口径自检：不连 QQ、不花模型钱 ----------
-// 验证 2026-10-21 主人定的规矩：点名类不看冷却；读空气 5 分钟一次，到点从最近几句里挑一句。
+// 验证 2026-10-21 主人定的规矩：点名类不看冷却；读空气一次冷却（10-27 改成 1 分钟），到点从最近几句里挑一句。
 if (process.argv.includes("--ear-test")) {
   const gid = Number(CFG.groupAllow?.[0] ?? 1000000002);
   groupSpokeAt.set(gid, 0);
@@ -13728,10 +14375,10 @@ if (process.argv.includes("--ear-test")) {
   const cases = [
     ["@ 名字，主动冷却中", mk("观澜你刚才说啥"), ear({ lastProactiveAt: now })],
     ["QQ 引用回复她，主动冷却中", mk("这啥意思", { message: [{ type: "reply", data: { id: botMsg } }] }), ear({ lastProactiveAt: now })],
-    ["普通聊天，主动冷却还剩 4 分钟", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 60 * 1000 })],
-    ["普通聊天，主动冷却到点、有新话", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 301 * 1000 })],
-    ["主动冷却到点但没新话", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 301 * 1000, sinceJudge: 0 })],
-    ["主动冷却到点，刚说过话", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 301 * 1000 })],
+    ["普通聊天，主动冷却还剩半分钟", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 30 * 1000 })],
+    ["普通聊天，主动冷却到点、有新话", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 61 * 1000 })],
+    ["主动冷却到点但没新话", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 61 * 1000, sinceJudge: 0 })],
+    ["主动冷却到点，刚说过话", mk("今天吃点啥好"), ear({ lastProactiveAt: now - 61 * 1000 })],
     ["同一句点名不重复判断", mk("观澜在吗", { message_id: "same1" }), ear({ lastJudgeKey: `10001:same1` })],
   ];
   for (const [label, msg, e] of cases) {
@@ -14305,6 +14952,76 @@ if (process.argv.includes("--boot-notice-selftest")) {
   process.exit(bad ? 1 : 0);
 }
 
+// ---------- 欠话台账自检：不连 QQ、不花钱、不碰现网台账（2026-10-27） ----------
+// 用法：node bot/whale-bot.mjs --owe-test
+// 只用一个临时文件，跑完删掉；现网 home\state\pending-say.jsonl 一个字不动。
+if (process.argv.includes("--owe-test")) {
+  let bad = 0;
+  const eq = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    if (!ok) bad += 1;
+    console.log(`  ${ok ? "对 " : "错 "} ${name}${ok ? "" : `，得到 ${JSON.stringify(got)}、期望 ${JSON.stringify(want)}`}`);
+  };
+  const tmpFile = path.join(os.tmpdir(), `ww-owe-test-${process.pid}.jsonl`);
+  let T = 1_800_000_000_000;
+  const clock = () => T;
+  const P = createPendingSay({ file: tmpFile, now: clock });
+
+  console.log("【记账层】add / peek / take");
+  P.add("night", { why: "greet-night 没生成出来" });
+  eq("记了一条", P.count(), 1);
+  eq("peek 拿得到", P.peek(2)[0].kind, "night");
+  T += 5000;
+  P.add("night", { why: "greet-night 没生成出来" });
+  eq("同一类同一理由 5 分钟内不重复记", P.count(), 1);
+  T += 4000;
+  P.add("task", { why: "写日记失败了" });
+  eq("换一类就记", P.count(), 2);
+  const got = P.take(2);
+  eq("take 一次最多 2 条", got.length, 2);
+  eq("take 完台账就空了", P.count(), 0);
+  eq("take 出来的顺序是先进先出", got.map((x) => x.kind), ["night", "task"]);
+
+  console.log("\n【过期层】按类过期");
+  const P2 = createPendingSay({ file: tmpFile, now: clock });
+  T += 1000;
+  P2.add("night", { why: "晚安没说完" });
+  P2.add("task", { why: "找事没做完" });
+  T += 3 * 3600 * 1000; // 3 小时后
+  eq("3 小时后：找事（2h）过期了", P2.peek(5).map((x) => x.kind), ["night"]);
+  T += 10 * 3600 * 1000; // 再 10 小时（共 13 小时）
+  eq("13 小时后：晚安（12h）也过期了", P2.peek(5), []);
+
+  console.log("\n【上限层】最多留 40 条");
+  const P3 = createPendingSay({ file: tmpFile, now: clock });
+  for (let i = 0; i < 45; i++) {
+    T += 6000;
+    P3.add("task", { why: `第 ${i} 件` });
+  }
+  eq("超上限只留 40 条", P3.count(), 40);
+  eq("丢的是最老的，最新那条还在", P3.peek(40).at(-1).why, "第 44 件");
+  eq("剩下的从第 5 件开始", P3.peek(1)[0].why, "第 5 件");
+
+  console.log("\n【接线层】开关与文案");
+  const saved = { ...CFG };
+  CFG.oweReply = false;
+  eq("开关关掉就不取台账", oweBlock(), "");
+  CFG.oweReply = true;
+  eq("现网 owePerTurn 默认 2", CFG.owePerTurn, 2);
+  eq("现网 oweReply 默认开", CFG.oweReply, true);
+  Object.assign(CFG, saved);
+  eq("私聊过期时长 6 小时", CFG.outboxPrivateMaxAgeMs, 6 * 3600 * 1000);
+  eq("群聊过期时长 30 分钟", CFG.outboxGroupMaxAgeMs, 30 * 60 * 1000);
+
+  try {
+    fs.rmSync(tmpFile, { force: true });
+  } catch {
+    /* 删不掉也不影响判断 */
+  }
+  console.log(bad ? `\n有 ${bad} 条不对` : "\n全部符合预期");
+  process.exit(bad ? 1 : 0);
+}
+
 // ---------- 语音链路自检：真走 synthVoice()，验证引擎/语气/落盘/峰值（2026-10-25） ----------
 // 用法：node bot/whale-bot.mjs --voice-test ["自定义台词"]
 // 不连 QQ、不写档案、不发消息，只合成一个 mp3 打到临时目录然后删掉。
@@ -14421,6 +15138,203 @@ if (process.argv.includes("--asr-test")) {
   process.exit(bad ? 1 : 0);
 }
 
+// ---------- 断点线程自检（2026-10-27）----------------------------------------
+// 用法：node bot/whale-bot.mjs --thread-test
+// 只测纯逻辑（trimHalf / threadBlock / live 累积与去重）。
+// ⚠️ 2026-10-27（观澜自检第 1 条）：原来这里读真 thread.json 当备份、跑完再写回去，
+//    而 --live-preview-test 更干脆——跑完无条件 rm。她那句「18:38 那趟一跑，『嗨』那条就没了」
+//    就是这么来的。现在两个自检各用各的临时文件，谁都不碰真的。
+if (process.argv.includes("--thread-test")) {
+  let bad = 0;
+  const eq = (name, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    if (!ok) bad += 1;
+    console.log(`  ${ok ? "对 " : "错 "} ${name}${ok ? "" : `，得到 ${JSON.stringify(got)}、期望 ${JSON.stringify(want)}`}`);
+  };
+  const realThreadPath = THREAD_PATH;
+  const realBefore = (() => {
+    try {
+      return fs.readFileSync(realThreadPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  THREAD_PATH = path.join(CFG.home, "state", "thread.selftest.json");
+  // 她（观澜）指出的口径问题：只看「真文件还在不在」是**空的**——
+  // 跑之前真文件本来就不在（或者被现网改写了），这条断言就自动过、什么也没证。
+  // 所以这里补一条**指向性**断言：自检期间 THREAD_PATH 必须已经不是真文件了。
+  // （不做前后逐字节比对：现网那一轮随时会重写 thread.json，比出来是噪声。）
+  eq("自检期间 THREAD_PATH 指向临时文件", THREAD_PATH !== realThreadPath, true);
+  try {
+    fs.rmSync(THREAD_PATH, { force: true });
+  } catch {
+    /* ignore */
+  }
+  const savedCfg = { half: CFG.threadHalfChars, keep: CFG.threadKeepHours, max: CFG.threadMaxKeys, live: CFG.livePreview };
+  const K = "private:1000000001";
+  const NOW = 1_800_000_000_000;
+
+  console.log("【切半层】80 字上限但不硬砍");
+  const long = "一二三四五六七八九十".repeat(12) + "，";
+  eq("短句原样返回", trimHalf("摸摸头", 80), "摸摸头");
+  const cut = trimHalf(`${long}我这就把尾巴甩起来`, 80);
+  eq("不硬砍：落在标点上", /[。！？；，、,.!?;:：]$/.test(cut), true);
+  eq("长度不超上限", cut.length <= 80, true);
+  const noPunc = "字".repeat(200);
+  eq("没有标点就按 80 硬切（去掉开头省略号正好 80）", trimHalf(noPunc, 80).replace(/^…/, "").length, 80);
+  eq("空白压缩", trimHalf("  我   说 完  了。 ", 80), "我 说 完 了。");
+
+  console.log("\n【写法】一轮开始 → 说完；被打断 → 留半句");
+  threadDoc = { last: {}, live: null };
+  threadInjected.clear();
+  beginLiveThread(K, NOW - 30 * 60 * 1000);
+  eq("live 记了 pid", threadDoc.live.pid, process.pid);
+  eq("live 记了起点", threadDoc.live.startedAt, NOW - 30 * 60 * 1000);
+  eq("live 记了跟谁", threadDoc.live.with, "私聊");
+  noteLiveText(K, "小宝宝");
+  eq("分片累积", threadDoc.live.text, "小宝宝");
+  noteLiveText("private:other", "不该进的");
+  eq("别的会话不串台", threadDoc.live.text, "小宝宝");
+  noteThreadTurn(K, { kind: "private", hisLast: "小宝宝", myLast: "在的在的，我尾巴摇过来了。", startedAt: NOW - 30 * 60 * 1000 });
+  eq("说完后 live 清掉", threadDoc.live, null);
+  eq("last 里有他最后一句", threadDoc.last[K].hisLast, "小宝宝");
+  eq("last 里有她最后一句", threadDoc.last[K].myLast, "在的在的，我尾巴摇过来了。");
+  threadInjected.clear();
+  const b1 = threadBlock(K, NOW);
+  eq("四行里第一行是锚点", /^\[上次停在这儿 · /.test(b1), true);
+  eq("带「他最后说的」", /他最后说的：「小宝宝」/.test(b1), true);
+  eq("带「你最后说完的」", /你最后说完的：「.*我尾巴摇过来了/.test(b1), true);
+  eq("最后一句是自我约束", /嘴上要把话说完整/.test(b1), true);
+  eq("同一会话只念一次", threadBlock(K, NOW + 1000), "");
+  threadInjected.clear();
+  eq("12 小时外不念", threadBlock(K, NOW + 13 * 3600 * 1000), "");
+
+  console.log("\n【被打断】上一版进程的 live 还在");
+  threadDoc = { last: {}, live: null };
+  threadInjected.clear();
+  threadDoc.live = {
+    key: K,
+    with: "私聊",
+    pid: process.pid + 1,
+    bootAt: NOW - 2000,
+    startedAt: NOW - 2000,
+    writtenAt: NOW - 1000,
+    text: "海水是咸的，主要是因为盐分攒出来的，雨水把岩石里的盐冲进海里，海水一蒸发盐就留在",
+  };
+  const b2 = threadBlock(K, NOW);
+  eq("半句单独一行（不装成她的原话引号）", /^上一句说到一半：海水是咸的/m.test(b2), true);
+  eq("半句按标点收尾", /上一句说到一半：[^\n]*。$/m.test(b2) || /上一句说到一半：[^\n]*，/m.test(b2), true);
+  eq("不会同时给「说完的」", /你最后说完的/.test(b2), false);
+  eq("自己是这轮写的（pid 相同）就不算被打断", (() => {
+    threadInjected.clear();
+    threadDoc.live.pid = process.pid;
+    return threadBlock(K, NOW);
+  })(), "");
+
+  console.log("\n【没说完】进程没死，但这一轮失败了（她自检第 2 条）");
+  threadDoc = { last: {}, live: null };
+  threadInjected.clear();
+  beginLiveThread(K, NOW - 1000);
+  noteLiveText(K, "我给你讲讲海水为什么");
+  noteThreadFailure(K, { error: "我这次没答上来（error, exit 1）" });
+  eq("失败后半句还留着", threadDoc.live?.text, "我给你讲讲海水为什么");
+  eq("pid 置 0（不再冒充活着的进程）", threadDoc.live?.pid, 0);
+  eq("记了失败原因", threadDoc.live?.failure, "我这次没答上来（error, exit 1）");
+  threadInjected.clear();
+  eq("下一轮会把它念出来", /上一句说到一半：我给你讲讲海水为什么/.test(threadBlock(K, NOW)), true);
+  threadDoc = { last: {}, live: null };
+  beginLiveThread(K, NOW);
+  noteThreadFailure(K, { error: "一个字没吐" });
+  eq("一个字没吐就不留半句", threadDoc.live, null);
+
+  console.log("\n【写盘】先写 tmp 再改名，不留残渣（她自检第 3 条）");
+  threadDoc = {
+    last: { [K]: { with: "私聊", at: NOW, startedAt: NOW, hisLast: "x", myLast: "y" } },
+    live: null,
+  };
+  saveThreadDoc();
+  eq("没有残留 .tmp", fs.existsSync(`${THREAD_PATH}.tmp`), false);
+  eq("读回来能解析", typeof readJsonBom(THREAD_PATH, null), "object");
+  eq("半句开头带省略号（提示前面还有）", trimHalf("字".repeat(200), 80).startsWith("…"), true);
+
+  console.log("\n【上限】只留 N 个会话");
+  threadDoc = { last: {}, live: null };
+  for (let i = 0; i < 9; i += 1) {
+    threadDoc.last[`private:${i}`] = { with: "私聊", at: NOW + i * 1000, startedAt: NOW, hisLast: "x", myLast: "y" };
+  }
+  pruneThreadDoc();
+  eq("最多留 5 个会话", Object.keys(threadDoc.last).length, 5);
+  eq("留的是最新的", Object.keys(threadDoc.last).includes("private:8"), true);
+  eq("最老的被挤掉", Object.keys(threadDoc.last).includes("private:0"), false);
+
+  CFG.threadHalfChars = savedCfg.half;
+  CFG.threadKeepHours = savedCfg.keep;
+  CFG.threadMaxKeys = savedCfg.max;
+  CFG.livePreview = savedCfg.live;
+  threadDoc = { last: {}, live: null };
+  threadInjected.clear();
+  try {
+    fs.rmSync(THREAD_PATH, { force: true });
+  } catch {
+    /* ignore */
+  }
+  THREAD_PATH = realThreadPath; // 立刻还回去，别让后面任何一步沾到真的
+  const realAfter = (() => {
+    try {
+      return fs.readFileSync(realThreadPath, "utf8");
+    } catch {
+      return null;
+    }
+  })();
+  eq("跑完把 THREAD_PATH 还回真文件", THREAD_PATH === realThreadPath, true);
+  eq("真 thread.json 没被自检删掉", realBefore === null ? true : fs.existsSync(realThreadPath), true);
+  console.log(`  （现网：半句上限 ${CFG.threadHalfChars} 字、保留 ${CFG.threadKeepHours} 小时、最多 ${CFG.threadMaxKeys} 个会话、流式预览 ${CFG.livePreview ? "开" : "关"}）`);
+  console.log(bad ? `\n有 ${bad} 条不对` : "\n全部符合预期");
+  process.exit(bad ? 1 : 0);
+}
+
+// ---------- 流式预览自检（2026-10-27）--------------------------------------
+// 用法：node bot/whale-bot.mjs --live-preview-test
+// 真跑一轮（花一次模型钱，约几厘）：验证「spawn 挂 NODE_OPTIONS → loader 注入 → text_live 分片 → 累积进 live」整条链。
+// ⚠️ 2026-10-27（观澜自检第 1 条）：跑完**不许**删真 thread.json，改用临时文件。
+if (process.argv.includes("--live-preview-test")) {
+  const realThreadPath = THREAD_PATH;
+  THREAD_PATH = path.join(CFG.home, "state", "thread.livetest.json");
+  try {
+    fs.rmSync(THREAD_PATH, { force: true });
+  } catch {
+    /* ignore */
+  }
+  loadThreadDoc();
+  threadDoc = { last: {}, live: null };
+  threadInjected.clear();
+  const t0 = Date.now();
+  const r = await runWhale(
+    "用中文说一句二十个字左右的问候，不要用任何工具，不要解释",
+    null,
+    "live-preview-test",
+    null,
+    "read-only",
+    "private:selftest",
+  );
+  const live = threadDoc.live;
+  const acc = String(live?.text ?? "");
+  const half = trimHalf(acc);
+  console.log(`一轮结果：ok=${r.ok}（${((Date.now() - t0) / 1000).toFixed(1)}s），正文 ${String(r.text ?? "").length} 字`);
+  console.log(`流式分片累积：${acc.length} 字；${acc ? "链通了" : "没收到 text_live（loader 没生效或开关关了）"}`);
+  console.log(`半句预览（按标点收尾）：${half}`);
+  console.log(`live.pid=${live?.pid} 本轮 pid=${process.pid} 起点=${live ? clockText(live.startedAt) : "-"}`);
+  console.log(`thread.json：${fs.existsSync(THREAD_PATH) ? "已写盘" : "没写盘"} ${THREAD_PATH}`);
+  threadDoc = { last: {}, live: null };
+  try {
+    fs.rmSync(THREAD_PATH, { force: true });
+  } catch {
+    /* ignore */
+  }
+  THREAD_PATH = realThreadPath;
+  process.exit(acc.length > 0 ? 0 : 1);
+}
+
 // ---------- 启动 ----------
 log("===== 小鲸鱼机器人启动 =====");
 // 先把自己的出生时刻落盘，再起心跳：下一次启动靠这个文件认出「我是重启回来的」（2026-10-22）
@@ -14458,10 +15372,42 @@ pruneMedia();
 backfillGroupNicksFromArchive();
 // 记忆库迁移（2026-10-21）：把老的底账/日子账/当天小结搬进库，只搬一次（有 flag）
 migrateAllKeys();
+// 重启收尾（2026-10-27 主人选的 C 档）：上一轮要是被重启打断（脚印还在、且不是刚起步就崩），
+// 就记一条欠话，让她下次开口时接着说完，而不是当作没发生过。
+try {
+  const flight = readJsonBom(IN_FLIGHT_PATH, null);
+  if (flight && Number(flight.at) > 0 && Date.now() - Number(flight.at) > 60 * 1000) {
+    const mins = Math.round((Date.now() - Number(flight.at)) / 60000);
+    pendingSay.add("restart", {
+      why: `上一轮「${String(flight.progKey ?? "-").slice(0, 40)}」跑到一半被重启打断（${mins} 分钟前）`,
+    });
+    log(`[欠话] 重启打断了上一轮（${mins} 分钟前，「${flight.progKey ?? "-"}」），已记账`);
+  }
+} catch {
+  /* 读不到就什么都没有，不影响启动 */
+} finally {
+  clearInFlight();
+}
+// 断点线程（2026-10-27）：读出上一次停在哪；如果是上一版进程留下的 live，说明那轮被打断了
+try {
+  loadThreadDoc();
+  const live = threadDoc.live;
+  if (live && Number(live.pid) !== process.pid) {
+    const half = trimHalf(live.text);
+    log(
+      `[断点] 上一版被打断，停在${half ? `「${half.slice(0, 30)}」` : "还没吐出字的地方"}（${String(live.with ?? "私聊")}，${live.startedAt ? clockText(live.startedAt) : "-"} 起的那轮）`,
+    );
+  }
+} catch (e) {
+  log(`[断点] 读 thread.json 失败（不影响启动）：${e?.message ?? e}`);
+}
 outbox.start(); // 发件箱：先把上次没发完的接着发（连接起来之前泵会等着）
 connect();
 // 出站审计（2026-10-27 主人选的 B 项）：连上之后才开始对账（没连上时日志里也没东西可对）
 egressAudit.start();
+log(
+  `断点：${CFG.livePreview ? "流式预览开（半句也留得下）" : "流式预览关（只能记说完的）"}；半句上限 ${CFG.threadHalfChars} 字、保留 ${CFG.threadKeepHours} 小时、最多 ${CFG.threadMaxKeys} 个会话`,
+);
 // 活动流水（B1）：把「启动一次」也记一笔，省得以后只有「发过什么」没有「活过几次」
 activityLog.append({
   kind: "boot",
