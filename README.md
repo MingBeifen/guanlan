@@ -110,6 +110,15 @@
 
 > 令牌必须走地址里的 `?access_token=`，包已经这么拼了。填错会看到 `retcode 1403 token验证失败`：能听见你说话，但一句也发不出去。
 
+#### 也可以换成 SnowLuma（可选）
+
+NapCat 只是 OneBot v11 的一种实现，SnowLuma 也可以——它更轻，但它**不启动 QQ**，而是往已经在跑的 QQ 进程里注入：
+
+- 机器人号要用**单独的 profile** 开第二个 QQ 实例（同一个客户端只能登一个号），别去注入你自己那个号
+- `config.json` 里填 `snowluma.user` / `snowluma.password`（它 WebUI 的登录凭据）、`snowluma.botUin`（机器人号）
+- 开机自启认三个环境变量：`WW_ONEBOT=snowluma`、`WW_SNOWLUMA=<SnowLuma 目录>`、`WW_QQ_PROF=<机器人号的 QQ profile 目录>`
+- 注入与**账号核对**由 `bin/snowluma-inject.mjs` 做：注错号会立刻卸载，不会拿你的身份说话
+
 ### 3. 启动
 
 双击 `start.bat`。窗口里出现「机器人起来了（PID …）」就成。这个窗口别关，关了机器人就停（重新开就自动重连）。挂了它自己五秒后重拉。

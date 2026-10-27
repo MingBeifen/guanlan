@@ -72,7 +72,7 @@ console.log('回车 = 保留方括号里的原值。\n');
 
 // 1. QQ
 cfg.bot = cfg.bot || {};
-cfg.bot.qq = await askNum('机器人自己的 QQ 号（NapCat 要登的那个）', cfg.bot.qq || '');
+cfg.bot.qq = await askNum('机器人自己的 QQ 号（OneBot 实现要登的那个）', cfg.bot.qq || '');
 
 // 1.5 名字：这里不再正式问（定成彩蛋了）。取过名字就显示一下，想换直接输新的。
 const oldName = String(cfg.bot.name || '').trim();
@@ -94,10 +94,13 @@ const owners = (await ask('谁能指挥它（你的 QQ 号，多个用逗号分�
   .split(/[,，\s]+/).map(Number).filter(Boolean);
 cfg.bot.owners = owners.length ? owners : [0];
 
-// 2. NapCat
-cfg.napcat = cfg.napcat || {};
-cfg.napcat.wsHost = await ask('NapCat 的 OneBot WebSocket 地址', cfg.napcat.wsHost || 'ws://127.0.0.1:3001');
-cfg.napcat.token = await ask('这个 WebSocket 的 token（没设就留空）', cfg.napcat.token || '');
+// 2. OneBot（NapCat / SnowLuma / Lagrange 都行，只要它实现了 OneBot v11）
+// 2026-10-27：键名从 napcat 改成 onebot，因为实现换了不该意味着配置键也要换。
+// 老配置里如果只有 napcat 段，这里把它搬过来，别让用户重填一遍。
+cfg.onebot = cfg.onebot || cfg.napcat || {};
+delete cfg.napcat;
+cfg.onebot.wsHost = await ask('OneBot 的 WebSocket 地址（NapCat/SnowLuma 都是这个）', cfg.onebot.wsHost || 'ws://127.0.0.1:3001');
+cfg.onebot.token = await ask('这个 WebSocket 的 token（没设就留空）', cfg.onebot.token || '');
 
 // 3. 群
 const g = await ask('要不要开群聊？开就填群号，多个逗号分隔；不开直接回车', (cfg.group?.allow || []).join(','));
@@ -187,8 +190,8 @@ if (exe) {
 
 console.log(`
 接下来三件（做过的跳过）：
-  1. 装 NapCatQQ，登机器人那个 QQ 号（扫码）；
-  2. NapCat 里开 WebSocket 服务器，端口跟上面地址一致（默认 3001），token 跟填的一样；
+  1. 装一个 OneBot v11 实现（NapCatQQ 或 SnowLuma），登机器人那个 QQ 号（扫码）；
+  2. 在它里面开 WebSocket 服务器，端口跟上面地址一致（默认 3001），token 跟填的一样；
   3. 双击「start.bat」，然后在 QQ 里跟它说句话。
 
 要改人设：编辑 home\\AGENTS.md；要发新包：找做这个包的人。

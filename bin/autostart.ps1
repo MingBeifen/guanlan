@@ -1,4 +1,4 @@
-﻿# 开机自启：等桌面起来 → 拉 NapCat/QQ → 拉看门人（机器人+面板）
+﻿# 开机自启：等桌面起来 → 拉起 OneBot 实现（NapCat 或 SnowLuma）→ 拉看门人（机器人+面板）
 # 由计划任务 WhaleKit-Autostart 在登录时以最高权限调用。
 #
 # 【2026-10-22 重要】计划任务是 RunLevel=Highest，跑起来是 High 完整性。
@@ -11,8 +11,19 @@ param([switch]$Delevated)
 $ErrorActionPreference = 'Continue'
 # 开源版：包根不再写死，从脚本自身位置往上推一级（bin/autostart.ps1 -> 包根)
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+# 开源版：用哪种 OneBot 实现。WW_ONEBOT = napcat（默认） / snowluma。
+$IMPL = if ($env:WW_ONEBOT) { $env:WW_ONEBOT.ToLower() } else { 'napcat' }
 # 开源版：NapCat 装在哪由你自己填（或先设环境变量 WW_NAPCAT）
 $NAP  = if ($env:WW_NAPCAT) { $env:WW_NAPCAT } else { 'C:\NapCat' }
+# 开源版：SnowLuma 装在哪由你自己填（或先设环境变量 WW_SNOWLUMA）
+$SL   = if ($env:WW_SNOWLUMA) { $env:WW_SNOWLUMA } else { 'C:\SnowLuma' }
+$SL_PORT = if ($env:WW_SNOWLUMA_PORT) { [int]$env:WW_SNOWLUMA_PORT } else { 5099 }
+# 开源版：QQ 可执行文件与「机器人号专用 profile」。
+#   QQ_EXE 留空 = 从正在运行的 QQ.exe 里自己找；QQ_PROF 默认放在包根下的 QQ-Profile。
+#   为什么机器人号要单独一个 profile：同一个 QQ 客户端只能登一个号，
+#   主人自己的号和机器人号必须各开一个实例，否则注入错号 = 拿主人的身份说话。
+$QQ_EXE  = if ($env:WW_QQ) { $env:WW_QQ } else { '' }
+$QQ_PROF = if ($env:WW_QQ_PROF) { $env:WW_QQ_PROF } else { Join-Path $ROOT 'QQ-Profile' }
 # 开源版：node 路径优先用环境变量 WW_NODE，其次 PATH 里的 node（不写死某台机器的安装位置）
 $NODE = if ($env:WW_NODE) { $env:WW_NODE } else { (Get-Command node -ErrorAction SilentlyContinue).Source }
 $LOG  = Join-Path $ROOT 'logs\autostart.log'
@@ -106,11 +117,86 @@ if (-not $Delevated) {
 Say '===== 开机自启开始 ====='
 Start-Sleep -Seconds 10
 
-# 1) NapCat + QQ
+# 1) OneBot 实现 + QQ
 if (Test-Port 3001) {
-  Say 'OneBot 3001 已在监听，跳过 NapCat'
+  Say 'OneBot 3001 已在监听，跳过启动 OneBot 实现'
+} elseif ($IMPL -eq 'snowluma') {
+  # 【SnowLuma 和 NapCat 差别很大，别照抄 NapCat 的做法】
+  #   · SnowLuma 不启动 QQ，它往「已经在跑的 QQ.exe」注入 DLL，所以必须先有 QQ。
+  #   · 机器人号要单独用一个 profile 目录开第二个实例，别去注入主人自己的号。
+  #   · SnowLuma 进程必须是 Medium 完整性，否则注入 Medium 的 QQ 会被 No-Write-Up 拒绝；
+  #     所以它**不能**放在带 Low SACL 的目录下（例如 DSH 沙箱工作区）。
+  #   · 起来了也不会自动注入（runtime.json 里 hookAutoLoad=false），要 POST 一次
+  #     /api/processes/<pid>/load —— 由 bin\snowluma-inject.mjs 做这一步，并核对账号。
+  Say ('OneBot 实现：SnowLuma（' + $SL + '）')
+
+  # 1a) 机器人 QQ 实例（用独立 profile，避免和主人那个冲突）
+  $qqMain = @(Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" -ErrorAction SilentlyContinue |
+              Where-Object { $_.CommandLine -notmatch '--type=' })
+  $hasBotQQ = @($qqMain | Where-Object { $_.CommandLine -match [regex]::Escape($QQ_PROF) }).Count -gt 0
+  if ($hasBotQQ) {
+    Say '机器人 QQ 实例已在跑'
+  } elseif ($QQ_EXE -and (Test-Path $QQ_EXE)) {
+    Say ('启动机器人 QQ 实例（profile=' + $QQ_PROF + '）')
+    try {
+      Start-Process -FilePath $QQ_EXE -ArgumentList ('--user-data-dir=' + $QQ_PROF) -WindowStyle Hidden
+      for ($i = 0; $i -lt 30; $i++) {
+        $n = @(Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" -ErrorAction SilentlyContinue |
+               Where-Object { $_.CommandLine -match [regex]::Escape($QQ_PROF) }).Count
+        if ($n -gt 0) { break }
+        Start-Sleep -Seconds 1
+      }
+    } catch { Say ('机器人 QQ 启动失败：' + $_.Exception.Message) }
+  } else {
+    Say ('没有指定 QQ 路径（WW_QQ），也不见在跑的 QQ 实例 —— 需要人工登录机器人号')
+  }
+
+  # 1b) SnowLuma 本体
+  if (-not (Test-Path (Join-Path $SL 'node.exe'))) {
+    Say ('找不到 SnowLuma：' + $SL + '（设 WW_SNOWLUMA 指到它的目录）')
+  } else {
+    Say '启动 SnowLuma'
+    try {
+      Start-Process -FilePath (Join-Path $SL 'node.exe') `
+                    -ArgumentList ((Join-Path $SL 'index.mjs')) `
+                    -WorkingDirectory $SL -WindowStyle Hidden
+    } catch { Say ('SnowLuma 启动失败：' + $_.Exception.Message) }
+    for ($i = 0; $i -lt 45; $i++) {
+      if (Test-Port $SL_PORT) { break }
+      Start-Sleep -Seconds 2
+    }
+    Say ('SnowLuma WebUI ' + $SL_PORT + ': ' + (Test-Port $SL_PORT))
+  }
+
+  # 1c) 注入机器人 QQ，并核对账号
+  # 只注入「用 --user-data-dir=$QQ_PROF 启动的那个进程」，绝不注入主人自己的号。
+  $botPid = 0
+  for ($i = 0; $i -lt 30; $i++) {
+    $row = Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" -ErrorAction SilentlyContinue |
+           Where-Object { $_.CommandLine -notmatch '--type=' -and $_.CommandLine -match [regex]::Escape($QQ_PROF) } |
+           Select-Object -First 1
+    if ($row) { $botPid = [int]$row.ProcessId; break }
+    Start-Sleep -Seconds 2
+  }
+  if ($botPid -gt 0) {
+    Say ('注入机器人 QQ：PID ' + $botPid)
+    try {
+      $out = & $NODE (Join-Path $ROOT 'bin\snowluma-inject.mjs') --pid $botPid 2>&1
+      foreach ($line in $out) { Say ('  ' + $line) }
+    } catch { Say ('注入失败：' + $_.Exception.Message) }
+  } else {
+    Say ('没找到机器人 QQ 实例（profile=' + $QQ_PROF + '），跳过注入 —— 需要人工登录')
+  }
+
+  # 1d) 等 OneBot 端口
+  for ($i = 0; $i -lt 60; $i++) {
+    if (Test-Port 3001) { break }
+    Start-Sleep -Seconds 2
+  }
+  Say ('OneBot 3001: ' + (Test-Port 3001))
 } else {
-  Say '启动 NapCat（launcher.bat）'
+  # NapCat：它自己会拉起 QQ 并登录，不需要注入
+  Say ('启动 NapCat（launcher.bat）：' + $NAP)
   try {
     Start-Process -FilePath (Join-Path $NAP 'launcher.bat') -WorkingDirectory $NAP -WindowStyle Hidden
   } catch { Say ('NapCat 启动失败：' + $_.Exception.Message) }

@@ -1,4 +1,4 @@
-﻿# 登记开机自启（登录 Windows 后自动拉起 NapCat/QQ + 观澜 + 控制面板）。
+﻿# 登记开机自启（登录 Windows 后自动拉起 机器人QQ/OneBot收发端 + 观澜 + 控制面板）。
 # 必须管理员权限运行（由 install-autostart.bat 负责提权，本脚本只检查、不自行提权）。
 $ErrorActionPreference = 'Stop'
 
@@ -74,6 +74,6 @@ if ($actArg -notmatch [regex]::Escape($target)) {
   exit 6
 }
 
-Say '安装完成：以后登录 Windows 会自动拉起 NapCat + 观澜 + 控制面板。'
+Say '安装完成：以后登录 Windows 会自动拉起 机器人QQ + OneBot收发端 + 观澜 + 控制面板。'
 Say '取消自启：schtasks /Delete /TN "WhaleKit-Autostart" /F'
 exit 0

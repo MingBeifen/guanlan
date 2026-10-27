@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "本地向量记忆：编码 + 检索试验田",
+  "description": "观澜的本地向量记忆：编码 + 检索试验田",
   "dependencies": {
     "@huggingface/transformers": "^4.3.1"
   }

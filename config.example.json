@@ -12,6 +12,16 @@
     "maxSteps": 40,
     "maxTokensPerTurn": 3000000,
     "dreamEnabled": true,
+    "memoryOpen": true,
+    "vectorMemory": true,
+    "vectorKeywordFallback": true,
+    "vectorTopK": 3,
+    "vectorMinScore": 0.38,
+    "fishWarn": true,
+    "voiceEnabled": false,
+    "voiceDailyLimit": 80,
+    "voiceInMaxSeconds": 90,
+    "autoFallback": false,
     "maxStickersPerReply": 2,
     "syncFavorites": true,
     "syncFavoritesEveryMs": 86400000,
@@ -28,17 +38,45 @@
     "fishRewrite": false,
     "newsEnabled": true,
     "dailySummarySend": true,
-    "summaryEveryMsgs": 30
+    "summaryEveryMsgs": 30,
+    "firstWakeWindowMin": 10,
+    "profileBatchSize": 6,
+    "longTailTokens": 2000000,
+    "longBubble": 150,
+    "quoteGapMsgs": 3,
+    "quoteGapMs": 120000,
+    "voiceMaxPerReply": 2,
+    "dreamKeepDays": 30,
+    "cardMaxPerDay": 80,
+    "overlayMaxPerKind": 8,
+    "overlayInjectPerKind": 2,
+    "idleStopSteps": 3,
+    "egressAudit": true,
+    "egressAuditDir": "",
+    "holdReply": true,
+    "holdQuietMs": 4000,
+    "holdMaxMs": 25000,
+    "holdMaxMsgs": 4,
+    "holdMaxChars": 300,
+    "continuationMs": 60000,
+    "continuationMaxChars": 12
   },
-  "napcat": {
+  "onebot": {
     "wsHost": "ws://127.0.0.1:3001",
     "token": ""
+  },
+  "snowluma": {
+    "webuiHost": "http://127.0.0.1:5099",
+    "user": "admin",
+    "password": "",
+    "botUin": 0
   },
   "group": {
     "enabled": false,
     "allow": [],
     "talkAllow": [],
-    "blockUsers": []
+    "blockUsers": [],
+    "followUpMs": 4000
   },
   "dsh": {
     "exe": "",

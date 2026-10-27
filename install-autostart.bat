@@ -28,7 +28,7 @@ echo.
 if not "%RC%"=="0" (
   echo [失败] 安装未完成，错误码 %RC%。日志：logs\install-autostart.log
 ) else (
-  echo [完成] 以后登录 Windows 会自动拉起 NapCat + 机器人 + 控制面板。
+  echo [完成] 以后登录 Windows 会自动拉起 机器人QQ + OneBot收发端 + 观澜 + 控制面板。
 )
 pause
 exit /b %RC%

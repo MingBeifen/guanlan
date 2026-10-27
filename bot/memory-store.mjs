@@ -53,6 +53,10 @@ const RATE = { core: 0, long: 0.5, mid: 2, short: 5 };
 const FLOOR = { core: 0, long: 55, mid: 20, short: 2 };
 const COLD_BELOW = 12;
 
+// 当天小结的分数上限（2026-10-27 修 D2）：mid 线是 45，卡在 44 就永远待在短期层。
+// 它是「今天的事」，不该因为被想起几回就升格成长期结论。
+const DAILY_SHORT_MAX = 44;
+
 // 写入合并的门槛在「像不像」那一节里（2026-10-23 重划）：够像就并，半像挂着夜里判
 const QUEUE_SIM = 0.4;
 const MAX_LINKS = 6;
@@ -682,6 +686,25 @@ function normalize(it) {
     updatedAt: Number(it.updatedAt) || now,
     lastUsedAt: Number(it.lastUsedAt) || 0,
     hits: Number(it.hits) || 0,
+    // 【2026-10-27 修 hits 失真（A 档）】原来只有一个 hits，面板写「用过 N 次」，
+    // 但它实际数的是「这条被拼进提示词的次数」（buildBlocks 的 usedIds），
+    // 不是「真正用上了几次」。而且 touch() 里 hits += 1 没有跟那一句 +2 的 20 小时节流，
+    // 于是每轮只要被选中就 +1 —— 实测 199 条里 hits 中位 0、p90 471、最高 1003，
+    // 60% 是 0。这个数既不代表「用过」，也不代表「重要」，纯粹是注入次数。
+    // 现在拆成两个字段：injected = 拼进过提示词几次（= 旧 hits 的真实语义）；
+    // used = 真正被引用/用上几次（目前没有可靠信号，先留 0，不给假数据）。
+    injected: Number(it.injected ?? it.hits) || 0,
+    used: Number(it.used) || 0,
+    // 【2026-10-27 修淡忘从未真正生效】decayAll 原来用 Math.max(updatedAt, lastUsedAt)
+    // 算「多久没碰过」，可这两个字段都会被 touch() 每轮无条件刷新（:918/:925），
+    // 连 decayAll 自己结算完也写 it.updatedAt = now —— 等于每次结算都把计时器清零，
+    // 所以 days 永远 < 1、`if (days < 1) continue` 永远跳过。
+    // 实测：177 条 active 里 99.4% 的 days < 1，24 小时只降过 3 条各 1 分。
+    // 修法：给结算单独开一个只由 decayAll 写的锚点 lastDecayAt，谁都不许碰。
+    lastDecayAt: Number(it.lastDecayAt) || 0,
+    // 攒零头用的：long 每天只该掉 0.5 分，可分数是整数，原来 Math.round(0.5) = 1
+    // 变成每天实扣 1 分（是应扣的 2 倍）。这里把不足 1 分的零头攒着，够了再扣。
+    decayDebt: Number(it.decayDebt) || 0,
     // 条目互联（2026-10-23）：像但没并到一起的互相挂着，检索到一条能顺带想起另一条
     links: Array.isArray(it.links) ? [...new Set(it.links.map(String))].filter(Boolean).slice(0, MAX_LINKS) : [],
     // 新旧撞车：新的这条顶掉了哪些旧说法；旧那条留 version，标 superseded + 被谁顶的
@@ -890,6 +913,18 @@ export function removeItem(id) {
 }
 
 // 被检索到/被拼进提示词：加一点分，记一次用到（淡忘会慢下来）
+//
+// 【2026-10-27 重写，B 档 + A 档】
+// 旧行为：20 小时外 +2 定值；hits += 1（没节流）；每次无条件写 lastUsedAt / updatedAt。
+// 三个问题：
+//   ① 一次想起和十次想起一个待遇（节流把频率信息全吞了），不是 Hebb 强化；
+//   ② hits 数的是「被拼进提示词几次」，面板却写「用过 N 次」——语义是错的；
+//   ③ 无条件刷 updatedAt，把 decayAll 的计时器清零了（衰减从来不生效的根因）。
+// 现在：
+//   · injected 只记「拼进提示词几次」，used 留给真正的「引用」（现在没有可靠信号，不编）；
+//   · 不再碰 lastDecayAt —— 那是 decayAll 独占的结算锚点，碰了衰减就又停了；
+//   · 「想起来就不容易忘」改成让 decayAll 读 lastUsedAt 判断这段时间有没有被想起，
+//     而不是靠刷新时间戳骗过衰减。这样信号是真的，语义也是对的。
 export function touch(ids) {
   if (!ids?.length) return 0;
   const store = readStore();
@@ -908,12 +943,26 @@ export function touch(ids) {
       it.status = "active";
       if (it.score < COLD_BELOW) it.score = clampScore(COLD_BELOW + 8);
     }
-    // 20 小时内被用过就不再重复加分，免得天天开口就把分数顶满
-    if (now - it.lastUsedAt > 20 * 3600e3) {
-      it.score = clampScore(Math.min(96, it.score + 2));
+    // 20 小时内被用过就不再重复加分，免得天天开口就把分数顶满。
+    // 20 小时这个门限保留（它挡的是「一天最多加一次」），频率信息由 decayAll 那边用。
+    // 【2026-10-27 修 D2：当天小结不许加分】
+    // 「当天小结」的 id 是 `short:<会话>:<日期>`，它的分数本来就该钉在短期层
+    // （45 是 mid 线）。可 touch() 的 +2 会让它 40 → 42 → 44 → 46，
+    // 一次跨过 mid 线就再也不是「短期记忆」了——实测 10-25、10-26 那三条当天小结
+    // 分别停在 46 分、层是 mid，短期层因此只剩 9 条、其中 3 条还是 10-23/24 的老账。
+    // 小结是「当天的事」，它不该因为被想起几回就升格成长期结论，所以下面单列一条：
+    // 这类条目不参与加分，只在冷藏时被救回来（救回来那步在上面，不冲突）。
+    const isDailyShort = it.id.startsWith("short:");
+    if (!isDailyShort && now - it.lastUsedAt > 20 * 3600e3) {
+      // 加分也不再是死板的 +2：隔得越久再被想起，说明这条越经得住忘，给得多一点。
+      // 实测过的上限——原来按「+6 每天」算，core 会从 23 条涨到 143 条（core 只进不出），
+      // 所以这里封在 +2~+4，且到 core 线（88）就停，不让它自己把永久层撑爆。
+      const gapDays = (now - (it.lastUsedAt || it.createdAt)) / 86400000;
+      const gain = Math.min(4, 2 + Math.floor(gapDays / 7));
+      if (it.score < 88) it.score = clampScore(Math.min(96, it.score + gain));
     }
     it.lastUsedAt = now;
-    it.hits += 1;
+    it.injected += 1;
     it.layer = layerOf(it.score);
     it.updatedAt = now;
     Object.assign(raw, normalize(it));
@@ -924,6 +973,29 @@ export function touch(ids) {
 }
 
 // 淡忘：按"多久没碰过"降分；分数掉到层外就自动换层，跌破 12 冷藏（不再进提示词，面板里还在）
+//
+// 【2026-10-27 重写：这条从上线起就没真正跑过，这是本轮最深的发现】
+// 原来算 idle 用 Math.max(updatedAt, lastUsedAt)，可这两个字段：
+//   · touch() 每轮无条件刷（:948/:951）——只要这一轮她被问到、这条被拼进提示词就刷新；
+//   · decayAll() 自己结算完也写 it.updatedAt = now（:987）——**每次结算都把计时器清零**。
+// 结果 days 永远 < 1，`if (days < 1) continue` 把所有人跳过。
+// 证据不是推断：
+//   · logs 里「记忆淡忘」确实出现过 23 次（10-25T16:02 ~ 10-26T17:15），但每次只降 1~38 条；
+//   · 24 小时内分数真降过的只有 3 条、各降 1 分；
+//   · 159 条可衰减条目里 idle ≥ 1 天的数量 = **0**，而按 createdAt 算是有 135 条 ≥ 1 天的。
+// 所以 RATE / FLOOR / COLD_BELOW 那套参数一直贴着「从没生效」，真正起作用的只有 cap 截断。
+//
+// 修法四条：
+//   ① 结算锚点换成 **lastDecayAt**（只由本函数写，谁都不许碰）——第一次跑时回落到 createdAt，
+//      这样「入库多久没被结算过」是真实的时间，不会被任何一次读写抹掉；
+//   ② 结算后写 lastDecayAt = now，而不是写 updatedAt —— updatedAt 保留「内容最后被动过」的原义；
+//   ③ 首轮不追溯全额积压：老库按 createdAt 算有的已经 6 天没结算，按 RATE=5 一天就是 -30，
+//      会把一批还好好的短期记忆直接拍进冷藏。实测回放：不封顶首轮换层 15 条、冷藏 1 条；
+//      封顶 1 天则换层 5 条、冷藏 0 条 —— 所以首轮（lastDecayAt = 0 的）按 1 天结算一次就停；
+//   ④ long 的 0.5/天 用 decayDebt 攒零头：原来 Math.round(0.5)=1，实际每天扣 1 分（2 倍速），
+//      现在不足 1 分的存进 decayDebt，攒够再扣，速率才是参数写的那个数。
+const FIRST_DECAY_CAP_DAYS = 1;
+
 export function decayAll(now = Date.now()) {
   const store = readStore();
   let changed = 0;
@@ -931,23 +1003,30 @@ export function decayAll(now = Date.now()) {
   for (const raw of store.items) {
     const it = normalize(raw);
     if (it.status === "cold" || it.status === "superseded" || it.pinned) continue;
-    const last = Math.max(it.updatedAt, it.lastUsedAt);
-    const days = (now - last) / 86400000;
-    if (days < 1) continue;
     const rate = RATE[it.layer] ?? 0;
     if (!rate) continue;
-    const drop = Math.max(1, Math.round(rate * days));
+    // 「多久没结算过」：只认 lastDecayAt，没结算过的从入库时刻算
+    const anchor = it.lastDecayAt || it.createdAt || now;
+    let days = (now - anchor) / 86400000;
+    if (it.lastDecayAt === 0) days = Math.min(FIRST_DECAY_CAP_DAYS, days); // 首轮封顶
+    if (days <= 0) continue;
     const beforeScore = it.score;
     const beforeLayer = it.layer;
     const beforeStatus = it.status;
-    it.score = Math.max(FLOOR[it.layer] ?? 1, it.score - drop);
+    // 攒零头：应扣的分先记成小数，攒够 1 分才真扣，这样 long 的 0.5/天 才真是 0.5
+    const owed = it.decayDebt + rate * days;
+    const drop = Math.floor(owed);
+    it.decayDebt = Math.round((owed - drop) * 1000) / 1000;
+    if (drop > 0) it.score = Math.max(FLOOR[it.layer] ?? 1, it.score - drop);
     it.layer = layerOf(it.score);
     if (it.score < COLD_BELOW) {
       it.status = "cold";
       it.layer = "short";
       cold.push(it.text.slice(0, 24));
     }
-    it.updatedAt = now;
+    // 结算锚点前移（**不碰 updatedAt**：那个字段的意思是「内容最后被动过」，
+    // 被淡忘降了分不等于内容变了，混用就是这次这个 bug 的来源）
+    it.lastDecayAt = now;
     Object.assign(raw, normalize(it));
     // 分数降了也要落盘：只在换层时写的话，分数变了文件里还是旧分，
     // 面板和提示词排序会一直滞后（2026-10-23 修）。
@@ -1034,6 +1113,13 @@ export function buildBlocks(key, opts = {}) {
       (a, b) =>
         b.score - a.score ||
         ownRank(a.key, key) - ownRank(b.key, key) ||
+        // 【2026-10-27 结论：短期层同分时**不要**改成「晚的在前」】
+        // 拆行以后同一天的 5~6 块分数完全一样（都是 40），它们的 updatedAt 又都继承自
+        // 原来那条整篇、彼此相同，排序确实退化成「谁在数组里靠前谁先进」。
+        // 我一度想改成按行号倒序（后发生的事优先），但看了小结文件的实际结构就撤回了：
+        // 她写小结时**第一行常是「还欠着…」这类未结事项**（例：10-24 首行就是
+        // 「还欠着：昨晚 22:25、23:28 丢的两轮找不回」）。倒序会正好把这条挤出 cap，
+        // 等于让她把没办完的事忘掉。维持按原顺序（从当天开头）截断更安全。
         b.updatedAt - a.updatedAt,
     );
   const used = [];
@@ -1148,54 +1234,117 @@ export function addDayNotes(key, day, bullets, score = 62) {
   );
 }
 
-// 当天小结：同一会话只留一条，随小结重写
+// 当天小结：同一会话同一个日期，按「一件事一条」存。
+//
+// 【2026-10-27 修 D1：原来整篇小结压成一条】
+// 旧行为把 1200 字的当天小结整条塞进库，而 short 层的 cap 是 1500 字——
+// **一条就占了 80%，短期层等于只能装得下一条**。实测：short 层 9 条里 6 条是当天小结，
+// 每条 1200 字，一次提示词只装得进 1~2 条，剩下的全被截断。
+// 改成按行拆（小结文件本来就是「一件事一行」）：实测 5 行的小结拆成 5 条、
+// 平均 240 字，1600 字的 cap 能装进 6 条左右。
+// 这也和向量库的口径对齐了——那边早就按 320 字切块，理由是「一件事一块才查得准」，
+// 记忆库这边一直是整篇糊成一坨。
 export function setSessionShort(key, day, text) {
   const store = readStore();
-  const id = `short:${key}:${day}`;
-  // 小结文件是「- 」行格式；进库时去掉行首符号和空行，拼成一条
-  const body = String(text || "")
+  const base = `short:${key}:${day}`;
+  // 小结文件是「- 」行格式；进库时去掉行首符号和空行
+  const lines = String(text || "")
     .split("\n")
     .map((l) => l.replace(/^[-*·•]\s*/, "").trim())
-    .filter((l) => l && !/^[-–—]$/.test(l))
-    .join("\n")
-    .slice(0, 1200);
-  // 小结每行本来就带 〔源：…〕（whale-bot 写文件前挂过），以前只留在正文里，
-  // cite 字段一直是空的。这里抽出来填上；正文照旧保留——一行一处出处，
-  // 位置就是逐句的，比并成一句更准。
-  const picked = pickCite(key, day, body);
-  const it = normalize({
-    id,
-    key,
-    layer: "short",
-    score: 40,
-    day,
-    source: "short",
-    text: body,
-    cite: picked.cite,
-    citeKind: picked.citeKind,
+    .filter((l) => l && !/^[-–—]$/.test(l));
+  // 每行截到 600 字：单行再长就该自己拆了，但别让一行把整层 cap 吃掉
+  //
+  // 【2026-10-27 补：还要按句号二次拆】
+  // 光按「行」拆不够——实测旧的 10-24/10-25 两天小结各是**一整行 1200 字**（不是多行），
+  // 拆完还是一条 600 字的巨块，加上排序里它分高（42）排在最前，照样独占 40% 的 short cap。
+  // 而且「一件事一块」这个理由对句子同样成立：1200 字的行里本来就有七八件事。
+  // 所以对超长的行再按「。」「；」切成句子段、拼到 ~260 字一块为止
+  // （260 是向量库那边的切块口径，对齐了检索才好命中）。
+  const rawParts = lines.flatMap((l) => {
+    if (l.length <= 320) return [l];
+    const sents = l.split(/(?<=[。；！？])/).filter(Boolean);
+    const out = [];
+    let cur = "";
+    for (const s of sents) {
+      if (cur && cur.length + s.length > 300) {
+        out.push(cur);
+        cur = s;
+      } else cur += s;
+    }
+    if (cur) out.push(cur);
+    return out;
   });
-  const idx = store.items.findIndex((x) => x.id === id);
-  if (idx >= 0)
-    store.items[idx] = normalize({
-      ...it,
-      createdAt: store.items[idx].createdAt,
-      score: Math.max(store.items[idx].score ?? 40, 40),
+  const parts = rawParts.map((l) => l.slice(0, 320)).filter((l) => l.length >= 4);
+  // 一条都没有就什么都不做（别把空小结写成一条空记忆）
+  if (!parts.length) return null;
+  // 【2026-10-27 补：当天小结的分数要随日期递减】
+  // 原来是写死 40，可旧的小结一旦被 touch 过就会爬上去（实测 10-24 那批到了 42），
+  // 而 42 > 40 → **旧小结永远压在今天的前面**，short 层 cap 只有 1500 字，
+  // 全被三天前的事占满，今天发生的事一条都进不去。这跟「短期层该记住最近」正好相反。
+  // 所以按「离今天几天」给分：今天是 40，每老一天 −2，最低 30。
+  // 这样新的一天天然排在前面，旧的自然往后沉，不需要额外排序逻辑。
+  const baseScore = (() => {
+    const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ""));
+    if (!d) return 40;
+    const dayMs = Date.UTC(+d[1], +d[2] - 1, +d[3]);
+    const now = new Date();
+    const todayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    // 用 UTC 日期对齐（day 本身就是北京逻辑日，两边都按「日」取整，差几小时不影响排序）
+    const ageDays = Math.round((todayMs - dayMs) / 86400000);
+    return Math.max(30, 40 - Math.max(0, ageDays) * 2);
+  })();
+  // 逐行挂着出处：小结每行本来就带 〔源：…〕（whale-bot 写文件前挂过），
+  // 位置就是逐句的，一行一处比整篇并成一句更准。
+  const nowItems = parts.map((body, i) => {
+    const picked = pickCite(key, day, body);
+    return {
+      id: `${base}#${i}`,
+      key,
+      layer: "short",
+      score: baseScore,
+      day,
+      source: "short",
+      text: body,
+      cite: picked.cite,
+      citeKind: picked.citeKind,
+    };
+  });
+  // 旧的整篇一条（id 没有 #n）：这次重写时删掉，它是拆分前的形态，
+  // 留着会和新拆出来的行重复计入 cap，等于白占地方。
+  store.items = store.items.filter((x) => x.id !== base);
+  const nowById = new Map(nowItems.map((x) => [x.id, x]));
+  // 已经存在的行：保留 createdAt（入库时刻才是真实的年龄锚点）和 lastDecayAt
+  for (const raw of store.items) {
+    const old = nowById.get(raw.id);
+    if (!old) continue;
+    old.createdAt = Number(raw.createdAt) || 0;
+    old.lastDecayAt = Number(raw.lastDecayAt) || 0;
+    old.decayDebt = Number(raw.decayDebt) || 0;
+    old.injected = Number(raw.injected) || 0;
+  }
+  const existing = new Set(store.items.map((x) => x.id));
+  for (const item of nowItems) {
+    if (!item.createdAt) delete item.createdAt; // 新的行，让 normalize 填 now
+    const norm = normalize({
+      ...item,
+      // 【2026-10-27 修 D2】44 封顶：mid 线是 45，卡在 44 就永远待在短期层。
+      // 当天小结是「今天的事」，不该因为被想起几回就升格成长期结论。
+      score: Math.min(DAILY_SHORT_MAX, 40),
     });
-  else store.items.push(it);
-  // 只留最近 3 天的当天小结
-  // （2026-10-23 修：原来按数组插入顺序删，重写旧日期会把中间新的挤掉。
-  //  改成按 day 排序，只留日期最新的 3 天；同一天只可能有一条，不用管并列。）
+    if (existing.has(norm.id)) {
+      const idx = store.items.findIndex((x) => x.id === norm.id);
+      store.items[idx] = norm;
+    } else store.items.push(norm);
+  }
+  // 只留最近 3 天的当天小结（按 day 分组，不再按条数——
+  // 现在是「一天多行」，按条数留会把某一天的行切掉一半）
   const shorts = store.items.filter((x) => x.id.startsWith(`short:${key}:`));
-  const keep = new Set(
-    [...shorts]
-      .sort((a, b) => String(b.day || "").localeCompare(String(a.day || "")))
-      .slice(0, 3)
-      .map((x) => x.id),
-  );
-  const drop = new Set(shorts.filter((x) => !keep.has(x.id)).map((x) => x.id));
+  const days = [...new Set(shorts.map((x) => String(x.day || "")))].sort().reverse().slice(0, 3);
+  const keepDay = new Set(days);
+  const drop = new Set(shorts.filter((x) => !keepDay.has(String(x.day || ""))).map((x) => x.id));
   if (drop.size) store.items = store.items.filter((x) => !drop.has(x.id));
   writeStore(store);
-  return it;
+  return nowItems[0] || null;
 }
 
 // ---------- 每晚巩固（2026-10-23）----------
